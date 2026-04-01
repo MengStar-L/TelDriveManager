@@ -1251,7 +1251,19 @@ class Tel2TelDriveService:
         self.refresh_qr_event.set()
         if self.password_future and not self.password_future.done():
             self.password_future.cancel()
-        await self._cleanup_client()
+        # 取消同步任务
+        if self.sync_task and not self.sync_task.done():
+            self.sync_task.cancel()
+            try:
+                await self.sync_task
+            except (asyncio.CancelledError, Exception):
+                pass
+        # 断开 Telegram 客户端连接，解除 run_until_disconnected 阻塞
+        if self.client:
+            try:
+                await self.client.disconnect()
+            except Exception:
+                pass
 
     async def request_reload(self):
         self.reload_event.set()
