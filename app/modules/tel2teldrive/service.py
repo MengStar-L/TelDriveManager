@@ -48,8 +48,8 @@ from telethon.tl.types import (
 BASE_DIR = Path(__file__).parent
 STATIC_DIR = BASE_DIR / "static"
 TEMPLATES_DIR = BASE_DIR / "templates"
-# 修改为指向项目根目录的 config.toml
-CONFIG_PATH = Path('d:/Code/TelDriveManager/config.toml')
+# 动态指向项目根目录的 config.toml
+CONFIG_PATH = BASE_DIR.parent.parent.parent / "config.toml"
 MAPPING_PATH = BASE_DIR / "file_msg_map.json"
 DEFAULT_LOG_FILE = BASE_DIR / "runtime.log"
 
