@@ -22,7 +22,7 @@ cd /opt
 git clone https://github.com/MengStar-L/TelDriveManager.git
 cd TelDriveManager
 
-# (可选) 推荐使用虚拟环境
+# 必须创建虚拟环境以隔离依赖
 python3 -m venv venv
 source venv/bin/activate
 
@@ -47,9 +47,12 @@ Type=simple
 # 如果有特定非 root 用户，可在此更改
 User=root
 WorkingDirectory=/opt/TelDriveManager
-# 如果使用了虚拟环境，请使用虚拟环境内的 python 路径
-# ExecStart=/opt/TelDriveManager/venv/bin/python main.py
-ExecStart=/usr/bin/python3 main.py
+
+# 默认使用虚拟环境内的 Python 启动 (推荐)
+ExecStart=/opt/TelDriveManager/venv/bin/python main.py
+
+# 如果在全系统安装了相关包，可以换用下方全局解释器启动：
+# ExecStart=/usr/bin/python3 main.py
 
 Restart=always
 RestartSec=5
