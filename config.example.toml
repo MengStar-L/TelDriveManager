@@ -1,0 +1,69 @@
+# ═══════════════════════════════════════════════════════════
+# TelDriveManager — 统一配置文件
+# ═══════════════════════════════════════════════════════════
+
+[server]
+port = 8888
+
+[auth]
+username = ""
+password = ""
+
+# ─── PikPak 离线下载 ───
+[pikpak]
+username = ""
+password = ""
+save_dir = "/"
+delete_after_download = true
+poll_interval = 3
+max_wait_time = 3600
+
+# ─── Aria2 下载引擎（共享） ───
+[aria2]
+rpc_url = "http://localhost"
+rpc_port = 6800
+rpc_secret = ""
+max_concurrent = 3
+download_dir = "/downloads"
+
+# ─── TelDrive 云盘（共享） ───
+[teldrive]
+api_host = ""
+access_token = ""
+channel_id = 0
+chunk_size = "500M"
+upload_concurrency = 4
+upload_dir = ""
+random_chunk_name = true
+target_path = "/"
+
+# ─── Aria2→TelDrive 自动上传 ───
+[upload]
+max_retries = 3
+auto_delete = true
+max_disk_usage = 0
+cpu_limit = 85
+
+# ─── Telegram 消息同步 ───
+[telegram]
+api_id = 0
+api_hash = ""
+channel_id = 0
+session_name = "tel2teldrive_session"
+sync_interval = 10
+sync_enabled = true
+max_scan_messages = 10000
+confirm_cycles = 3
+
+# ─── TelDrive 数据库（Telegram同步可选） ───
+[telegram_db]
+host = ""
+port = 5432
+user = ""
+password = ""
+name = "postgres"
+
+# ─── 日志 ───
+[log]
+buffer_size = 400
+file = "runtime.log"

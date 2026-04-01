@@ -1,0 +1,713 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>TelDriveManager 工具中心</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <script src="https://unpkg.com/@phosphor-icons/web"></script>
+    <style>
+        :root {
+            --bg-body: #eef2f5;
+            --bg-sidebar: #ffffff;
+            --bg-card: #ffffff;
+            --bg-input: #f4f6f8;
+            --bg-hover: #f1f5f9;
+            --text-primary: #1e293b;
+            --text-secondary: #64748b;
+            --text-dim: #94a3b8;
+            --accent: #0066ff;
+            --accent-light: #eff6ff;
+            --accent-hover: #0052cc;
+            --border: #e2e8f0;
+            --shadow-soft: 0 4px 20px rgba(0, 0, 0, 0.04);
+            --shadow-card: 0 8px 30px rgba(0, 0, 0, 0.03);
+            --success: #10b981;
+            --error: #ef4444;
+            --warning: #f59e0b;
+            --info: #3b82f6;
+            --radius-lg: 16px;
+            --radius-md: 12px;
+            --radius-sm: 8px;
+            --sidebar-w: 80px;
+        }
+
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: 'Inter', system-ui, sans-serif; background: var(--bg-body); color: var(--text-primary); height: 100vh; overflow: hidden; }
+
+        .layout { display: flex; height: 100vh; padding: 24px; gap: 32px; box-sizing: border-box; }
+
+        /* ── Sidebar (Floating) ── */
+        .sidebar { width: var(--sidebar-w); background: var(--bg-sidebar); border-radius: 40px; box-shadow: var(--shadow-card); display: flex; flex-direction: column; align-items: center; padding: 24px 0; gap: 16px; flex-shrink: 0; position: relative; z-index: 10; border: 1px solid rgba(0,0,0,0.02); }
+        .sidebar-logo { width: 48px; height: 48px; border-radius: 50%; background: linear-gradient(135deg, #0066ff, #0052cc); color: white; display: flex; justify-content: center; align-items: center; font-size: 24px; margin-bottom: 24px; box-shadow: 0 8px 16px rgba(0, 102, 255, 0.25); }
+        
+        .nav-item { width: 44px; height: 44px; border-radius: 50%; display: flex; justify-content: center; align-items: center; font-size: 24px; color: var(--text-secondary); cursor: pointer; transition: all 0.3s ease; position: relative; }
+        .nav-item:hover { background: var(--bg-hover); color: var(--accent); }
+        .nav-item.active { background: var(--accent-light); color: var(--accent); box-shadow: inset 0 0 0 1px rgba(0, 102, 255, 0.1); }
+        
+        /* Tooltip */
+        .nav-item::after { content: attr(data-tooltip); position: absolute; left: 100%; margin-left: 12px; background: #1e293b; color: white; padding: 6px 12px; border-radius: 6px; font-size: 13px; font-weight: 500; opacity: 0; pointer-events: none; transition: all 0.2s; white-space: nowrap; z-index: 100; transform: translateX(-5px); }
+        .nav-item:hover::after { opacity: 1; transform: translateX(0); }
+
+        .ws-dot { position: absolute; bottom: 8px; right: 8px; width: 10px; height: 10px; border-radius: 50%; background: var(--error); border: 2px solid white; transition: background 0.3s; }
+        .ws-dot.connected { background: var(--success); }
+
+        /* ── Main Area ── */
+        .main-wrapper { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
+        
+        
+        /* ── Setup Wizard ── */
+        .wizard-overlay { position: fixed; inset: 0; background: rgba(255,255,255,0.7); backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px); z-index: 1000; display: flex; align-items: center; justify-content: center; opacity: 0; pointer-events: none; transition: all 0.4s cubic-bezier(0.4, 0, 0.2, 1); }
+        .wizard-overlay.show { opacity: 1; pointer-events: auto; }
+        .wizard-card { width: 500px; background: white; border-radius: 24px; box-shadow: 0 24px 80px rgba(0,0,0,0.1); padding: 40px; display: flex; flex-direction: column; gap: 24px; transform: translateY(20px); transition: transform 0.4s cubic-bezier(0.4, 0, 0.2, 1); border: 1px solid rgba(0,0,0,0.05); }
+        .wizard-overlay.show .wizard-card { transform: translateY(0); }
+        .wizard-header { margin-bottom: 8px; text-align: center; }
+        .wizard-title { font-size: 24px; font-weight: 700; color: #1e293b; margin-bottom: 8px; }
+        .wizard-subtitle { font-size: 14px; color: #64748b; }
+        .wizard-step { display: none; flex-direction: column; gap: 16px; animation: wizardFadeIn 0.3s ease forwards; }
+        .wizard-step.active { display: flex; }
+        @keyframes wizardFadeIn { from { opacity: 0; transform: translateX(10px); } to { opacity: 1; transform: translateX(0); } }
+        .wizard-footer { display: flex; justify-content: space-between; margin-top: 16px; }
+        .wizard-dots { display: flex; gap: 8px; align-items: center; justify-content: center; margin-bottom: 24px; }
+        .wizard-dot { width: 8px; height: 8px; border-radius: 50%; background: #e2e8f0; transition: all 0.3s; }
+        .wizard-dot.active { background: #0066ff; width: 24px; border-radius: 4px; }
+
+        /* ── Pages ── */
+        .page-content { flex: 1; overflow-y: auto; padding-bottom: 20px; scrollbar-width: none; }
+        .page-content::-webkit-scrollbar { display: none; }
+        .page { display: none; animation: slideUp 0.3s cubic-bezier(0.16, 1, 0.3, 1); }
+        .page.active { display: block; }
+        @keyframes slideUp { from { opacity: 0; transform: translateY(16px); } to { opacity: 1; transform: translateY(0); } }
+
+        /* ── Card ── */
+        .card { background: var(--bg-card); border: 1px solid var(--border); border-radius: var(--radius-lg); overflow: hidden; box-shadow: var(--shadow-card); margin-bottom: 20px; }
+        
+        .card-header { padding: 16px 24px; border-bottom: 1px solid var(--border); display: flex; align-items: center; justify-content: space-between; }
+        .card-header h3 { font-size: 15px; font-weight: 600; display: flex; align-items: center; gap: 8px; }
+        .card-header h3 i { font-size: 20px; color: var(--accent); }
+        .card-body { padding: 24px; }
+
+        /* ── Buttons ── */
+        .btn { padding: 10px 20px; border: none; border-radius: 100px; font-family: inherit; font-size: 14px; font-weight: 600; cursor: pointer; transition: all 0.2s; display: inline-flex; align-items: center; justify-content: center; gap: 8px; line-height: 1; white-space: nowrap; flex-shrink: 0; }
+        .btn i { font-size: 18px; }
+        .btn-primary { background: var(--accent); color: white; box-shadow: 0 4px 12px rgba(0, 102, 255, 0.2); }
+        .btn-primary:hover { background: var(--accent-hover); transform: translateY(-1px); box-shadow: 0 6px 16px rgba(0, 102, 255, 0.3); }
+        .btn-primary:active { transform: translateY(0); box-shadow: 0 2px 8px rgba(0, 102, 255, 0.2); }
+        .btn-primary:disabled { opacity: 0.6; cursor: not-allowed; transform: none; }
+        
+        .btn-ghost { background: var(--bg-input); color: var(--text-primary); border: 1px solid var(--border); }
+        .btn-ghost:hover { background: var(--bg-hover); color: var(--accent); border-color: #cbd5e1; }
+        
+        .btn-sm { padding: 8px 16px; font-size: 13px; }
+        .btn-sm i { font-size: 16px; }
+
+        /* ── Inputs ── */
+        .form-input { width: 100%; padding: 12px 16px; background: var(--bg-input); border: 1px solid var(--border); border-radius: var(--radius-md); color: var(--text-primary); font-family: inherit; font-size: 14px; outline: none; transition: all 0.2s; box-shadow: inset 0 2px 4px rgba(0,0,0,0.01); }
+        .form-input:focus { background: white; border-color: var(--accent); box-shadow: 0 0 0 3px rgba(0, 102, 255, 0.1); }
+        .form-input::placeholder { color: var(--text-dim); }
+
+        .magnet-input { width: 100%; min-height: 240px; background: var(--bg-input); border: 1px solid var(--border); border-radius: var(--radius-md); color: var(--text-primary); font-family: 'Cascadia Code', 'Fira Code', monospace; font-size: 14px; padding: 16px; resize: vertical; outline: none; transition: all 0.2s; box-shadow: inset 0 2px 4px rgba(0,0,0,0.01); line-height: 1.6; }
+        .magnet-input:focus { background: white; border-color: var(--accent); box-shadow: 0 0 0 3px rgba(0, 102, 255, 0.1); }
+        .magnet-input::placeholder { color: var(--text-dim); }
+
+        .input-footer { display: flex; align-items: center; justify-content: space-between; margin-top: 16px; }
+        .input-hint { font-size: 13px; color: var(--text-secondary); display: flex; align-items: center; gap: 6px; }
+
+        /* ── File List ── */
+        .file-list-header { display: flex; align-items: center; justify-content: space-between; padding: 14px 24px; background: #f8fafc; border-bottom: 1px solid var(--border); border-radius: var(--radius-lg) var(--radius-lg) 0 0; }
+        .file-list-header label { font-size: 14px; cursor: pointer; display: flex; align-items: center; gap: 8px; font-weight: 500; }
+        .file-count { font-size: 13px; color: var(--text-secondary); font-weight: 500; }
+
+        .file-list { max-height: 400px; overflow-y: auto; scrollbar-width: thin; scrollbar-color: #cbd5e1 transparent; }
+        .file-row { display: flex; align-items: center; gap: 12px; padding: 14px 24px; border-bottom: 1px solid rgba(226, 232, 240, 0.8); font-size: 14px; transition: background 0.2s; cursor: pointer; }
+        .file-row:hover { background: var(--bg-hover); }
+        .file-row:last-child { border-bottom: none; }
+        
+        input[type="checkbox"] { width: 18px; height: 18px; border-radius: 4px; border: 1px solid var(--border); accent-color: var(--accent); cursor: pointer; transition: 0.2s; }
+        
+        .file-icon { flex-shrink: 0; font-size: 20px; color: var(--text-secondary); display: flex; align-items: center; justify-content: center; }
+        .file-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 500; color: var(--text-primary); }
+        .file-size { flex-shrink: 0; font-size: 13px; color: var(--text-secondary); font-family: monospace; }
+        .folder-row { background: var(--accent-light); color: var(--text-primary); }
+        .folder-row:hover { background: #e0f2fe; }
+        .folder-row .file-icon { color: var(--accent); }
+
+        .share-actions { display: flex; align-items: center; justify-content: space-between; padding: 16px 24px;}
+        .selected-info { font-size: 13px; color: var(--text-secondary); font-weight: 500; }
+        
+        /* ── Log Container ── */
+        .log-container { max-height: 450px; overflow-y: auto; scrollbar-width: thin; scrollbar-color: #cbd5e1 transparent; background: #1e293b; color: #f8fafc; border-radius: var(--radius-md); padding: 16px 24px; font-family: 'Cascadia Code', monospace; box-shadow: inset 0 4px 12px rgba(0,0,0,0.1); }
+        .log-empty { text-align: center; padding: 60px; color: #64748b; font-size: 14px; display: flex; flex-direction: column; align-items: center; gap: 12px; }
+        .log-empty i { font-size: 32px; opacity: 0.5; }
+        .log-entry { padding: 10px 0; border-bottom: 1px dashed rgba(255,255,255,0.1); font-size: 13px; display: flex; align-items: flex-start; gap: 12px; animation: fadeIn 0.3s ease; }
+        .log-entry:last-child { border-bottom: none; }
+        
+        .log-icon { flex-shrink: 0; font-size: 18px; }
+        .log-text { flex: 1; line-height: 1.6; }
+        .log-text .highlight { color: #38bdf8; font-weight: 600; }
+        .log-text .file-name { color: #fcd34d; }
+        .log-text .success { color: #34d399; }
+        .log-text .error { color: #f87171; }
+        .log-time { flex-shrink: 0; font-size: 11px; color: #64748b; margin-top: 2px; }
+
+        /* ── Tasks ── */
+        .task-list { max-height: 450px; overflow-y: auto; scrollbar-width: thin; }
+        .task-item { padding: 16px 24px; border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 16px; transition: background 0.2s; }
+        .task-item:hover { background: var(--bg-hover); }
+        .task-item:last-child { border-bottom: none; }
+        
+        .task-badge { padding: 4px 12px; border-radius: 100px; font-size: 11px; font-weight: 700; text-transform: uppercase; flex-shrink: 0; letter-spacing: 0.5px; }
+        .badge-running { background: var(--warning); color: white; box-shadow: 0 2px 8px rgba(245, 158, 11, 0.3); }
+        .badge-complete { background: var(--success); color: white; box-shadow: 0 2px 8px rgba(16, 185, 129, 0.3); }
+        .badge-error { background: var(--error); color: white; box-shadow: 0 2px 8px rgba(239, 68, 68, 0.3); }
+        
+        .task-name { flex: 1; font-size: 14px; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-primary); }
+        .task-progress { font-size: 14px; font-weight: 600; color: var(--text-secondary); width: 40px; text-align: right; }
+
+        /* ── Tests ── */
+        .test-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+        .test-card { background: white; border-radius: var(--radius-lg); padding: 24px; display: flex; align-items: center; gap: 20px; border: 1px solid var(--border); box-shadow: var(--shadow-soft); transition: transform 0.2s; }
+        .test-card:hover { transform: translateY(-2px); box-shadow: var(--shadow-card); }
+        
+        .test-icon-box { width: 56px; height: 56px; border-radius: 16px; display: flex; align-items: center; justify-content: center; font-size: 28px; }
+        .test-icon-box.pikpak { background: #eff6ff; color: #3b82f6; }
+        .test-icon-box.aria2 { background: #f0fdf4; color: #10b981; }
+        
+        .test-info h3 { font-size: 16px; font-weight: 600; margin-bottom: 4px; color: var(--text-primary); }
+        .test-info p { font-size: 13px; color: var(--text-secondary); display: flex; align-items: center; gap: 6px; }
+        .test-info p.ok { color: var(--success); font-weight: 500; }
+        .test-info p.fail { color: var(--error); font-weight: 500; }
+
+        /* ── Settings ── */
+        .settings-row { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; }
+        .settings-section { margin-bottom: 0; }
+        .field-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-top: 16px; }
+        .field-grid.cols-1 { grid-template-columns: 1fr; }
+        
+        .form-group { display: flex; flex-direction: column; gap: 8px; }
+        .form-group label { font-size: 13px; font-weight: 600; color: var(--text-secondary); }
+        
+        .toggle-row { display: flex; align-items: center; gap: 12px; font-size: 14px; font-weight: 500; color: var(--text-secondary); cursor: pointer; user-select: none; }
+        .toggle-switch { position: relative; width: 44px; height: 24px; flex-shrink: 0; }
+        .toggle-switch input { opacity: 0; width: 0; height: 0; }
+        .toggle-slider { position: absolute; inset: 0; background: #cbd5e1; border-radius: 24px; transition: 0.3s; box-shadow: inset 0 1px 3px rgba(0,0,0,0.1); }
+        .toggle-slider::before { content: ''; position: absolute; height: 18px; width: 18px; left: 3px; bottom: 3px; background: white; border-radius: 50%; transition: 0.3s cubic-bezier(0.175, 0.885, 0.32, 1.275); box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
+        .toggle-switch input:checked + .toggle-slider { background: var(--success); }
+        .toggle-switch input:checked + .toggle-slider::before { transform: translateX(20px); }
+
+        .settings-actions { display: flex; align-items: center; justify-content: flex-end; gap: 12px; margin-top: 24px; padding-top: 20px; border-top: 1px solid var(--border); }
+        .save-msg { font-size: 14px; color: var(--success); font-weight: 600; opacity: 0; transition: opacity 0.3s; display: flex; align-items: center; gap: 6px; }
+        .save-msg.show { opacity: 1; }
+
+        .spinner { width: 18px; height: 18px; border: 2px solid rgba(255,255,255,0.3); border-top-color: white; border-radius: 50%; animation: spin 0.8s linear infinite; display: inline-block; vertical-align: middle; }
+        .btn-ghost .spinner { border: 2px solid rgba(0,0,0,0.1); border-top-color: var(--accent); }
+
+        @keyframes spin { to { transform: rotate(360deg); } }
+        @keyframes fadeIn { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: translateY(0); } }
+
+        /* VIP Badge */
+        .vip-badge { display: inline-flex; align-items: center; gap: 4px; padding: 4px 10px; border-radius: 20px; font-size: 10px; font-weight: 700; letter-spacing: 0.5px; white-space: nowrap; }
+        .vip-badge.normal { background: rgba(59, 130, 246, 0.15); color: #3b82f6; border: 1px solid rgba(59, 130, 246, 0.3); }
+        .vip-badge.premium { background: rgba(245, 158, 11, 0.15); color: #fbbf24; border: 1px solid rgba(245, 158, 11, 0.3); }
+        .vip-badge.premium::before { content: "👑"; font-size: 10px; }
+        .account-row { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; width:100%;}
+        .account-label { font-size: 12px; color: var(--text-secondary); font-weight: 600; }
+        .storage-bar { height: 6px; background: var(--bg-input); border-radius: 3px; overflow: hidden; margin-top: 6px; width: 100%;}
+        .storage-bar-fill { height: 100%; border-radius: 3px; background: linear-gradient(90deg, #0066ff, #a78bfa); transition: width 0.5s ease; }
+        .storage-text { font-size: 11px; color: var(--text-dim); margin-top: 6px; width: 100%; text-align: left; }
+    </style>
+</head>
+<body>
+    <div class="layout">
+        <!-- Floating Sidebar -->
+        <nav class="sidebar">
+            <div class="sidebar-logo"><i class="ph-fill ph-rocket"></i></div>
+            
+                        <div class="nav-item active" data-page="magnet" data-tooltip="磁链解析" onclick="switchPage('magnet')">
+                <i class="ph ph-link"></i>
+            </div>
+            <div class="nav-item" data-page="share" data-tooltip="Pik分享" onclick="switchPage('share')">
+                <i class="ph ph-share-network"></i>
+            </div>
+            <div class="nav-item" data-page="rss" data-tooltip="RSS订阅" onclick="switchPage('rss')">
+                <i class="ph ph-rss"></i>
+            </div>
+            <div class="nav-item" data-page="tasks" data-tooltip="Pik离线任务" onclick="switchPage('tasks')">
+                <i class="ph ph-cloud-arrow-down"></i>
+            </div>
+            <div class="nav-item" data-page="progress" data-tooltip="Aria2下载推送" onclick="switchPage('progress')">
+                <i class="ph ph-list-dashes"></i>
+            </div>
+
+            <!-- Aria2TelDrive -->
+            <div class="nav-item" data-page="aria2teldrive" data-tooltip="Aria2 & TelDrive上传" onclick="switchPage('aria2teldrive')">
+                <i class="ph ph-hard-drives"></i>
+            </div>
+
+            <!-- Tel2TelDrive -->
+            <div class="nav-item" data-page="tel2teldrive" data-tooltip="Telegram监听推送" onclick="switchPage('tel2teldrive')">
+                <i class="ph ph-telegram-logo"></i>
+            </div>
+
+            <div class="nav-item" data-page="test" data-tooltip="连接自检" onclick="switchPage('test')">
+                <i class="ph ph-plugs-connected"></i>
+            </div>
+            
+            <div style="flex:1"></div>
+            
+            <div class="nav-item" data-page="settings" data-tooltip="全局配置" onclick="switchPage('settings')">
+                <i class="ph ph-gear-six"></i>
+            </div>
+            
+            <div class="nav-item" style="cursor:default" id="serviceStatusWrapper" data-tooltip="云端环境探测中...">
+                <i class="ph ph-hard-drives" id="serviceStatusIcon" style="color:var(--text-dim); transition:color 0.3s"></i>
+                <div class="ws-dot" id="serviceStatusDot"></div>
+            </div>
+            <div class="nav-item" style="cursor:default" data-tooltip="本地控制面板链路">
+                <i class="ph ph-wifi-high" id="wsIcon" style="color:var(--text-dim); transition:color 0.3s"></i>
+                <div class="ws-dot" id="wsDot"></div>
+            </div>
+            
+            <!-- Logout -->
+            <div class="nav-item" data-tooltip="安全退出" onclick="logout()" style="color:var(--error);">
+                <i class="ph ph-sign-out"></i>
+            </div>
+        </nav>
+
+        <!-- Main Workspace -->
+        <div class="main-wrapper">
+            <div class="page-content">
+                <!-- Magnet -->
+                <div class="page active" id="page-magnet">
+                    <div class="card">
+                        <div class="card-body">
+                            <textarea class="magnet-input" id="magnetInput" placeholder="输入磁力链接，支持粘贴多行..."></textarea>
+                            <div class="input-footer">
+                                <span class="input-hint"><i class="ph-fill ph-info"></i> 单链可以解析选择文件，多行直接全量并行下载。</span>
+                                <div style="display:flex; gap:12px;">
+                                    <button class="btn btn-ghost" id="parseBtn" onclick="parseMagnet()"><i class="ph ph-magnifying-glass"></i> 解析后选择</button>
+                                    <button class="btn btn-primary" id="submitBtn" onclick="submitMagnets()"><i class="ph ph-rocket-launch"></i> 一键推送</button>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <div class="card" id="magnetFileArea" style="display:none">
+                        <div class="card-header">
+                            <h3 id="magnetFileName"><i class="ph-fill ph-folder-open"></i> 文件树状图</h3>
+                        </div>
+                        <div class="card-body" style="padding:0">
+                            <div class="file-list-header">
+                                <label><input type="checkbox" id="magnetSelectAll" onchange="toggleMagnetSelectAll()"> 选中所有节点</label>
+                                <span class="file-count" id="magnetFileCount"></span>
+                            </div>
+                            <div class="file-list" id="magnetFileList"></div>
+                            <div class="share-actions">
+                                <div style="display:flex;align-items:center;gap:20px">
+                                    <span class="selected-info" id="magnetSelectedInfo">已选 0 个对象</span>
+                                    <label class="toggle-row">
+                                        <div class="toggle-switch"><input type="checkbox" id="magnetKeepStructure" checked><span class="toggle-slider"></span></div>
+                                        维持目录结构映射
+                                    </label>
+                                </div>
+                                <button class="btn btn-primary" id="magnetDownloadBtn" onclick="downloadMagnetFiles()"><i class="ph ph-download-simple"></i> 同步到 Aria2</button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Share -->
+                <div class="page" id="page-share">
+                    <div class="card">
+                        <div class="card-body">
+                            <div style="display:flex; gap:12px; margin-bottom: 24px;">
+                                <input class="form-input" type="text" id="shareLink" placeholder="输入 PikPak 分享链接...">
+                                <input class="form-input" style="width:180px" type="text" id="sharePassCode" placeholder="提取码">
+                                <button class="btn btn-primary" id="parseBtn" onclick="parseShareLink()"><i class="ph ph-magnifying-glass"></i> 解析</button>
+                            </div>
+                            
+                            <div id="shareFileArea" style="display:none; border:1px solid var(--border); border-radius:var(--radius-lg);">
+                                <div class="file-list-header">
+                                    <label><input type="checkbox" id="selectAll" onchange="toggleSelectAll()"> 全选节点</label>
+                                    <span class="file-count" id="fileCount"></span>
+                                </div>
+                                <div class="file-list" id="fileList"></div>
+                                <div class="share-actions">
+                                    <div style="display:flex;align-items:center;gap:20px;flex-wrap:wrap">
+                                        <span class="selected-info" id="selectedInfo">已选 0 个文件</span>
+                                        <label class="toggle-row">
+                                            <div class="toggle-switch"><input type="checkbox" id="shareKeepStructure" checked><span class="toggle-slider"></span></div>
+                                            结构映射
+                                        </label>
+                                        <label class="toggle-row">
+                                            <div class="toggle-switch"><input type="checkbox" id="shareRenameByFolder" onchange="reRenderShareFileList()"><span class="toggle-slider"></span></div>
+                                            层级重命名
+                                        </label>
+                                    </div>
+                                    <button class="btn btn-primary" id="downloadShareBtn" onclick="downloadShareFiles()"><i class="ph ph-cloud-arrow-down"></i> 执行下载</button>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- RSS -->
+                <div class="page" id="page-rss">
+                    <div class="card">
+                        <div class="card-body">
+                            <div style="display:flex; gap:12px; margin-bottom: 24px;">
+                                <input class="form-input" type="text" id="rssUrl" placeholder="输入目标 RSS 订阅源...">
+                                <button class="btn btn-primary" id="rssParseBtn" onclick="parseRSS()"><i class="ph ph-radar"></i> 扫描提取</button>
+                            </div>
+                            
+                            <div id="rssResultArea" style="display:none; border:1px solid var(--border); border-radius:var(--radius-lg);">
+                                <div class="card-header"><h3 id="rssFeedTitle"><i class="ph ph-feed"></i> RSS 流信息</h3></div>
+                                <div class="file-list-header">
+                                    <label><input type="checkbox" id="rssSelectAll" onchange="toggleRssSelectAll()"> 订阅全部</label>
+                                    <span class="file-count" id="rssCount"></span>
+                                </div>
+                                <div class="file-list" id="rssList"></div>
+                                <div class="share-actions">
+                                    <span class="selected-info" id="rssSelectedInfo">准备好下载项目</span>
+                                    <button class="btn btn-primary" id="rssDownloadBtn" onclick="downloadRssItems()"><i class="ph ph-download-simple"></i> 执行订阅下载</button>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Progress -->
+                <div class="page" id="page-progress">
+                    <div class="card">
+                        <div class="card-header">
+                            <h3><i class="ph ph-terminal-window"></i> 实时控制台诊断</h3>
+                            <button class="btn btn-ghost btn-sm" onclick="clearLog()"><i class="ph ph-trash"></i> 清理终端</button>
+                        </div>
+                        <div class="card-body" style="padding: 12px">
+                            <div class="log-container" id="logContainer">
+                                <div class="log-empty" id="logEmpty"><i class="ph ph-ghost"></i> 系统处于空闲状态...</div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Tasks -->
+                <div class="page" id="page-tasks">
+                    <div class="card">
+                        <div class="card-header">
+                            <h3><i class="ph ph-cloud-check"></i> 云端持久化拉取</h3>
+                            <button class="btn btn-ghost btn-sm" onclick="refreshStatus()"><i class="ph ph-arrows-clockwise"></i> 刷新同步</button>
+                        </div>
+                        <div class="card-body" style="padding:0">
+                            <div class="task-list" id="taskList">
+                                <div class="log-empty" style="padding:40px;"><i class="ph ph-tray"></i> 请点击刷新获取数据</div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                
+                <!-- Aria2TelDrive -->
+                <div class="page" id="page-aria2teldrive">
+                    <div class="card">
+                        <div class="card-header">
+                            <h3><i class="ph ph-hard-drives"></i> Aria2 与 TelDrive 队列同步</h3>
+                            <div class="page-actions" style="display:flex;gap:10px;">
+                                <button class="btn btn-ghost btn-sm" onclick="clearCompletedTasks()"><i class="ph ph-trash"></i> 清理已完成</button>
+                            </div>
+                        </div>
+                        <div class="card-body" style="padding:0">
+                            <div class="task-list" id="a2tdTaskList">
+                                <div class="log-empty" style="padding:40px;"><i class="ph ph-tray"></i> 队列空闲中</div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Tel2TelDrive -->
+                <div class="page" id="page-tel2teldrive">
+                    <div class="card">
+                        <div class="card-header">
+                            <h3><i class="ph ph-telegram-logo"></i> Telegram 监听中转服务</h3>
+                        </div>
+                        <div class="card-body">
+                            <div id="t2tdQrArea" style="text-align:center; padding: 20px 0;">
+                                <p style="margin-bottom: 20px; color: var(--text-secondary);">服务尚未登录或二维码获取中...</p>
+                                <img id="t2tdQrImg" src="" style="display:none; margin:0 auto; border-radius:12px; border:2px solid var(--border);" width="250">
+                                <form id="t2td2faForm" style="display:none; max-width:300px; margin: 20px auto 0;">
+                                    <div class="form-group">
+                                        <label>需要两步验证密码</label>
+                                        <input type="password" id="t2tdPassword" class="form-input" placeholder="输入云密码">
+                                    </div>
+                                    <button type="submit" class="btn btn-primary" style="margin-top:10px;width:100%;">提交密码</button>
+                                </form>
+                            </div>
+                            
+                            <div class="log-container" id="t2tdLogContainer" style="height: 300px; max-height: 300px; margin-top:20px;">
+                                <div class="log-empty" id="t2tdLogEmpty"><i class="ph ph-ghost"></i> 等待系统服务启动</div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+<!-- Test -->
+                <div class="page" id="page-test">
+                    <div style="display:flex;justify-content:flex-end;margin-bottom:16px;">
+                        <button class="btn btn-primary" id="testBtn" onclick="testConnection()"><i class="ph ph-activity"></i> 启动全量自检</button>
+                    </div>
+                    <div class="test-grid">
+                        <div class="test-card">
+                            <div class="test-icon-box pikpak" style="background:var(--accent-light);color:var(--accent)"><i class="ph-fill ph-cloud"></i></div>
+                            <div class="test-info" style="flex:1">
+                                <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:4px;">
+                                    <h3>PikPak 云盘桥接</h3>
+                                    <button class="btn btn-ghost btn-sm" style="padding:4px 10px; font-size:12px;" onclick="testSingle('pikpak')">测试此项</button>
+                                </div>
+                                <p id="pikpakStatus"><i class="ph ph-circle-dashed"></i> 等待命令发射</p>
+                            </div>
+                        </div>
+                        <div class="test-card">
+                            <div class="test-icon-box aria2" style="background:#ecfdf5;color:var(--success)"><i class="ph-fill ph-download-simple"></i></div>
+                            <div class="test-info" style="flex:1">
+                                <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:4px;">
+                                    <h3>Aria2 本地引擎</h3>
+                                    <button class="btn btn-ghost btn-sm" style="padding:4px 10px; font-size:12px;" onclick="testSingle('aria2')">测试此项</button>
+                                </div>
+                                <p id="aria2Status"><i class="ph ph-circle-dashed"></i> 等待命令发射</p>
+                            </div>
+                        </div>
+                        <div class="test-card">
+                            <div class="test-icon-box teldrive" style="background:#eff6ff;color:#3b82f6"><i class="ph-fill ph-hard-drives"></i></div>
+                            <div class="test-info" style="flex:1">
+                                <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:4px;">
+                                    <h3>TelDrive API 验证</h3>
+                                    <button class="btn btn-ghost btn-sm" style="padding:4px 10px; font-size:12px;" onclick="testSingle('teldrive')">测试此项</button>
+                                </div>
+                                <p id="teldriveStatus"><i class="ph ph-circle-dashed"></i> 等待命令发射</p>
+                            </div>
+                        </div>
+                        <div class="test-card">
+                            <div class="test-icon-box telegram" style="background:#f0f9ff;color:#0284c7"><i class="ph-fill ph-telegram-logo"></i></div>
+                            <div class="test-info" style="flex:1">
+                                <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:4px;">
+                                    <h3>Telegram 中转服务</h3>
+                                    <button class="btn btn-ghost btn-sm" style="padding:4px 10px; font-size:12px;" onclick="testSingle('telegram')">测试此项</button>
+                                </div>
+                                <p id="telegramStatus"><i class="ph ph-circle-dashed"></i> 等待命令发射</p>
+                            </div>
+                        </div>
+                        <div class="test-card">
+                            <div class="test-icon-box database" style="background:#f5f3ff;color:#8b5cf6"><i class="ph-fill ph-database"></i></div>
+                            <div class="test-info" style="flex:1">
+                                <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:4px;">
+                                    <h3>Postgres 数据库</h3>
+                                    <button class="btn btn-ghost btn-sm" style="padding:4px 10px; font-size:12px;" onclick="testSingle('database')">测试此项</button>
+                                </div>
+                                <p id="databaseStatus"><i class="ph ph-circle-dashed"></i> 等待命令发射</p>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                </div>
+
+                
+                <!-- Settings -->
+                <div class="page" id="page-settings">
+                    <div class="settings-row">
+                        <!-- System Authorization -->
+                        <div class="card">
+                            <div class="card-header"><h3><i class="ph-fill ph-lock-key"></i> 本地面板权限</h3></div>
+                            <div class="card-body">
+                                <div class="field-grid">
+                                    <div class="form-group"><label>管理员用户名</label><input class="form-input" type="text" id="cfgAuthUser" placeholder="admin"></div>
+                                    <div class="form-group"><label>管理员密码</label><input class="form-input" type="password" id="cfgAuthPass" placeholder="留空关闭强制登录"></div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- User Interface -->
+                        <div class="card">
+                            <div class="card-header"><h3><i class="ph-fill ph-computer-tower"></i> 应用进程容器</h3></div>
+                            <div class="card-body">
+                                <div class="field-grid">
+                                    <div class="form-group"><label>服务端口</label><input class="form-input" type="number" id="cfgServerPort" placeholder="8888"></div>
+                                    <div class="form-group"><label>数据持久化文件</label><input class="form-input" type="text" value="tasks.db" disabled></div>
+                                </div>
+                            </div>
+                        </div>
+                        
+                        <div class="card">
+                            <div class="card-header"><h3><i class="ph-fill ph-cloud"></i> PikPak 凭证与中转桥</h3></div>
+                            <div class="card-body">
+                                <div class="field-grid">
+                                    <div class="form-group"><label>身份标识 (Email)</label><input class="form-input" type="text" id="cfgPikpakUsername" placeholder="email@example.com"></div>
+                                    <div class="form-group"><label>访问密钥</label><input class="form-input" type="password" id="cfgPikpakPassword" placeholder="******"></div>
+                                </div>
+                                <div class="field-grid cols-1">
+                                    <div class="form-group"><label>云端隔离下载域</label><input class="form-input" type="text" id="cfgPikpakSaveDir" placeholder="/"></div>
+                                </div>
+                                <div style="margin-top:20px; padding-top:20px; border-top:1px solid var(--border)">
+                                    <label class="toggle-row" style="justify-content:space-between">
+                                        任务下发完成销毁云端文件
+                                        <div class="toggle-switch"><input type="checkbox" id="cfgPikpakDelete"><span class="toggle-slider"></span></div>
+                                    </label>
+                                </div>
+                            </div>
+                        </div>
+                        
+                        <div class="card">
+                            <div class="card-header"><h3><i class="ph-fill ph-engine"></i> Aria2 落盘服务调优</h3></div>
+                            <div class="card-body">
+                                <div class="field-grid">
+                                    <div class="form-group"><label>通讯端点 URL</label><input class="form-input" type="text" id="cfgAria2Url" placeholder="例如 http://localhost:6800/jsonrpc"></div>
+                                    <div class="form-group"><label>Secret Key</label><input class="form-input" type="password" id="cfgAria2Secret" placeholder="为空跳过认证"></div>
+                                </div>
+                                <div class="field-grid cols-1">
+                                    <div class="form-group"><label>本地输出域 (缺省跟随节点)</label><input class="form-input" type="text" id="cfgAria2Dir" placeholder="/downloads"></div>
+                                </div>
+                            </div>
+                        </div>
+                        
+                        <div class="card" style="grid-column: span 2/span 2">
+                            <div class="card-header"><h3><i class="ph-fill ph-hard-drives"></i> TelDrive 持久化上传</h3></div>
+                            <div class="card-body">
+                                <div class="field-grid">
+                                    <div class="form-group"><label>API Endpoint</label><input class="form-input" type="text" id="cfgTeldriveHost" placeholder="http://localhost:8080"></div>
+                                    <div class="form-group"><label>应用 Token</label><input class="form-input" type="password" id="cfgTeldriveToken" placeholder="获取于 Cookie"></div>
+                                    <div class="form-group"><label>同步频道 ID</label><input class="form-input" type="number" id="cfgTeldriveChannel" placeholder="0"></div>
+                                    <div class="form-group"><label>并发上传策略</label><input class="form-input" type="number" id="cfgTeldriveConcurrency" placeholder="4"></div>
+                                </div>
+                                <div style="margin-top:20px; padding-top:20px; border-top:1px solid var(--border)">
+                                    <label class="toggle-row" style="justify-content:space-between">
+                                        TelDrive 验证完成清洗本地缓存
+                                        <div class="toggle-switch"><input type="checkbox" id="cfgUploadAutoDelete" checked><span class="toggle-slider"></span></div>
+                                    </label>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <div class="card" style="background:transparent; border:none; box-shadow:none; padding:0; margin-top:-10px;">
+                        <div class="settings-actions">
+                            <span class="save-msg" id="saveMsg"><i class="ph-fill ph-check-circle"></i> 全局配置热更新部署</span>
+                            <button class="btn btn-ghost" onclick="loadConfig()"><i class="ph ph-arrow-u-up-left"></i> 回滚默认</button>
+                            <button class="btn btn-primary" id="saveBtn" onclick="saveConfig()"><i class="ph ph-floppy-disk"></i> 闪存同步</button>
+                        </div>
+                    </div>
+                </div>
+</div>
+        </div>
+    </div>
+
+    <script src="/static/app.js"></script>
+
+    <!-- Setup Wizard Overlay -->
+    <div id="setupWizard" class="wizard-overlay">
+        <div class="wizard-card">
+            <div class="wizard-header">
+                <div class="wizard-title">欢迎使用 TelDriveManager</div>
+                <div class="wizard-subtitle">看起来是第一次运行，让我们完成基础配置</div>
+            </div>
+            
+            <div class="wizard-dots">
+                <div class="wizard-dot active" id="dot1"></div>
+                <div class="wizard-dot" id="dot2"></div>
+                <div class="wizard-dot" id="dot3"></div>
+                <div class="wizard-dot" id="dot4"></div>
+            </div>
+
+            <!-- Step 1: PikPak -->
+            <div class="wizard-step active" id="wStep1">
+                <div class="field-grid cols-1">
+                    <div class="form-group">
+                        <label>PikPak 账号 / 邮箱</label>
+                        <input class="form-input" type="text" id="wPikUser" placeholder="填写您的绑定的邮箱或账号">
+                    </div>
+                    <div class="form-group">
+                        <label>PikPak 密码</label>
+                        <input class="form-input" type="password" id="wPikPass" placeholder="请填写内容">
+                    </div>
+                </div>
+                <div class="wizard-footer" style="justify-content: flex-end;">
+                    <button class="btn btn-primary" onclick="wizardNext(1, 2)">下一步 <i class="ph ph-arrow-right"></i></button>
+                </div>
+            </div>
+
+            <!-- Step 2: TelDrive & Aria2 -->
+            <div class="wizard-step" id="wStep2">
+                <div class="field-grid cols-1">
+                    <div class="form-group">
+                        <label>TelDrive API 地址 (必选)</label>
+                        <input class="form-input" type="text" id="wTdUrl" placeholder="如 http://localhost:8080">
+                    </div>
+                    <div class="form-group">
+                        <label>TelDrive Token (必选)</label>
+                        <input class="form-input" type="password" id="wTdToken" placeholder="抓包获取的 Bearer Token">
+                    </div>
+                    <div class="form-group">
+                        <label>Aria2 RPC</label>
+                        <input class="form-input" type="text" id="wAriaUrl" placeholder="例如 http://localhost:6800/jsonrpc">
+                    </div>
+                    <div class="form-group">
+                        <label>Aria2 Secret</label>
+                        <input class="form-input" type="password" id="wAriaSecret" placeholder="Aria2 RPC 秘钥">
+                    </div>
+                </div>
+                <div class="wizard-footer">
+                    <button class="btn btn-ghost" onclick="wizardNext(2, 1)"><i class="ph ph-arrow-left"></i> 上一步</button>
+                    <button class="btn btn-primary" onclick="wizardNext(2, 3)">下一步 <i class="ph ph-arrow-right"></i></button>
+                </div>
+            </div>
+
+            <!-- Step 3: Telegram -->
+            <div class="wizard-step" id="wStep3">
+                <div class="field-grid cols-1" style="position: relative;">
+                    <div class="form-group">
+                        <label>Telegram API ID</label>
+                        <input class="form-input" type="number" id="wTgId" placeholder="前往 my.telegram.org 获取">
+                    </div>
+                    <div class="form-group">
+                        <label>Telegram API Hash</label>
+                        <input class="form-input" type="text" id="wTgHash" placeholder="如 abcdef1234567890">
+                    </div>
+                </div>
+                <div class="wizard-footer">
+                    <button class="btn btn-ghost" onclick="wizardNext(3, 2)"><i class="ph ph-arrow-left"></i> 上一步</button>
+                    <button class="btn btn-primary" onclick="wizardNext(3, 4)">下一步 <i class="ph ph-arrow-right"></i></button>
+                </div>
+            </div>
+
+            <!-- Step 4: Postgres -->
+            <div class="wizard-step" id="wStep4">
+                <div class="field-grid cols-2">
+                    <div class="form-group" style="grid-column: span 2;">
+                        <label>Postgres 主机IP</label>
+                        <input class="form-input" type="text" id="wDbHost" placeholder="默认无需建立填写 localhost">
+                    </div>
+                    <div class="form-group">
+                        <label>端口</label>
+                        <input class="form-input" type="number" id="wDbPort" value="5432">
+                    </div>
+                    <div class="form-group">
+                        <label>数据库名</label>
+                        <input class="form-input" type="text" id="wDbName" value="postgres">
+                    </div>
+                    <div class="form-group">
+                        <label>用户</label>
+                        <input class="form-input" type="text" id="wDbUser" value="postgres">
+                    </div>
+                    <div class="form-group">
+                        <label>密码</label>
+                        <input class="form-input" type="password" id="wDbPass" placeholder="空">
+                    </div>
+                </div>
+                <div class="wizard-footer">
+                    <button class="btn btn-ghost" onclick="wizardNext(4, 3)"><i class="ph ph-arrow-left"></i> 上一步</button>
+                    <button class="btn btn-primary" onclick="wizardFinish()"><i class="ph ph-check"></i> 完成配置</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+</body>
+</html>

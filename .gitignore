@@ -1,0 +1,27 @@
+# Python env
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+.env
+
+# Configs & DB (Don't leak secrets)
+config.toml
+config.bak.toml
+*.session
+*.db
+*.db-shm
+*.db-wal
+*.log
+pikpak_token.json
+
+# IDE
+.vscode/
+.idea/
+
+# Temp tools
+patch_*.py
+fix*.py
+
+# Downloads dir
+downloads/

@@ -1,0 +1,664 @@
+
+// ── Setup Wizard ──
+async function checkSetupRequired() {
+    try {
+        const resp = await fetch('/api/settings');
+        if (!resp.ok) return;
+        const data = await resp.json();
+        window.currentConfig = data;
+
+        // Auto-fill existing data into wizard inputs
+        try {
+            if (data.pikpak) {
+                if(data.pikpak.username) document.getElementById('wPikUser').value = data.pikpak.username;
+                if(data.pikpak.password) document.getElementById('wPikPass').value = data.pikpak.password;
+            }
+            if (data.aria2) {
+                if(data.aria2.rpc_url) document.getElementById('wAriaUrl').value = data.aria2.rpc_url;
+                const sec = document.getElementById('wAriaSecret');
+                if(sec && data.aria2.rpc_secret) sec.value = data.aria2.rpc_secret;
+            }
+            if (data.teldrive) {
+                if(data.teldrive.api_host) document.getElementById('wTdUrl').value = data.teldrive.api_host;
+                if(data.teldrive.access_token) document.getElementById('wTdToken').value = data.teldrive.access_token;
+            }
+            if (data.telegram) {
+                if(data.telegram.api_id) document.getElementById('wTgId').value = data.telegram.api_id;
+                if(data.telegram.api_hash) document.getElementById('wTgHash').value = data.telegram.api_hash;
+            }
+            if (data.telegram_db) {
+                if(data.telegram_db.host) document.getElementById('wDbHost').value = data.telegram_db.host;
+                if(data.telegram_db.port) document.getElementById('wDbPort').value = data.telegram_db.port;
+                if(data.telegram_db.name) document.getElementById('wDbName').value = data.telegram_db.name;
+                if(data.telegram_db.user) document.getElementById('wDbUser').value = data.telegram_db.user;
+            }
+        } catch(fillErr) { /* some fields may not exist yet */ }
+
+        // Fetch health
+        let healthData = { healthy: false, details: {} };
+        try {
+            const hResp = await fetch('/api/settings/health');
+            if (hResp.ok) healthData = await hResp.json();
+        } catch(e) { /* health unavailable */ }
+
+        window.healthDetails = healthData.details || {};
+        const needsSetup = (data._meta && data._meta.needs_setup) || !healthData.healthy;
+
+        if (needsSetup) {
+            const wiz = document.getElementById('setupWizard');
+            if (wiz) {
+                wiz.classList.add('show');
+                wiz.classList.add('active');
+            }
+
+            // Determine first failed step
+            const d = healthData.details || {};
+            let firstStep = 1;
+            if (d.pikpak) firstStep = 2;
+            if (firstStep === 2 && d.aria2 && d.teldrive) firstStep = 3;
+            if (firstStep === 3 && d.telegram) firstStep = 4;
+
+            // Jump to first failed step
+            if (firstStep > 1) {
+                for (let i = 1; i <= 4; i++) {
+                    const s = document.getElementById('wStep' + i);
+                    if (s) s.classList.remove('active');
+                }
+                const target = document.getElementById('wStep' + firstStep);
+                if (target) target.classList.add('active');
+                document.querySelectorAll('.wizard-dot').forEach(dot => dot.classList.remove('active'));
+                const dot = document.getElementById('dot' + firstStep);
+                if (dot) dot.classList.add('active');
+            }
+        }
+    } catch (e) {
+        console.error('Failed to check setup', e);
+    }
+}
+
+async function wizardNext(current, next) {
+    if (next < current) { // "Previous" button
+        document.getElementById('wStep' + current).classList.remove('active');
+        document.getElementById('wStep' + next).classList.add('active');
+        document.querySelectorAll('.wizard-dot').forEach(d => d.classList.remove('active'));
+        const dot = document.getElementById('dot' + next);
+        if(dot) dot.classList.add('active');
+        return;
+    }
+
+    const btn = event.currentTarget;
+    const oldHtml = btn.innerHTML;
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner" style="width:14px;height:14px;border-width:2px;display:inline-block;margin-right:8px;"></span> 验证中...';
+    
+    if(window._wizardErrTimeout) clearTimeout(window._wizardErrTimeout);
+    let errMsg = "";
+    let dataToSave = {};
+
+    try {
+        if (current === 1) { // PikPak
+            const user = document.getElementById('wPikUser').value.trim();
+            const pass = document.getElementById('wPikPass').value.trim();
+            if(!user || !pass) throw new Error("您必须填写 PikPak 账密");
+            const payload = {username: user, password: pass};
+            const r = await fetch('/api/settings/test/pikpak', {
+                method: 'POST', headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify(payload)
+            });
+            const d = await r.json();
+            if(!d.success) throw new Error(d.message || "PikPak验证失败");
+            dataToSave.pikpak = payload;
+        }
+        else if (current === 2) { // Aria2 & TelDrive
+            const tUrl = document.getElementById('wTdUrl').value.trim();
+            const tTok = document.getElementById('wTdToken').value.trim();
+            if(!tUrl || !tTok) throw new Error("TelDrive API和Token为必填");
+            const tdPayload = {api_host: tUrl, access_token: tTok};
+            const r = await fetch('/api/settings/test/teldrive', {
+                method: 'POST', headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify(tdPayload)
+            });
+            const d = await r.json();
+            if(!d.success && !d.ok) throw new Error("TelDrive连接失败");
+
+            const aUrl = document.getElementById('wAriaUrl').value.trim();
+            if(!aUrl) throw new Error("请填写Aria2 RPC完整地址");
+            const aSec = document.getElementById('wAriaSecret')?.value.trim() || '';
+            const arPayload = {rpc_url: aUrl, rpc_port: 6800, rpc_secret: aSec};
+            const r2 = await fetch('/api/settings/test/aria2', {
+                method: 'POST', headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify(arPayload)
+            });
+            const d2 = await r2.json();
+            if(!d2.success && !d2.ok) throw new Error("Aria2握手失败: " + (d2.message||""));
+            
+            dataToSave.teldrive = tdPayload;
+            dataToSave.aria2 = arPayload;
+        }
+        else if (current === 3) { // Telegram
+            const tid = document.getElementById('wTgId').value.trim();
+            const tHash = document.getElementById('wTgHash').value.trim();
+            if(!tid || !tHash) throw new Error("必须提供 Telegram 授权参数");
+            const tgPayload = {api_id: parseInt(tid), api_hash: tHash};
+            const r = await fetch('/api/settings/test/telegram', {
+                method: 'POST', headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify(tgPayload)
+            });
+            const d = await r.json();
+            if(!d.success) throw new Error(d.message || "Telegram验证失败");
+            dataToSave.telegram = tgPayload;
+        }
+    } catch (e) {
+        errMsg = e.message;
+    }
+
+    if (errMsg) {
+        btn.disabled = false;
+        btn.innerHTML = oldHtml;
+        const info = document.createElement('div');
+        info.className = 'wizard-err-toast';
+        info.innerHTML = `<i class="ph-fill ph-warning-circle"></i> ${errMsg}`;
+        info.style = 'position:absolute; bottom:-45px; right:0; background:var(--error); color:white; padding:8px 16px; border-radius:8px; font-size:13px; display:flex; align-items:center; gap:8px; box-shadow:0 4px 12px rgba(239,68,68,0.3); z-index:100; opacity:0; transform:translateY(-10px); transition:all 0.3s;';
+        
+        const footer = btn.parentElement;
+        footer.style.position = 'relative';
+        const oldToast = footer.querySelector('.wizard-err-toast');
+        if(oldToast) oldToast.remove();
+        footer.appendChild(info);
+        setTimeout(() => { info.style.opacity='1'; info.style.transform='translateY(0)'; }, 10);
+        window._wizardErrTimeout = setTimeout(() => {
+            info.style.opacity='0';
+            setTimeout(() => info.remove(), 300);
+        }, 3500);
+        return;
+    }
+
+    // Success! Save config incrementally if there is data to save
+    if (Object.keys(dataToSave).length > 0) {
+        if (!window.currentConfig) window.currentConfig = {};
+        for(let k in dataToSave) {
+            if(!window.currentConfig[k]) window.currentConfig[k] = {};
+            // merge
+            Object.assign(window.currentConfig[k], dataToSave[k]);
+        }
+        await fetch('/api/settings', {
+            method: 'PUT', headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify(window.currentConfig)
+        });
+    }
+
+    btn.disabled = false;
+    btn.innerHTML = oldHtml;
+
+    document.getElementById('wStep' + current).classList.remove('active');
+    document.getElementById('wStep' + next).classList.add('active');
+    document.querySelectorAll('.wizard-dot').forEach(d => d.classList.remove('active'));
+    const dot = document.getElementById('dot' + next);
+    if(dot) dot.classList.add('active');
+}
+
+async function wizardFinish() {
+    const btn = event.currentTarget;
+    const oldHtml = btn.innerHTML;
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner" style="width:14px;height:14px;border-width:2px;display:inline-block;margin-right:8px;"></span> 验证中...';
+
+    // validate DB
+    const dbHost = document.getElementById('wDbHost').value.trim();
+    if (!dbHost) {
+        alert("请输入数据库地址");
+        btn.disabled = false;
+        btn.innerHTML = oldHtml;
+        return;
+    }
+    
+    let dbPayload = {};
+    try {
+        dbPayload = {
+            host: dbHost,
+            port: parseInt(document.getElementById('wDbPort').value) || 5432,
+            name: document.getElementById('wDbName').value.trim(),
+            user: document.getElementById('wDbUser').value.trim(),
+            password: document.getElementById('wDbPass').value.trim()
+        };
+        const r = await fetch('/api/settings/test/database', {
+            method: 'POST', headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify(dbPayload)
+        });
+        const d = await r.json();
+        if(!d.success) throw new Error(d.message || "连接失败");
+    } catch(e) {
+        alert('数据库连接失败: ' + e.message);
+        btn.disabled = false;
+        btn.innerHTML = oldHtml;
+        return;
+    }
+
+    btn.innerHTML = '<span class="spinner" style="width:14px;height:14px;border-width:2px;display:inline-block;margin-right:8px;"></span> 部署中...';
+    
+    if (!window.currentConfig) window.currentConfig = {};
+    if (!window.currentConfig.telegram_db) window.currentConfig.telegram_db = {};
+    Object.assign(window.currentConfig.telegram_db, dbPayload);
+    
+    try {
+        await fetch('/api/settings', {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(window.currentConfig)
+        });
+        const wiz = document.getElementById('setupWizard');
+        if(wiz) { wiz.classList.remove('active'); wiz.classList.remove('show'); }
+        location.reload();
+    } catch (e) {
+        alert("保存最终配置失败", e);
+        btn.disabled = false;
+        btn.innerHTML = oldHtml;
+    }
+}
+
+
+// ── 全局 401 拦截 ──
+const _origFetch = window.fetch;
+window.fetch = async function (...args) {
+    const resp = await _origFetch.apply(this, args);
+    if (resp.status === 401) { window.location.href = '/login'; }
+    return resp;
+};
+
+// ── Navigation ──
+function switchPage(name) {
+    document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
+    document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
+    document.getElementById('page-' + name).classList.add('active');
+    const navItem = document.querySelector(`.nav-item[data-page="${name}"]`);
+    if(navItem) navItem.classList.add('active');
+    
+    if (name === 'tasks') refreshPikPakTasks();
+    if (name === 'aria2teldrive') loadA2TDTasks();
+    if (name === 'tel2teldrive') loadT2TDState();
+    if (name === 'settings') loadConfig();
+}
+
+async function logout() {
+    await fetch('/api/logout', { method: 'POST' });
+    window.location.href = '/login';
+}
+
+// ── System Test ──
+async function checkServicesStatus() {
+    try {
+        const resp = await fetch('/api/settings/health');
+        const data = await resp.json();
+        
+        const icon = document.getElementById('serviceStatusIcon');
+        const dot = document.getElementById('serviceStatusDot');
+        const wrapper = document.getElementById('serviceStatusWrapper');
+        
+        if (data.healthy) {
+            icon.style.color = 'var(--success)';
+            dot.classList.add('connected');
+            wrapper.setAttribute('data-tooltip', '服务运行正常');
+        } else {
+            icon.style.color = 'var(--error)';
+            dot.classList.remove('connected');
+            wrapper.setAttribute('data-tooltip', data.message || '服务异常');
+        }
+    } catch (e) {
+        document.getElementById('serviceStatusIcon').style.color = 'var(--error)';
+        document.getElementById('serviceStatusWrapper').setAttribute('data-tooltip', '服务断开连接');
+    }
+}
+
+async function testSingle(type) {
+    const ep = `/api/settings/test/${type}`;
+    const el = document.getElementById(`${type}Status`);
+    if (!el) return;
+    
+    el.textContent = '测试中...'; el.className = '';
+    try {
+        const resp = await fetch(ep, { method: 'POST' });
+        const data = await resp.json();
+        const ok = data.success || data.ok;
+        const msg = data.message || (ok ? '正常' : '失败');
+        el.textContent = ok ? `✓ ${msg}` : `✗ ${msg}`;
+        el.className = ok ? 'ok' : 'fail';
+    } catch(e) {
+        el.textContent = '✗ 网络错误';
+        el.className = 'fail';
+    }
+}
+
+async function testConnection() {
+    const btn = document.getElementById('testBtn');
+    if (!btn) return;
+    btn.disabled = true; btn.innerHTML = '<span class="spinner"></span> 测试中...';
+    
+    const tests = [
+        { ep: '/api/settings/test/pikpak', el: document.getElementById('pikpakStatus') },
+        { ep: '/api/settings/test/aria2', el: document.getElementById('aria2Status') },
+        { ep: '/api/settings/test/teldrive', el: document.getElementById('teldriveStatus') },
+        { ep: '/api/settings/test/telegram', el: document.getElementById('telegramStatus') },
+        { ep: '/api/settings/test/database', el: document.getElementById('databaseStatus') }
+    ];
+    
+    for (const t of tests) {
+        if (!t.el) continue;
+        t.el.textContent = '测试中...'; t.el.className = '';
+        try {
+            const resp = await fetch(t.ep, { method: 'POST' });
+            const data = await resp.json();
+            const ok = data.success || data.ok;
+            const msg = data.message || (ok ? '正常' : '失败');
+            t.el.textContent = ok ? `✓ ${msg}` : `✗ ${msg}`;
+            t.el.className = ok ? 'ok' : 'fail';
+        } catch(e) {
+            t.el.textContent = '✗ 网络错误';
+            t.el.className = 'fail';
+        }
+    }
+    btn.disabled = false; btn.innerHTML = '<i class="ph ph-activity"></i> 重新自检';
+}
+
+
+// ── WebSocket (Unified) ──
+let ws = null;
+function connectWS() {
+    const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    ws = new WebSocket(`${proto}//${location.host}/ws`);
+    ws.onopen = () => { document.getElementById('wsDot').classList.add('connected'); };
+    ws.onclose = () => { document.getElementById('wsDot').classList.remove('connected'); setTimeout(connectWS, 3000); };
+    ws.onmessage = (e) => handleWSMessage(JSON.parse(e.data));
+}
+
+function handleWSMessage(msg) {
+    if (msg.type === "init") {
+        if (msg.data.tasks) renderA2TDTasks(msg.data.tasks);
+        return;
+    }
+    if (msg.type === "tasks_update") {
+        renderA2TDTasks(msg.data);
+        return;
+    }
+    if (msg.type === "task_update") {
+        // Individual update from A2TD
+        return;
+    }
+    
+    // PikPak logic
+    const icons = { task_start: '<i class="ph-fill ph-spinner-gap info" style="animation:spin 2s linear infinite"></i>', task_added: '<i class="ph ph-cloud-arrow-up info"></i>', task_status: '<i class="ph ph-hourglass-high warning"></i>', task_error: '<i class="ph-fill ph-warning-circle error"></i>', files_found: '<i class="ph ph-files"></i>', aria2_done: '<i class="ph-fill ph-check-circle success"></i>', task_done: '<i class="ph-fill ph-check-square success"></i>', all_done: '<i class="ph-fill ph-flag-checkered success"></i>', error: '<i class="ph-fill ph-x-circle error"></i>' };
+    const icon = icons[msg.type] || '<i class="ph-fill ph-asterisk"></i>';
+    let text = '';
+    switch (msg.type) {
+        case 'task_start': text = `<span class="highlight">[${msg.index}/${msg.total}]</span> 开始处理: ${msg.magnet}`; break;
+        case 'task_added': text = `<span class="highlight">[${msg.index}]</span> 离线任务已添加: <span class="file-name">${msg.file_name}</span>`; break;
+        case 'task_status': text = `<span class="highlight">[${msg.index}]</span> 状态: ${msg.status}`; break;
+        case 'task_error': text = `<span class="highlight">[${msg.index}]</span> <span class="error">${msg.message}</span>`; break;
+        case 'files_found': text = `<span class="highlight">[${msg.index}]</span> 找到 ${msg.files.length} 个文件: <span class="file-name">${msg.files.join(', ')}</span>`; break;
+        case 'aria2_done': text = `<span class="highlight">[${msg.index}]</span> <span class="success">已推送 ${msg.success_count}/${msg.total_count} 到 Aria2</span>`; break;
+        case 'task_done': text = `<span class="highlight">[${msg.index}]</span> <span class="success">✓ ${msg.file_name} 完成</span>`; break;
+        case 'all_done':
+            text = `<span class="success">全部 ${msg.total} 个磁链处理完毕！</span>`;
+            const btn = document.getElementById('submitBtn');
+            if (btn) { btn.disabled = false; btn.innerHTML = '<i class="ph ph-rocket-launch"></i> 一键推送'; }
+            break;
+        case 'error':
+            text = `<span class="error">${msg.message}</span>`;
+            const btnE = document.getElementById('submitBtn');
+            if (btnE) { btnE.disabled = false; btnE.innerHTML = '<i class="ph ph-rocket-launch"></i> 一键推送'; }
+            break;
+    }
+    if (text) addLogEntry(icon, text);
+    
+    if (!document.getElementById('page-progress').classList.contains('active') && msg.type === 'task_start') {
+        switchPage('progress');
+    }
+}
+
+function addLogEntry(icon, text) {
+    const container = document.getElementById('logContainer');
+    if(!container) return;
+    const empty = document.getElementById('logEmpty');
+    if (empty) empty.remove();
+    const now = new Date().toLocaleTimeString('zh-CN', { hour12: false });
+    const entry = document.createElement('div');
+    entry.className = 'log-entry';
+    entry.innerHTML = `<span class="log-icon">${icon}</span><span class="log-text">${text}</span><span class="log-time">${now}</span>`;
+    container.appendChild(entry);
+    container.scrollTop = container.scrollHeight;
+}
+
+function clearLog() {
+    const el = document.getElementById('logContainer');
+    if (el) el.innerHTML = '<div class="log-empty" id="logEmpty">系统处于空闲状态...</div>';
+}
+
+// ── PikPak Magnet Logic ──
+async function submitMagnets() {
+    const input = document.getElementById('magnetInput');
+    const text = input.value.trim();
+    if (!text) return;
+    const btn = document.getElementById('submitBtn');
+    btn.disabled = true; btn.innerHTML = '<span class="spinner"></span> 处理中...';
+    try {
+        const resp = await fetch('/api/add', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ magnets: text }) });
+        const data = await resp.json();
+        if (!resp.ok) { addLogEntry('<i class="ph-fill ph-x-circle error"></i>', `<span class="error">${data.error}</span>`); btn.disabled = false; btn.innerHTML = '<i class="ph ph-rocket-launch"></i> 一键推送'; return; }
+        addLogEntry('<i class="ph ph-envelope-simple"></i>', data.message);
+        input.value = '';
+        switchPage('progress');
+    } catch (e) { addLogEntry('<i class="ph-fill ph-warning error"></i>', `<span class="error">请求失败: ${e.message}</span>`); btn.disabled = false; btn.innerHTML = '<i class="ph ph-rocket-launch"></i> 一键推送'; }
+}
+
+// ── Aria2TelDrive Tasks ──
+async function loadA2TDTasks() {
+    try {
+        const resp = await fetch('/api/a2td/tasks');
+        const data = await resp.json();
+        renderA2TDTasks(data.tasks);
+    } catch (e) {}
+}
+
+function renderA2TDTasks(tasks) {
+    const container = document.getElementById('a2tdTaskList');
+    if (!container) return;
+    if (!tasks || !tasks.length) {
+        container.innerHTML = '<div class="log-empty" style="padding:40px;"><i class="ph ph-tray"></i> 队列空闲中</div>';
+        return;
+    }
+    
+    container.innerHTML = tasks.map(t => {
+        let bc = 'badge-running';
+        let status = t.status || 'unknown';
+        if (status === 'completed') bc = 'badge-complete';
+        if (status === 'failed' || status === 'error') bc = 'badge-error';
+        
+        let progressStr = "";
+        if (t.progress_str) progressStr = `<span class="task-progress" style="width:120px;text-align:right;">${t.progress_str}</span>`;
+        else if (t.progress !== undefined) progressStr = `<span class="task-progress">${t.progress.toFixed(1)}%</span>`;
+        
+        return `<div class="task-item">
+            <span class="task-badge ${bc}">${status.toUpperCase()}</span>
+            <span class="task-name" title="${t.filename || t.url}">${t.filename || 'PikPak 数据流'}</span>
+            ${progressStr}
+            <div style="flex-shrink:0;">
+               ${(status==='failed' || status==='cancelled') ? `<button class="btn btn-sm btn-ghost" onclick="a2tdAction('${t.task_id}', 'retry')" title="重试"><i class="ph ph-arrows-clockwise"></i></button>` : ''}
+               ${(status==='downloading' || status==='uploading') ? `<button class="btn btn-sm btn-ghost" onclick="a2tdAction('${t.task_id}', 'pause')" title="暂停"><i class="ph ph-pause"></i></button>` : ''}
+               ${(status==='paused') ? `<button class="btn btn-sm btn-ghost" onclick="a2tdAction('${t.task_id}', 'resume')" title="恢复"><i class="ph ph-play"></i></button>` : ''}
+               <button class="btn btn-sm btn-ghost" onclick="a2tdAction('${t.task_id}', 'cancel')" title="取消" style="color:var(--error);"><i class="ph ph-x"></i></button>
+            </div>
+        </div>`;
+    }).join('');
+}
+
+async function a2tdAction(taskId, action) {
+    try {
+        await fetch(`/api/a2td/task/${taskId}/${action}`, { method: 'POST' });
+        loadA2TDTasks();
+    } catch(e) {}
+}
+
+async function clearCompletedTasks() {
+    try {
+        await fetch('/api/a2td/tasks/clear-completed', { method: 'POST' });
+        loadA2TDTasks();
+    } catch(e) {}
+}
+
+// ── Settings ──
+async function loadConfig() {
+    try {
+        const resp = await fetch('/api/settings');
+        const cfg = await resp.json();
+        
+        document.getElementById('cfgAuthUser').value = cfg.auth?.username || '';
+        document.getElementById('cfgAuthPass').value = cfg.auth?.password || '';
+        
+        document.getElementById('cfgServerPort').value = cfg.server?.port || 8888;
+
+        document.getElementById('cfgPikpakUsername').value = cfg.pikpak?.username || '';
+        document.getElementById('cfgPikpakPassword').value = cfg.pikpak?.password || '';
+        document.getElementById('cfgPikpakSaveDir').value = cfg.pikpak?.save_dir || '/';
+        document.getElementById('cfgPikpakDelete').checked = cfg.pikpak?.delete_after_download || false;
+        
+        document.getElementById('cfgAria2Url').value = cfg.aria2?.rpc_url || '';
+        document.getElementById('cfgAria2Secret').value = cfg.aria2?.rpc_secret || '';
+        document.getElementById('cfgAria2Dir').value = cfg.aria2?.download_dir || '';
+        
+        document.getElementById('cfgTeldriveHost').value = cfg.teldrive?.api_host || '';
+        document.getElementById('cfgTeldriveToken').value = cfg.teldrive?.access_token || '';
+        document.getElementById('cfgTeldriveChannel').value = cfg.teldrive?.channel_id || 0;
+        document.getElementById('cfgTeldriveConcurrency').value = cfg.teldrive?.upload_concurrency || 4;
+        
+        document.getElementById('cfgUploadAutoDelete').checked = cfg.upload?.auto_delete || false;
+        
+    } catch (e) {
+        console.error('加载配置失败:', e);
+    }
+}
+
+async function saveConfig() {
+    const btn = document.getElementById('saveBtn');
+    btn.disabled = true; btn.innerHTML = '<span class="spinner"></span> 保存...';
+    
+    // Parse form to nested map
+    const cfg = {
+        auth: {
+            username: document.getElementById('cfgAuthUser').value.trim(),
+            password: document.getElementById('cfgAuthPass').value.trim()
+        },
+        server: { port: parseInt(document.getElementById('cfgServerPort').value) || 8888 },
+        pikpak: { 
+            username: document.getElementById('cfgPikpakUsername').value, 
+            password: document.getElementById('cfgPikpakPassword').value, 
+            save_dir: document.getElementById('cfgPikpakSaveDir').value || '/', 
+            delete_after_download: document.getElementById('cfgPikpakDelete').checked 
+        },
+        aria2: { 
+            rpc_url: document.getElementById('cfgAria2Url').value, 
+            rpc_secret: document.getElementById('cfgAria2Secret').value, 
+            download_dir: document.getElementById('cfgAria2Dir').value 
+        },
+        teldrive: {
+            api_host: document.getElementById('cfgTeldriveHost').value,
+            access_token: document.getElementById('cfgTeldriveToken').value,
+            channel_id: parseInt(document.getElementById('cfgTeldriveChannel').value) || 0,
+            upload_concurrency: parseInt(document.getElementById('cfgTeldriveConcurrency').value) || 4,
+            chunk_size: "500M"
+        },
+        upload: {
+            auto_delete: document.getElementById('cfgUploadAutoDelete').checked,
+            max_retries: 3,
+            check_interval: 3,
+            max_disk_usage_gb: 0,
+            cpu_usage_limit: 85
+        }
+    };
+    
+    try {
+        const resp = await fetch('/api/settings', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(cfg) });
+        if (resp.ok) { 
+            const msg = document.getElementById('saveMsg'); 
+            msg.classList.add('show'); 
+            setTimeout(() => msg.classList.remove('show'), 2500); 
+        }
+    } catch (e) { 
+        alert('保存失败: ' + e.message); 
+    }
+    btn.disabled = false; btn.innerHTML = '<i class="ph ph-floppy-disk"></i> 闪存同步';
+}
+
+// ── Startup ──
+window.onload = () => {
+    checkSetupRequired();
+    connectWS();
+    checkServicesStatus();
+    setInterval(checkServicesStatus, 30000);
+    // 监听 Tel2TelDrive SSE 事件
+    const es = new EventSource('/api/t2td/stream');
+    es.onmessage = (e) => {
+        try {
+            const data = JSON.parse(e.data);
+            if(data.type === "state" || data.type === "qr" || data.type === "password_required") {
+                updateT2TDState(data);
+            } else if(data.type === "log") {
+                appendT2TDLog(data);
+            }
+        }catch(e){}
+    };
+};
+
+// ── Tel2TelDrive Integration ──
+async function loadT2TDState() {
+    try {
+        const res = await fetch('/api/t2td/bootstrap');
+        const d = await res.json();
+        updateT2TDState(d.state);
+        const container = document.getElementById('t2tdLogContainer');
+        if (container && d.logs) {
+            container.innerHTML = '';
+            d.logs.forEach(l => appendT2TDLog(l));
+        }
+    } catch(e) {}
+}
+
+function updateT2TDState(state) {
+    const area = document.getElementById('t2tdQrArea');
+    const qrImg = document.getElementById('t2tdQrImg');
+    const form = document.getElementById('t2td2faForm');
+    if (!area) return;
+
+    if (state.phase === 'awaiting_qr' || (state.qr_image && !state.authorized)) {
+        qrImg.style.display = 'block';
+        qrImg.src = state.qr_image || state.url;
+        form.style.display = 'none';
+        area.querySelector('p').textContent = `请使用 Telegram App 扫描登录二维码 (${state.session_name || ''})`;
+    } else if (state.type === 'password_required' || (state.phase === 'awaiting_password')) {
+        qrImg.style.display = 'none';
+        form.style.display = 'block';
+        area.querySelector('p').textContent = '两步验证: 账号存在密码锁，请在此输入';
+        form.onsubmit = async (e) => {
+            e.preventDefault();
+            const pass = document.getElementById('t2tdPassword').value;
+            await fetch('/api/t2td/login/password', { method:'POST', body: JSON.stringify({password: pass}), headers: {'Content-Type': 'application/json'}});
+        }
+    } else if (state.authorized || state.phase === 'running' || state.phase === 'authorized') {
+        qrImg.style.display = 'none';
+        form.style.display = 'none';
+        area.querySelector('p').innerHTML = `<span style="color:var(--success)"><b><i class="ph-fill ph-check-circle"></i> 服务运行中</b></span> - 频道监听已激活`;
+    }
+}
+
+function appendT2TDLog(log) {
+    const container = document.getElementById('t2tdLogContainer');
+    if (!container) return;
+    const empty = document.getElementById('t2tdLogEmpty');
+    if (empty) empty.remove();
+    const entry = document.createElement('div');
+    entry.className = 'log-entry';
+    let c = '#fff';
+    if(log.level === 'ERROR') c = '#f87171';
+    else if(log.level === 'WARNING') c = '#f59e0b';
+    entry.innerHTML = `<span style="color:${c}">[${log.time}] [${log.level}] ${log.message}</span>`;
+    container.appendChild(entry);
+    container.scrollTop = container.scrollHeight;
+}
