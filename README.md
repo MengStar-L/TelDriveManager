@@ -80,6 +80,21 @@ http://服务器IP:8888
 ```
 若出现配置失败等问题或首次进入系统，系统会自动弹出现代化向导界面帮助您初始化所有的 API 及密码。
 
+### 5. 更新升级
+当有新版本发布时，在服务器上执行以下命令即可完成更新：
+```bash
+cd /opt/TelDriveManager
+# 拉取最新代码
+git pull origin main
+# 如有新增依赖，重新安装
+source venv/bin/activate
+pip install -r requirements.txt
+# 重启服务
+sudo systemctl restart teldrive-manager
+# 确认服务状态
+sudo systemctl status teldrive-manager
+```
+
 ## 🔧 技术栈
 - 前端：纯净 Vanilla JS + CSS3 (Glassmorphism 拟物设计) + Phosphor 图标库
 - 后端：FastAPI + RESTful & WebSocket
