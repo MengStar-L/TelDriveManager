@@ -44,7 +44,8 @@ After=network.target
 
 [Service]
 Type=simple
-User=root # 如果有特定非 root 用户，可在此更改
+# 如果有特定非 root 用户，可在此更改
+User=root
 WorkingDirectory=/opt/TelDriveManager
 # 如果使用了虚拟环境，请使用虚拟环境内的 python 路径
 # ExecStart=/opt/TelDriveManager/venv/bin/python main.py
