@@ -587,12 +587,103 @@ async function saveConfig() {
     btn.disabled = false; btn.innerHTML = '<i class="ph ph-floppy-disk"></i> 闪存同步';
 }
 
+// ── Auto-save: 修改设置后自动保存并显示绿勾 ──
+let _autoSaveTimer = null;
+function initAutoSave() {
+    const settingsPage = document.getElementById('page-settings');
+    if (!settingsPage) return;
+
+    const inputs = settingsPage.querySelectorAll('input.form-input, input[type="checkbox"]');
+    inputs.forEach(input => {
+        const eventType = input.type === 'checkbox' ? 'change' : 'change';
+        input.addEventListener(eventType, () => {
+            // debounce 500ms
+            if (_autoSaveTimer) clearTimeout(_autoSaveTimer);
+            _autoSaveTimer = setTimeout(() => doAutoSave(input), 500);
+        });
+    });
+}
+
+async function doAutoSave(triggerInput) {
+    // 复用 saveConfig 的数据收集逻辑
+    const cfg = {
+        auth: {
+            username: document.getElementById('cfgAuthUser').value.trim(),
+            password: document.getElementById('cfgAuthPass').value.trim()
+        },
+        server: { port: parseInt(document.getElementById('cfgServerPort').value) || 8888 },
+        pikpak: {
+            username: document.getElementById('cfgPikpakUsername').value,
+            password: document.getElementById('cfgPikpakPassword').value,
+            save_dir: document.getElementById('cfgPikpakSaveDir').value || '/',
+            delete_after_download: document.getElementById('cfgPikpakDelete').checked
+        },
+        aria2: {
+            rpc_url: document.getElementById('cfgAria2Url').value,
+            rpc_secret: document.getElementById('cfgAria2Secret').value,
+            download_dir: document.getElementById('cfgAria2Dir').value
+        },
+        teldrive: {
+            api_host: document.getElementById('cfgTeldriveHost').value,
+            access_token: document.getElementById('cfgTeldriveToken').value,
+            channel_id: parseInt(document.getElementById('cfgTeldriveChannel').value) || 0,
+            upload_concurrency: parseInt(document.getElementById('cfgTeldriveConcurrency').value) || 4,
+            chunk_size: "500M"
+        },
+        upload: {
+            auto_delete: document.getElementById('cfgUploadAutoDelete').checked,
+            max_retries: 3, check_interval: 3, max_disk_usage_gb: 0, cpu_usage_limit: 85
+        }
+    };
+
+    try {
+        const resp = await fetch('/api/settings', {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(cfg)
+        });
+        if (resp.ok) showFieldCheck(triggerInput);
+    } catch (e) { /* silent fail */ }
+}
+
+function showFieldCheck(input) {
+    // 在输入框旁边显示一个临时绿色对号
+    const parent = input.closest('.form-group') || input.closest('.toggle-row') || input.parentElement;
+    if (!parent) return;
+
+    // 避免重复
+    const old = parent.querySelector('.auto-save-check');
+    if (old) old.remove();
+
+    const check = document.createElement('span');
+    check.className = 'auto-save-check';
+    check.innerHTML = '<i class="ph-fill ph-check-circle"></i>';
+    check.style.cssText = 'color:var(--success); font-size:16px; margin-left:6px; opacity:0; transition:opacity 0.3s; display:inline-flex; align-items:center;';
+    
+    // 对 checkbox toggle 特殊处理位置
+    if (input.type === 'checkbox') {
+        parent.appendChild(check);
+    } else {
+        // 插在 input 后面
+        input.parentElement.style.position = 'relative';
+        check.style.cssText += 'position:absolute; right:12px; top:50%; transform:translateY(-50%);';
+        input.parentElement.appendChild(check);
+    }
+
+    requestAnimationFrame(() => { check.style.opacity = '1'; });
+    setTimeout(() => {
+        check.style.opacity = '0';
+        setTimeout(() => check.remove(), 300);
+    }, 2000);
+}
+
 // ── Startup ──
 window.onload = () => {
     checkSetupRequired();
     connectWS();
     checkServicesStatus();
     setInterval(checkServicesStatus, 30000);
+    initAutoSave();
     // 监听 Tel2TelDrive SSE 事件
     const es = new EventSource('/api/t2td/stream');
     es.onmessage = (e) => {
