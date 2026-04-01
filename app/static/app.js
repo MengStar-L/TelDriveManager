@@ -42,7 +42,7 @@ async function checkSetupRequired() {
         } catch(e) { /* health unavailable */ }
 
         window.healthDetails = healthData.details || {};
-        const needsSetup = (data._meta && data._meta.needs_setup) || !healthData.healthy;
+        const needsSetup = (data._meta && data._meta.needs_setup);
 
         if (needsSetup) {
             const wiz = document.getElementById('setupWizard');
