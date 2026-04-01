@@ -1119,8 +1119,7 @@ class Tel2TelDriveService:
 
     async def run_forever(self):
         logger.info("=" * 56)
-        logger.info("Tel2TelDrive Web 管理服务启动")
-        logger.info(f"管理面板地址: http://127.0.0.1:{APP_BIND_PORT}")
+        logger.info("Telegram 监听中转服务启动")
         logger.info("=" * 56)
 
         while not self.stop_event.is_set():
