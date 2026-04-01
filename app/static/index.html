@@ -585,6 +585,39 @@
                             </div>
                         </div>
                     </div>
+
+                        <div class="card" style="grid-column: span 2/span 2">
+                            <div class="card-header"><h3><i class="ph-fill ph-telegram-logo"></i> Telegram 中转服务</h3></div>
+                            <div class="card-body">
+                                <div class="field-grid">
+                                    <div class="form-group"><label>API ID</label><input class="form-input" type="number" id="cfgTelegramApiId" placeholder="在 my.telegram.org 获取"></div>
+                                    <div class="form-group"><label>API Hash</label><input class="form-input" type="text" id="cfgTelegramApiHash" placeholder="在 my.telegram.org 获取"></div>
+                                    <div class="form-group"><label>频道 ID</label><input class="form-input" type="number" id="cfgTelegramChannelId" placeholder="0"></div>
+                                    <div class="form-group"><label>同步间隔 (秒)</label><input class="form-input" type="number" id="cfgTelegramSyncInterval" placeholder="10"></div>
+                                </div>
+                                <div style="margin-top:20px; padding-top:20px; border-top:1px solid var(--border)">
+                                    <label class="toggle-row" style="justify-content:space-between">
+                                        启用删除同步
+                                        <div class="toggle-switch"><input type="checkbox" id="cfgTelegramSyncEnabled" checked><span class="toggle-slider"></span></div>
+                                    </label>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="card" style="grid-column: span 2/span 2">
+                            <div class="card-header"><h3><i class="ph-fill ph-database"></i> TelDrive 数据库</h3></div>
+                            <div class="card-body">
+                                <div class="field-grid">
+                                    <div class="form-group"><label>主机地址</label><input class="form-input" type="text" id="cfgDbHost" placeholder="例如 aws-0-xxx.pooler.supabase.com"></div>
+                                    <div class="form-group"><label>端口</label><input class="form-input" type="number" id="cfgDbPort" placeholder="5432"></div>
+                                    <div class="form-group"><label>用户名</label><input class="form-input" type="text" id="cfgDbUser" placeholder="postgres"></div>
+                                    <div class="form-group"><label>密码</label><input class="form-input" type="password" id="cfgDbPassword" placeholder="数据库密码"></div>
+                                </div>
+                                <div class="field-grid cols-1">
+                                    <div class="form-group"><label>数据库名</label><input class="form-input" type="text" id="cfgDbName" placeholder="postgres"></div>
+                                </div>
+                            </div>
+                        </div>
                     
                     <div class="card" style="background:transparent; border:none; box-shadow:none; padding:0; margin-top:-10px;">
                         <div class="settings-actions">

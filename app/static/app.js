@@ -530,6 +530,18 @@ async function loadConfig() {
         document.getElementById('cfgTeldriveConcurrency').value = cfg.teldrive?.upload_concurrency || 4;
         
         document.getElementById('cfgUploadAutoDelete').checked = cfg.upload?.auto_delete || false;
+
+        document.getElementById('cfgTelegramApiId').value = cfg.telegram?.api_id || '';
+        document.getElementById('cfgTelegramApiHash').value = cfg.telegram?.api_hash || '';
+        document.getElementById('cfgTelegramChannelId').value = cfg.telegram?.channel_id || 0;
+        document.getElementById('cfgTelegramSyncInterval').value = cfg.telegram?.sync_interval || 10;
+        document.getElementById('cfgTelegramSyncEnabled').checked = cfg.telegram?.sync_enabled !== false;
+
+        document.getElementById('cfgDbHost').value = cfg.telegram_db?.host || '';
+        document.getElementById('cfgDbPort').value = cfg.telegram_db?.port || 5432;
+        document.getElementById('cfgDbUser').value = cfg.telegram_db?.user || '';
+        document.getElementById('cfgDbPassword').value = cfg.telegram_db?.password || '';
+        document.getElementById('cfgDbName').value = cfg.telegram_db?.name || 'postgres';
         
     } catch (e) {
         console.error('加载配置失败:', e);
@@ -571,6 +583,20 @@ async function saveConfig() {
             check_interval: 3,
             max_disk_usage_gb: 0,
             cpu_usage_limit: 85
+        },
+        telegram: {
+            api_id: parseInt(document.getElementById('cfgTelegramApiId').value) || 0,
+            api_hash: document.getElementById('cfgTelegramApiHash').value,
+            channel_id: parseInt(document.getElementById('cfgTelegramChannelId').value) || 0,
+            sync_interval: parseInt(document.getElementById('cfgTelegramSyncInterval').value) || 10,
+            sync_enabled: document.getElementById('cfgTelegramSyncEnabled').checked
+        },
+        telegram_db: {
+            host: document.getElementById('cfgDbHost').value,
+            port: parseInt(document.getElementById('cfgDbPort').value) || 5432,
+            user: document.getElementById('cfgDbUser').value,
+            password: document.getElementById('cfgDbPassword').value,
+            name: document.getElementById('cfgDbName').value || 'postgres'
         }
     };
     
@@ -633,6 +659,20 @@ async function doAutoSave(triggerInput) {
         upload: {
             auto_delete: document.getElementById('cfgUploadAutoDelete').checked,
             max_retries: 3, check_interval: 3, max_disk_usage_gb: 0, cpu_usage_limit: 85
+        },
+        telegram: {
+            api_id: parseInt(document.getElementById('cfgTelegramApiId').value) || 0,
+            api_hash: document.getElementById('cfgTelegramApiHash').value,
+            channel_id: parseInt(document.getElementById('cfgTelegramChannelId').value) || 0,
+            sync_interval: parseInt(document.getElementById('cfgTelegramSyncInterval').value) || 10,
+            sync_enabled: document.getElementById('cfgTelegramSyncEnabled').checked
+        },
+        telegram_db: {
+            host: document.getElementById('cfgDbHost').value,
+            port: parseInt(document.getElementById('cfgDbPort').value) || 5432,
+            user: document.getElementById('cfgDbUser').value,
+            password: document.getElementById('cfgDbPassword').value,
+            name: document.getElementById('cfgDbName').value || 'postgres'
         }
     };
 
