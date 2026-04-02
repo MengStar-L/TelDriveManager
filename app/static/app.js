@@ -532,10 +532,10 @@ function updateProgressBar(filename, mode, progress, speed, downloaded, total, e
         extraEl.textContent = parts.join(' · ');
     }
 
-    // 自动切换到进度页
-    const progressPage = document.getElementById('page-progress');
-    if (progressPage && !progressPage.classList.contains('active') && mode === 'download' && progress < 2) {
-        switchPage('progress');
+    // 自动切换到下载监控页
+    const a2tdPage = document.getElementById('page-aria2teldrive');
+    if (a2tdPage && !a2tdPage.classList.contains('active') && mode === 'download' && progress < 2) {
+        switchPage('aria2teldrive');
     }
 }
 

@@ -705,26 +705,34 @@ async def _process_share_download(share_id: str, file_ids: List[str], pass_code_
         await _broadcast({"type": "task_status", "index": 1, "status": "正在保存到网盘..."})
         saved_ids = await _pikpak.save_share_files(share_id, file_ids, pass_code_token)
         if not saved_ids:
-            await _broadcast({"type": "task_error", "index": 1, "message": "保存失败"})
+            await _broadcast({"type": "task_error", "index": 1, "message": "保存失败: restore 未返回 file_id"})
             return
+
+        logger.info(f"分享文件已保存, saved_ids={saved_ids}")
+
+        # 等待 PikPak 处理完成（restore 是异步的，大文件需要时间）
+        await asyncio.sleep(3)
 
         all_urls = []
         for i, fid in enumerate(saved_ids, 1):
             await _broadcast({"type": "task_status", "index": i, "status": f"获取下载链接 [{i}/{len(saved_ids)}]"})
             urls = []
             last_err = None
-            for attempt in range(3):
+            delays = [2, 3, 5, 8]  # 递增等待
+            for attempt in range(len(delays) + 1):
                 try:
                     urls = await asyncio.wait_for(_pikpak.get_download_urls(fid), timeout=30.0)
                     if urls:
                         break
+                    else:
+                        logger.warning(f"get_download_urls 返回空 (尝试 {attempt+1}, fid={fid})")
                 except Exception as e:
                     last_err = e
-                    logger.warning(f"获取下载链接失败 (尝试 {attempt+1}/3, fid={fid}): {e}")
-                    if attempt < 2:
-                        await asyncio.sleep(2)
+                    logger.warning(f"get_download_urls 异常 (尝试 {attempt+1}, fid={fid}): {e}")
+                if attempt < len(delays):
+                    await asyncio.sleep(delays[attempt])
             if not urls:
-                err_detail = f": {last_err}" if last_err else ""
+                err_detail = f": {last_err}" if last_err else "(文件可能未就绪)"
                 await _broadcast({"type": "task_error", "index": i, "message": f"获取链接失败{err_detail}"})
                 continue
             all_urls.extend(urls)
