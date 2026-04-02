@@ -11,7 +11,7 @@ import tomllib
 from collections import deque
 from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from io import BytesIO
 from itertools import count
 from pathlib import Path
@@ -1447,6 +1447,10 @@ class Tel2TelDriveService:
                 if self.refresh_qr_event.is_set():
                     self.refresh_qr_event.clear()
                     logger.info("二维码已按管理员请求刷新")
+                    break
+                    
+                if datetime.now(timezone.utc) >= result.expires:
+                    logger.warning("登录二维码已过期，正在自动获取新码...")
                     break
 
                 await asyncio.sleep(3)
