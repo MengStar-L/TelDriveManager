@@ -696,7 +696,6 @@ async def _process_share_download(share_id: str, file_ids: List[str], pass_code_
                                    rename_by_folder: bool = False):
     try:
         await _ensure_clients()
-        from pikpakapi.enums import DownloadStatus
         total = len(file_ids)
         cfg = load_config()
         engine = _get_engine()
@@ -704,39 +703,35 @@ async def _process_share_download(share_id: str, file_ids: List[str], pass_code_
         await _broadcast({"type": "task_start", "index": 1, "total": total,
                           "magnet": f"分享文件 ({total} 个)"})
         await _broadcast({"type": "task_status", "index": 1, "status": "正在保存到网盘..."})
-        saved_ids, restore_task_id = await _pikpak.save_share_files(share_id, file_ids, pass_code_token)
+        saved_ids = await _pikpak.save_share_files(share_id, file_ids, pass_code_token)
         if not saved_ids:
-            await _broadcast({"type": "task_error", "index": 1, "message": "保存失败: restore 未返回 file_id"})
+            await _broadcast({"type": "task_error", "index": 1, "message": "保存失败，未获取到文件"})
             return
 
         logger.info(f"分享文件已保存, saved_ids={saved_ids}")
 
-        # save_share_files 内部已处理异步等待，这里直接开始获取链接
-
         all_urls = []
         for i, fid in enumerate(saved_ids, 1):
             await _broadcast({"type": "task_status", "index": i, "status": f"获取下载链接 [{i}/{len(saved_ids)}]"})
+            max_retries = 3
             urls = []
-            last_err = None
-            delays = [2, 3, 5, 8]
-            for attempt in range(len(delays) + 1):
+            for attempt in range(max_retries):
                 try:
-                    # 移除 timeout 包装，防止因文件夹内文件过多扫描耗时久时被强行打断导致死循环
-                    urls = await _pikpak.get_download_urls(fid)
+                    urls = await asyncio.wait_for(_pikpak.get_download_urls(fid), timeout=30.0)
                     if urls:
                         break
-                    else:
-                        logger.warning(f"get_download_urls 返回空 (尝试 {attempt+1}, fid={fid})")
+                except asyncio.TimeoutError:
+                    logger.warning(f"文件 {i} 获取超时，第 {attempt+1}/{max_retries} 次尝试")
+                    if attempt < max_retries - 1:
+                        await _broadcast({"type": "task_status", "index": i, "status": f"获取超时，第 {attempt+2} 次重试..."})
+                        await asyncio.sleep(2)
                 except Exception as e:
-                    last_err = e
-                    logger.error(f"get_download_urls 异常 (尝试 {attempt+1}, fid={fid}): {repr(e)}")
-                
-                if attempt < len(delays):
-                    await asyncio.sleep(delays[attempt])
-            
+                    logger.error(f"文件 {i} 获取出错: {e}")
+                    if attempt < max_retries - 1:
+                        await asyncio.sleep(2)
             if not urls:
-                err_detail = f": {repr(last_err)}" if last_err else "(文件可能未就绪/空文件夹)"
-                await _broadcast({"type": "task_error", "index": i, "message": f"获取链接失败{err_detail}"})
+                logger.warning(f"文件 {i} 获取下载链接失败，已重试 {max_retries} 次")
+                await _broadcast({"type": "task_error", "index": i, "message": f"获取链接失败 (重试{max_retries}次)"})
                 continue
             
             all_urls.extend(urls)

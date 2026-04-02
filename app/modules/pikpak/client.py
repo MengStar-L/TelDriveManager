@@ -271,122 +271,19 @@ class PikPakClient:
             })
 
     async def save_share_files(self, share_id: str, file_ids: List[str],
-                                pass_code_token: str) -> tuple:
-        """
-        转存分享文件到网盘，返回 (saved_ids, restore_task_id)。
-        对于异步转存（大文件），会轮询任务状态直到完成，然后从任务详情中提取真实文件 ID。
-        """
+                                pass_code_token: str) -> List[str]:
+        """将分享文件转存到自己的网盘（与 AutoPikDown 完全一致）"""
         result = await self.client.restore(share_id, pass_code_token, file_ids)
         logger.info(f"restore 响应: {json.dumps(result, ensure_ascii=False)}")
-        
-        restore_task_id = result.get("restore_task_id", "")
-        restore_status = result.get("restore_status", "")
-        
         saved_ids = []
-        # 优先从 task_info 中提取（某些场景下 API 会直接返回）
-        for task_info in result.get("task_info", []):
-            fid = task_info.get("file_id", "")
-            if fid:
-                saved_ids.append(fid)
-        
-        # 如果有 task_info 就直接返回（同步完成的场景）
-        if saved_ids:
-            return saved_ids, restore_task_id
-        
-        # 异步转存场景：需要轮询任务状态获取真实文件 ID
-        if restore_status == "RESTORE_START" and restore_task_id:
-            logger.info(f"转存为异步模式，开始轮询任务 {restore_task_id}")
-            actual_ids = await self._poll_restore_task(restore_task_id)
-            if actual_ids:
-                return actual_ids, restore_task_id
-        
-        # 最终 fallback：用 restore 返回的 file_id（可能是根目录，但聊胜于无）
-        root_id = result.get("file_id", "")
-        if root_id:
-            saved_ids.append(root_id)
-        return saved_ids, restore_task_id
+        if result.get('file_id'):
+            saved_ids.append(result['file_id'])
+        if not saved_ids:
+            for task_info in result.get('task_info', []):
+                fid = task_info.get('file_id', '')
+                if fid:
+                    saved_ids.append(fid)
+        logger.info(f"已保存 {len(saved_ids)} 个分享文件到网盘, IDs: {saved_ids}")
+        return saved_ids
 
-    async def _poll_restore_task(self, task_id: str, 
-                                  poll_interval: float = 3.0, 
-                                  max_wait: float = 300.0) -> List[str]:
-        """轮询离线任务状态，直到完成后从任务详情中提取真实目标文件 ID"""
-        import httpx
-        start = time.time()
-        
-        while True:
-            elapsed = int(time.time() - start)
-            if elapsed > max_wait:
-                logger.warning(f"转存任务轮询超时 ({elapsed}s)")
-                return []
-            
-            try:
-                url = f"https://api-drive.mypikpak.com/drive/v1/tasks/{task_id}"
-                headers = {"Authorization": f"Bearer {self.client.access_token}"}
-                async with httpx.AsyncClient() as hc:
-                    resp = await hc.get(url, headers=headers)
-                    task = resp.json()
-                
-                phase = task.get("phase", "")
-                
-                # 尝试从多个可能的字段提取 file_id
-                file_id = (task.get("file_id", "") 
-                          or task.get("params", {}).get("file_id", "")
-                          or task.get("file", {}).get("id", ""))
-                file_name = (task.get("file_name", "") 
-                           or task.get("name", "")
-                           or task.get("file", {}).get("name", ""))
-                
-                if phase == "PHASE_TYPE_COMPLETE":
-                    # 首次到达 COMPLETE 时，打印完整响应便于排查
-                    logger.info(f"转存任务完成，完整响应: {json.dumps(task, ensure_ascii=False, default=str)}")
-                    
-                    if file_id:
-                        logger.info(f"转存完成！目标文件 ID={file_id}, 名称={file_name}, 耗时 {elapsed}s")
-                        return [file_id]
-                    else:
-                        # file_id 为空，回退到查找根目录下最新文件
-                        logger.info(f"任务已完成但未返回 file_id，将通过根目录最新文件查找")
-                        recent = await self._find_recent_files(seconds=180)
-                        if recent:
-                            return recent
-                        # 如果还找不到，等几秒再试一次（文件可能还在索引中）
-                        await asyncio.sleep(3)
-                        recent = await self._find_recent_files(seconds=180)
-                        return recent
-                        
-                elif phase in ("PHASE_TYPE_ERROR", "PHASE_TYPE_FAILED"):
-                    logger.error(f"转存任务失败: {json.dumps(task, ensure_ascii=False, default=str)}")
-                    return []
-                else:
-                    logger.info(f"转存进行中: phase={phase}, 已等待 {elapsed}s")
-                    
-            except Exception as e:
-                logger.warning(f"转存轮询异常: {e}, 已等待 {elapsed}s")
-            
-            await asyncio.sleep(poll_interval)
-
-    async def _find_recent_files(self, seconds: int = 180) -> List[str]:
-        """在网盘根目录查找最近 N 秒内创建的文件（非文件夹）"""
-        from datetime import datetime, timezone, timedelta
-        try:
-            resp = await self.client.file_list(parent_id="", next_page_token=None)
-            now = datetime.now(timezone.utc)
-            cutoff = now - timedelta(seconds=seconds)
-            results = []
-            for f in resp.get("files", []):
-                if f.get("kind") == "drive#folder":
-                    continue
-                created = f.get("created_time", "")
-                if created:
-                    try:
-                        ct = datetime.fromisoformat(created.replace("Z", "+00:00"))
-                        if ct > cutoff:
-                            results.append(f["id"])
-                            logger.info(f"找到最新文件: {f.get('name', '?')} (id={f['id']}, 创建于 {created})")
-                    except Exception:
-                        pass
-            return results
-        except Exception as e:
-            logger.error(f"查找最新文件失败: {e}")
-            return []
 
