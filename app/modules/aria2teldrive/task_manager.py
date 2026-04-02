@@ -140,9 +140,9 @@ class TaskManager:
                 "dir": cfg["aria2"].get("download_dir", "./downloads"),
             }
             await self.aria2.change_global_option(options)
-            logger.info(f"已同步 aria2 全局选项: {options}")
+            # logger.info(f"已同步 aria2 全局选项: {options}")
         except Exception as e:
-            logger.warning(f"同步 aria2 全局选项失败: {e}")
+            pass
 
     async def start(self):
         """启动任务管理器"""

@@ -257,17 +257,33 @@ class PikPakClient:
 
     async def save_share_files(self, share_id: str, file_ids: List[str],
                                 pass_code_token: str) -> List[str]:
-        result = await self.client.restore(share_id, pass_code_token, file_ids)
+        # 创建一个专属的接收文件夹，作为独立目标隔离此次分享。
+        # 这样即使是单文件且返回 RESTORE_START，我们也能精确拿到此隔离环境的 ID，避免污染全局 Pack 目录
+        import time
+        temp_name = f"Share_{share_id[:5]}_{int(time.time())}"
+        try:
+            folder_resp = await self.client.create_folder(name=temp_name, parent_id="")
+            temp_parent_id = folder_resp.get("file", {}).get("id", "")
+        except Exception as e:
+            print(f"DEBUG CREATE FOLDER ERROR: {e}")
+            temp_parent_id = ""
+
+        # 将目标存入该专属文件夹
+        result = await self.client.restore(share_id, pass_code_token, file_ids, to_parent_id=temp_parent_id)
         print(f"DEBUG RESTORE RESP: {result}")
         saved_ids = []
-        # 优先读取 task_info，因为这是真正转存的目标文件清单
+        
+        # 优先读取 task_info，因为这是真正转存的目标文件清单（如果有的话）
         for task_info in result.get("task_info", []):
             fid = task_info.get("file_id", "")
             if fid:
                 saved_ids.append(fid)
                 
-        # 只有在没有 task_info 返回（有可能是单文件直接返回的情况），才 fallback 使用外层 file_id
-        if not saved_ids and result.get("file_id"):
+        # 只有在没有 task_info 返回（大量/大文件转存进入 RESTORE_START 且被放进隔离文件夹）时，
+        # 我们返回该隔离文件夹的 ID 给后续阶段去独享扫描
+        if not saved_ids and temp_parent_id:
+            saved_ids.append(temp_parent_id)
+        elif not saved_ids and result.get("file_id"):
             saved_ids.append(result["file_id"])
         
         return saved_ids
