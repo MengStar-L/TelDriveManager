@@ -582,7 +582,6 @@ async function loadA2TDTasks() {
 
 function renderA2TDStats(stats) {
     if (!stats) return;
-    
     if (stats.cpu) {
         document.getElementById('sysCpuStat').textContent = `${stats.cpu.percent.toFixed(1)}%`;
     }
@@ -590,9 +589,6 @@ function renderA2TDStats(stats) {
         const totalStr = formatBytes(stats.disk.total || 0, 0);
         const freeStr = formatBytes(stats.disk.free || 0, 0);
         document.getElementById('sysDiskStat').textContent = `${freeStr} 可用 / ${totalStr}`;
-    }
-    if (stats.download_speed !== undefined) {
-        document.getElementById('sysDownloadStat').textContent = `${formatBytes(stats.download_speed)}/s`;
     }
     if (stats.upload_speed !== undefined) {
         document.getElementById('sysUploadStat').textContent = `${formatBytes(stats.upload_speed)}/s`;
