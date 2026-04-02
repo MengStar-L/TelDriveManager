@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import logging
 import re
 import time
 from pathlib import Path
@@ -9,6 +10,8 @@ from typing import Any, Dict, List, Optional
 
 from pikpakapi import PikPakApi
 from pikpakapi.enums import DownloadStatus
+
+logger = logging.getLogger(__name__)
 
 TOKEN_FILE = Path(__file__).resolve().parent.parent.parent.parent / "pikpak_token.json"
 
