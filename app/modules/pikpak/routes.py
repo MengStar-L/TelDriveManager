@@ -471,14 +471,20 @@ async def _builtin_download_and_upload(files: List[dict], index: int, delete_pik
                               "message": f"下载失败: {dl_task.error}"})
             continue
         if dl_task.status == TaskStatus.CANCELLED:
-            await db.update_task(task_db_id, status="cancelled")
-            await task_manager.broadcast({"type": "task_update",
-                                           "data": await db.get_task(task_db_id)})
+            task_manager.clear_upload_progress(task_db_id)
+            if await db.get_task(task_db_id):
+                await db.delete_task(task_db_id)
+                await task_manager.broadcast({"type": "task_deleted",
+                                               "data": {"task_id": task_db_id}})
+            continue
+        if not await db.get_task(task_db_id):
+            task_manager.clear_upload_progress(task_db_id)
             continue
 
         # === 上传阶段 ===
         await db.update_task(task_db_id, status="uploading",
                              download_progress=100.0)
+        task_manager.track_upload_progress(task_db_id, 0)
         await task_manager.broadcast({"type": "task_update",
                                        "data": await db.get_task(task_db_id)})
 
@@ -489,6 +495,7 @@ async def _builtin_download_and_upload(files: List[dict], index: int, delete_pik
             async def upload_progress_cb(uploaded: int, total: int, _tid=task_db_id, _name=name):
                 raw_pct = round(uploaded / total * 100, 1) if total > 0 else 0
                 pct = min(raw_pct, 99.9) if total > 0 else 0
+                task_manager.track_upload_progress(_tid, uploaded)
                 await _broadcast({
                     "type": "upload_progress",
                     "task_id": _tid,
@@ -521,6 +528,7 @@ async def _builtin_download_and_upload(files: List[dict], index: int, delete_pik
                 )
 
             # 上传完成
+            task_manager.clear_upload_progress(task_db_id)
             await db.update_task(task_db_id, status="completed",
                                  download_progress=100.0,
                                  upload_progress=100.0,
@@ -544,6 +552,7 @@ async def _builtin_download_and_upload(files: List[dict], index: int, delete_pik
                     logger.warning(f"清理文件失败: {e}")
 
         except Exception as e:
+            task_manager.clear_upload_progress(task_db_id)
             await db.update_task(task_db_id, status="failed",
                                  error=str(e))
             await task_manager.broadcast({"type": "task_update",

@@ -222,10 +222,35 @@ class TaskManager:
                 dead.add(ws)
         self._ws_clients -= dead
 
+    def _get_builtin_download_speed(self) -> int:
+        total_speed = 0
+        for task in downloader.get_all_tasks():
+            if task.status == TaskStatus.DOWNLOADING:
+                total_speed += int(task.speed or 0)
+        return total_speed
+
+    def _get_builtin_task_snapshot(self, task_id: str) -> dict:
+        task = downloader.get_task(task_id)
+        if not task:
+            return {}
+        total_size = int(task.total_size or 0)
+        progress = round(task.downloaded / total_size * 100, 1) if total_size > 0 else 0
+        return {
+            "download_progress": progress,
+            "file_size": task.to_dict()["total_str"],
+            "download_speed": task.to_dict()["speed_str"] if task.status == TaskStatus.DOWNLOADING else "",
+        }
+
+    def track_upload_progress(self, task_id: str, uploaded_bytes: int):
+        self._task_uploaded_bytes[task_id] = max(0, int(uploaded_bytes or 0))
+
+    def clear_upload_progress(self, task_id: str):
+        self._task_uploaded_bytes.pop(task_id, None)
+
     def get_global_stat(self) -> dict:
         """获取当前缓存的全局统计数据（供 WS init 立即推送）"""
         data = {
-            "download_speed": self._last_download_speed,
+            "download_speed": self._last_download_speed + self._get_builtin_download_speed(),
             "upload_speed": int(self._upload_speed),
         }
         if self._disk_usage_info:
@@ -233,6 +258,7 @@ class TaskManager:
         if self._cpu_info:
             data["cpu"] = self._cpu_info
         return data
+
 
     # ===========================================
     # 核心：监控循环 — 主动轮询 aria2 全部任务
@@ -282,20 +308,13 @@ class TaskManager:
 
                 # 独立广播 global_stat（不依赖 aria2 是否连接成功）
                 try:
-                    broadcast_data = {
-                        "download_speed": self._last_download_speed,
-                        "upload_speed": int(self._upload_speed),
-                    }
-                    if self._disk_usage_info:
-                        broadcast_data["disk"] = self._disk_usage_info
-                    if self._cpu_info:
-                        broadcast_data["cpu"] = self._cpu_info
                     await self.broadcast({
                         "type": "global_stat",
-                        "data": broadcast_data
+                        "data": self.get_global_stat()
                     })
                 except Exception:
                     pass
+
 
                 # 定期兜底清理已完成任务的残留本地文件（每 60 秒）
                 if now - self._last_cleanup_time >= 60:
@@ -545,7 +564,8 @@ class TaskManager:
             stat = await self.aria2.get_global_stat()
             self._last_download_speed = int(stat.get("downloadSpeed", 0))
         except Exception:
-            pass
+            self._last_download_speed = 0
+
 
         for item in all_aria2_tasks:
             gid = item.get("gid", "")
@@ -1116,13 +1136,15 @@ class TaskManager:
         is_builtin_task = task_id.startswith("bd-") and not task.get("aria2_gid")
 
         try:
+            update_data = {"status": "paused", "download_speed": ""}
             if is_builtin_task:
                 paused = await downloader.pause(task_id)
                 if not paused:
                     return {"success": False, "message": "内置下载任务当前不可暂停"}
+                update_data.update(self._get_builtin_task_snapshot(task_id))
             else:
                 await self.aria2.pause(task["aria2_gid"])
-            await db.update_task(task_id, status="paused", download_speed="")
+            await db.update_task(task_id, **update_data)
             await self._broadcast_task_update(task_id)
             return {"success": True, "message": "已暂停"}
         except Exception as e:
@@ -1139,13 +1161,15 @@ class TaskManager:
         is_builtin_task = task_id.startswith("bd-") and not task.get("aria2_gid")
 
         try:
+            update_data = {"status": "downloading"}
             if is_builtin_task:
                 resumed = await downloader.resume(task_id)
                 if not resumed:
                     return {"success": False, "message": "内置下载任务当前不可恢复"}
+                update_data.update(self._get_builtin_task_snapshot(task_id))
             else:
                 await self.aria2.unpause(task["aria2_gid"])
-            await db.update_task(task_id, status="downloading")
+            await db.update_task(task_id, **update_data)
             await self._broadcast_task_update(task_id)
             return {"success": True, "message": "已恢复"}
         except Exception as e:
@@ -1167,6 +1191,7 @@ class TaskManager:
 
             if is_builtin_task:
                 await downloader.cancel(task_id)
+                await downloader.remove_task(task_id)
             elif task.get("aria2_gid"):
                 try:
                     await self.aria2.force_remove(task["aria2_gid"])
@@ -1174,9 +1199,14 @@ class TaskManager:
                     pass
 
             self._cancel_existing_upload(task_id)
+            self.clear_upload_progress(task_id)
+            self._upload_retry_counts.pop(task_id, None)
+
             old_gid = task.get("aria2_gid", "")
             if old_gid:
                 self._uploading_gids.discard(old_gid)
+                self._known_gids.discard(old_gid)
+                self._terminal_gids.discard(old_gid)
 
             local = self._get_upload_path(task.get("local_path", ""))
             if local and os.path.exists(local):
@@ -1184,11 +1214,13 @@ class TaskManager:
                     shutil.rmtree(local, ignore_errors=True)
                 else:
                     os.remove(local)
-            await db.update_task(task_id, status="cancelled", download_speed="", upload_speed="")
-            await self._broadcast_task_update(task_id)
+
+            await db.delete_task(task_id)
+            await self.broadcast({"type": "task_deleted", "data": {"task_id": task_id}})
             return {"success": True, "message": "已取消"}
         except Exception as e:
             return {"success": False, "message": str(e)}
+
 
 
     def _cancel_existing_upload(self, task_id: str):
