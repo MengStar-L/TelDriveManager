@@ -259,11 +259,14 @@ class PikPakClient:
                                 pass_code_token: str) -> List[str]:
         result = await self.client.restore(share_id, pass_code_token, file_ids)
         saved_ids = []
-        if result.get("file_id"):
+        # 优先读取 task_info，因为这是真正转存的目标文件清单
+        for task_info in result.get("task_info", []):
+            fid = task_info.get("file_id", "")
+            if fid:
+                saved_ids.append(fid)
+                
+        # 只有在没有 task_info 返回（有可能是单文件直接返回的情况），才 fallback 使用外层 file_id
+        if not saved_ids and result.get("file_id"):
             saved_ids.append(result["file_id"])
-        if not saved_ids:
-            for task_info in result.get("task_info", []):
-                fid = task_info.get("file_id", "")
-                if fid:
-                    saved_ids.append(fid)
+        
         return saved_ids

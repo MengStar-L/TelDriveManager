@@ -11,8 +11,6 @@ logging.basicConfig(
     datefmt="%Y-%m-%d %H:%M:%S",
     handlers=[logging.StreamHandler(sys.stdout)],
 )
-# 屏蔽 httpx 在 INFO 级别下的刷屏日志
-logging.getLogger("httpx").setLevel(logging.WARNING)
 
 # 确保项目根目录在 sys.path 中
 ROOT_DIR = Path(__file__).parent
@@ -40,7 +38,7 @@ def main():
         "app.main:app",
         host="0.0.0.0",
         port=port,
-        reload=False,
+        reload=True,
         log_level="warning",
     )
 
