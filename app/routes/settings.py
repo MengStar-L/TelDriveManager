@@ -68,20 +68,36 @@ async def test_pikpak(payload: dict = Body(None)):
         cfg = payload
     else:
         cfg = load_config()["pikpak"]
-        
-    if not cfg.get("username") or not cfg.get("password"):
-         return {"success": False, "message": "PikPak 账号密码不能为空"}
+
+    login_mode = cfg.get("login_mode", "password")
+    if login_mode == "session":
+        session = (cfg.get("session") or "").strip()
+        if not session:
+            return {"success": False, "message": "PikPak Session 不能为空"}
+        username = ""
+        password = ""
+    else:
+        username = (cfg.get("username") or "").strip()
+        password = cfg.get("password", "")
+        session = ""
+        if not username or not password:
+            return {"success": False, "message": "PikPak 账号密码不能为空"}
 
     try:
         client = PikPakClient(
-            username=cfg.get("username", ""),
-            password=cfg.get("password", ""),
+            username=username,
+            password=password,
+            session=session,
+            login_mode=login_mode,
             save_dir=cfg.get("save_dir", "/"),
         )
         await client.login()
-        return {"success": True, "message": "PikPak 登录成功"}
+        mode_text = "Session" if login_mode == "session" else "账号密码"
+        return {"success": True, "message": f"PikPak {mode_text} 登录成功"}
     except Exception as e:
         return {"success": False, "message": f"PikPak 连接失败: {str(e)}"}
+
+
 
 @router.post("/test/telegram")
 async def test_telegram(payload: dict = Body(None)):
@@ -174,7 +190,11 @@ async def global_health_check():
         # PikPak: 检查配置是否存在
         cfg = load_config()
         pikpak_cfg = cfg.get("pikpak", {})
-        statuses["pikpak"] = bool(pikpak_cfg.get("username")) and bool(pikpak_cfg.get("password"))
+        pikpak_mode = pikpak_cfg.get("login_mode", "password")
+        statuses["pikpak"] = bool(pikpak_cfg.get("session")) if pikpak_mode == "session" else (
+            bool(pikpak_cfg.get("username")) and bool(pikpak_cfg.get("password"))
+        )
+
 
         # Aria2
         statuses["aria2"] = task_manager.aria2 is not None

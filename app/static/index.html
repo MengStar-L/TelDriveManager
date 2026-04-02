@@ -675,13 +675,29 @@
                         <div class="card">
                             <div class="card-header"><h3><i class="ph-fill ph-cloud"></i> PikPak 凭证与中转桥</h3></div>
                             <div class="card-body">
-                                <div class="field-grid">
+                                <div class="field-grid cols-1">
+                                    <div class="form-group">
+                                        <label>登录方式</label>
+                                        <select class="form-input" id="cfgPikpakLoginMode" onchange="togglePikpakLoginMode()">
+                                            <option value="password">账号密码登录</option>
+                                            <option value="session">Session 登录</option>
+                                        </select>
+                                    </div>
+                                </div>
+                                <div class="field-grid" id="cfgPikpakPasswordFields">
                                     <div class="form-group"><label>身份标识 (Email)</label><input class="form-input" type="text" id="cfgPikpakUsername" placeholder="email@example.com"></div>
                                     <div class="form-group"><label>访问密钥</label><input class="form-input" type="password" id="cfgPikpakPassword" placeholder="******"></div>
+                                </div>
+                                <div class="field-grid cols-1" id="cfgPikpakSessionFields" style="display:none;">
+                                    <div class="form-group">
+                                        <label>Session / Encoded Token</label>
+                                        <input class="form-input" type="password" id="cfgPikpakSession" placeholder="粘贴 PikPak session 或 encoded_token">
+                                    </div>
                                 </div>
                                 <div class="field-grid cols-1">
                                     <div class="form-group"><label>云端隔离下载域</label><input class="form-input" type="text" id="cfgPikpakSaveDir" placeholder="/"></div>
                                 </div>
+
                                 <div style="margin-top:20px; padding-top:20px; border-top:1px solid var(--border)">
                                     <label class="toggle-row" style="justify-content:space-between">
                                         任务下发完成销毁云端文件

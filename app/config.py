@@ -34,7 +34,7 @@ DEFAULTS: dict[str, Any] = {
     "server": {"port": 8888},
     "auth": {"username": "", "password": ""},
     "pikpak": {
-        "username": "", "password": "", "save_dir": "/",
+        "login_mode": "password", "username": "", "password": "", "session": "", "save_dir": "/",
         "delete_after_download": True, "poll_interval": 3, "max_wait_time": 3600,
         "download_engine": "builtin", "max_concurrent_downloads": 3,
         "connections_per_task": 8,
@@ -159,12 +159,16 @@ def needs_setup() -> bool:
         return True
     
     cfg = load_config()
-    pikpak_user = cfg.get("pikpak", {}).get("username", "")
+    pikpak_cfg = cfg.get("pikpak", {})
+    pikpak_mode = pikpak_cfg.get("login_mode", "password")
+    has_pikpak_auth = bool(pikpak_cfg.get("session")) if pikpak_mode == "session" else (
+        bool(pikpak_cfg.get("username")) and bool(pikpak_cfg.get("password"))
+    )
     teldrive_token = cfg.get("teldrive", {}).get("access_token", "")
     telegram_hash = cfg.get("telegram", {}).get("api_hash", "")
     
     # 如果三个核心凭证全为空或不完整，则需要弹窗引导配置
-    if not pikpak_user or not teldrive_token or not telegram_hash:
+    if not has_pikpak_auth or not teldrive_token or not telegram_hash:
         return True
         
     return False

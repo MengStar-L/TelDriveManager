@@ -19,18 +19,21 @@ TOKEN_FILE = Path(__file__).resolve().parent.parent.parent.parent / "pikpak_toke
 class PikPakClient:
     """封装 PikPakApi，提供离线下载 → 获取直链的完整流程"""
 
-    def __init__(self, username: str, password: str, save_dir: str = "/"):
+    def __init__(self, username: str = "", password: str = "", save_dir: str = "/",
+                 session: str = "", login_mode: str = "password"):
         self.username = username
         self.password = password
         self.save_dir = save_dir
+        self.session = session.strip()
+        self.login_mode = login_mode if login_mode in {"password", "session"} else "password"
         self._save_dir_id: Optional[str] = None
 
-        saved_token = self._load_token()
-        if saved_token:
+        encoded_token = self.session or self._load_token()
+        if encoded_token:
             self.client = PikPakApi(
-                username=username,
-                password=password,
-                encoded_token=saved_token,
+                username=username or None,
+                password=password or None,
+                encoded_token=encoded_token,
                 token_refresh_callback=PikPakClient._on_token_refresh,
             )
         else:
@@ -41,6 +44,8 @@ class PikPakClient:
             )
 
     def _load_token(self) -> Optional[str]:
+        if not self.username:
+            return None
         try:
             if TOKEN_FILE.exists():
                 data = json.loads(TOKEN_FILE.read_text(encoding="utf-8"))
@@ -83,8 +88,11 @@ class PikPakClient:
                 await self.client.refresh_access_token()
                 self._save_token()
                 return
-            except Exception:
-                pass
+            except Exception as e:
+                if self.login_mode == "session" and not (self.username and self.password):
+                    raise ValueError(f"PikPak session 已失效，请更新 session：{e}") from e
+        if not (self.username and self.password):
+            raise ValueError("PikPak 账号密码未配置，无法使用密码登录")
         await self.client.login()
         self._save_token()
 

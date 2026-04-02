@@ -44,6 +44,8 @@ def _create_clients():
     pikpak = PikPakClient(
         username=pikpak_cfg.get("username", ""),
         password=pikpak_cfg.get("password", ""),
+        session=pikpak_cfg.get("session", ""),
+        login_mode=pikpak_cfg.get("login_mode", "password"),
         save_dir=pikpak_cfg.get("save_dir", "/"),
     )
     aria2 = Aria2Client(

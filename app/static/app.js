@@ -741,7 +741,70 @@ async function clearCompletedTasks() {
 }
 
 // ── Settings ──
+function togglePikpakLoginMode() {
+    const mode = document.getElementById('cfgPikpakLoginMode')?.value || 'password';
+    const passwordFields = document.getElementById('cfgPikpakPasswordFields');
+    const sessionFields = document.getElementById('cfgPikpakSessionFields');
+    if (passwordFields) passwordFields.style.display = mode === 'session' ? 'none' : 'grid';
+    if (sessionFields) sessionFields.style.display = mode === 'session' ? 'grid' : 'none';
+}
+
+function collectSettingsConfig() {
+    return {
+        auth: {
+            username: document.getElementById('cfgAuthUser').value.trim(),
+            password: document.getElementById('cfgAuthPass').value.trim()
+        },
+        server: { port: parseInt(document.getElementById('cfgServerPort').value) || 8888 },
+        pikpak: {
+            login_mode: document.getElementById('cfgPikpakLoginMode').value || 'password',
+            username: document.getElementById('cfgPikpakUsername').value,
+            password: document.getElementById('cfgPikpakPassword').value,
+            session: document.getElementById('cfgPikpakSession').value.trim(),
+            save_dir: document.getElementById('cfgPikpakSaveDir').value || '/',
+            delete_after_download: document.getElementById('cfgPikpakDelete').checked,
+            download_engine: document.getElementById('cfgPikpakEngine').value || 'builtin',
+            max_concurrent_downloads: parseInt(document.getElementById('cfgPikpakMaxDownloads').value) || 3,
+            connections_per_task: parseInt(document.getElementById('cfgPikpakConnections').value) || 8
+        },
+        aria2: {
+            rpc_url: document.getElementById('cfgAria2Url').value,
+            rpc_secret: document.getElementById('cfgAria2Secret').value,
+            download_dir: document.getElementById('cfgAria2Dir').value
+        },
+        teldrive: {
+            api_host: document.getElementById('cfgTeldriveHost').value,
+            access_token: document.getElementById('cfgTeldriveToken').value,
+            channel_id: parseInt(document.getElementById('cfgTeldriveChannel').value) || 0,
+            upload_concurrency: parseInt(document.getElementById('cfgTeldriveConcurrency').value) || 4,
+            chunk_size: "500M"
+        },
+        upload: {
+            auto_delete: document.getElementById('cfgUploadAutoDelete').checked,
+            max_retries: 3,
+            check_interval: 3,
+            max_disk_usage_gb: 0,
+            cpu_usage_limit: 85
+        },
+        telegram: {
+            api_id: parseInt(document.getElementById('cfgTelegramApiId').value) || 0,
+            api_hash: document.getElementById('cfgTelegramApiHash').value,
+            channel_id: parseInt(document.getElementById('cfgTelegramChannelId').value) || 0,
+            sync_interval: parseInt(document.getElementById('cfgTelegramSyncInterval').value) || 10,
+            sync_enabled: document.getElementById('cfgTelegramSyncEnabled').checked
+        },
+        telegram_db: {
+            host: document.getElementById('cfgDbHost').value,
+            port: parseInt(document.getElementById('cfgDbPort').value) || 5432,
+            user: document.getElementById('cfgDbUser').value,
+            password: document.getElementById('cfgDbPassword').value,
+            name: document.getElementById('cfgDbName').value || 'postgres'
+        }
+    };
+}
+
 async function loadConfig() {
+
     try {
         const resp = await fetch('/api/settings');
         const cfg = await resp.json();
@@ -751,13 +814,17 @@ async function loadConfig() {
         
         document.getElementById('cfgServerPort').value = cfg.server?.port || 8888;
 
+        document.getElementById('cfgPikpakLoginMode').value = cfg.pikpak?.login_mode || 'password';
         document.getElementById('cfgPikpakUsername').value = cfg.pikpak?.username || '';
         document.getElementById('cfgPikpakPassword').value = cfg.pikpak?.password || '';
+        document.getElementById('cfgPikpakSession').value = cfg.pikpak?.session || '';
         document.getElementById('cfgPikpakSaveDir').value = cfg.pikpak?.save_dir || '/';
         document.getElementById('cfgPikpakDelete').checked = cfg.pikpak?.delete_after_download || false;
         document.getElementById('cfgPikpakEngine').value = cfg.pikpak?.download_engine || 'builtin';
         document.getElementById('cfgPikpakMaxDownloads').value = cfg.pikpak?.max_concurrent_downloads || 3;
         document.getElementById('cfgPikpakConnections').value = cfg.pikpak?.connections_per_task || 8;
+        togglePikpakLoginMode();
+
         
         document.getElementById('cfgAria2Url').value = cfg.aria2?.rpc_url || '';
         document.getElementById('cfgAria2Secret').value = cfg.aria2?.rpc_secret || '';
@@ -791,57 +858,9 @@ async function saveConfig() {
     const btn = document.getElementById('saveBtn');
     btn.disabled = true; btn.innerHTML = '<span class="spinner"></span> 保存...';
     
-    // Parse form to nested map
-    const cfg = {
-        auth: {
-            username: document.getElementById('cfgAuthUser').value.trim(),
-            password: document.getElementById('cfgAuthPass').value.trim()
-        },
-        server: { port: parseInt(document.getElementById('cfgServerPort').value) || 8888 },
-        pikpak: { 
-            username: document.getElementById('cfgPikpakUsername').value, 
-            password: document.getElementById('cfgPikpakPassword').value, 
-            save_dir: document.getElementById('cfgPikpakSaveDir').value || '/', 
-            delete_after_download: document.getElementById('cfgPikpakDelete').checked,
-            download_engine: document.getElementById('cfgPikpakEngine').value || 'builtin',
-            max_concurrent_downloads: parseInt(document.getElementById('cfgPikpakMaxDownloads').value) || 3,
-            connections_per_task: parseInt(document.getElementById('cfgPikpakConnections').value) || 8
-        },
-        aria2: { 
-            rpc_url: document.getElementById('cfgAria2Url').value, 
-            rpc_secret: document.getElementById('cfgAria2Secret').value, 
-            download_dir: document.getElementById('cfgAria2Dir').value 
-        },
-        teldrive: {
-            api_host: document.getElementById('cfgTeldriveHost').value,
-            access_token: document.getElementById('cfgTeldriveToken').value,
-            channel_id: parseInt(document.getElementById('cfgTeldriveChannel').value) || 0,
-            upload_concurrency: parseInt(document.getElementById('cfgTeldriveConcurrency').value) || 4,
-            chunk_size: "500M"
-        },
-        upload: {
-            auto_delete: document.getElementById('cfgUploadAutoDelete').checked,
-            max_retries: 3,
-            check_interval: 3,
-            max_disk_usage_gb: 0,
-            cpu_usage_limit: 85
-        },
-        telegram: {
-            api_id: parseInt(document.getElementById('cfgTelegramApiId').value) || 0,
-            api_hash: document.getElementById('cfgTelegramApiHash').value,
-            channel_id: parseInt(document.getElementById('cfgTelegramChannelId').value) || 0,
-            sync_interval: parseInt(document.getElementById('cfgTelegramSyncInterval').value) || 10,
-            sync_enabled: document.getElementById('cfgTelegramSyncEnabled').checked
-        },
-        telegram_db: {
-            host: document.getElementById('cfgDbHost').value,
-            port: parseInt(document.getElementById('cfgDbPort').value) || 5432,
-            user: document.getElementById('cfgDbUser').value,
-            password: document.getElementById('cfgDbPassword').value,
-            name: document.getElementById('cfgDbName').value || 'postgres'
-        }
-    };
+    const cfg = collectSettingsConfig();
     
+
     try {
         const resp = await fetch('/api/settings', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(cfg) });
         if (resp.ok) { 
@@ -861,7 +880,8 @@ function initAutoSave() {
     const settingsPage = document.getElementById('page-settings');
     if (!settingsPage) return;
 
-    const inputs = settingsPage.querySelectorAll('input.form-input, input[type="checkbox"]');
+    const inputs = settingsPage.querySelectorAll('input.form-input, textarea.form-input, select.form-input, input[type="checkbox"]');
+
     inputs.forEach(input => {
         const eventType = input.type === 'checkbox' ? 'change' : 'change';
         input.addEventListener(eventType, () => {
@@ -873,50 +893,8 @@ function initAutoSave() {
 }
 
 async function doAutoSave(triggerInput) {
-    // 复用 saveConfig 的数据收集逻辑
-    const cfg = {
-        auth: {
-            username: document.getElementById('cfgAuthUser').value.trim(),
-            password: document.getElementById('cfgAuthPass').value.trim()
-        },
-        server: { port: parseInt(document.getElementById('cfgServerPort').value) || 8888 },
-        pikpak: {
-            username: document.getElementById('cfgPikpakUsername').value,
-            password: document.getElementById('cfgPikpakPassword').value,
-            save_dir: document.getElementById('cfgPikpakSaveDir').value || '/',
-            delete_after_download: document.getElementById('cfgPikpakDelete').checked
-        },
-        aria2: {
-            rpc_url: document.getElementById('cfgAria2Url').value,
-            rpc_secret: document.getElementById('cfgAria2Secret').value,
-            download_dir: document.getElementById('cfgAria2Dir').value
-        },
-        teldrive: {
-            api_host: document.getElementById('cfgTeldriveHost').value,
-            access_token: document.getElementById('cfgTeldriveToken').value,
-            channel_id: parseInt(document.getElementById('cfgTeldriveChannel').value) || 0,
-            upload_concurrency: parseInt(document.getElementById('cfgTeldriveConcurrency').value) || 4,
-            chunk_size: "500M"
-        },
-        upload: {
-            auto_delete: document.getElementById('cfgUploadAutoDelete').checked,
-            max_retries: 3, check_interval: 3, max_disk_usage_gb: 0, cpu_usage_limit: 85
-        },
-        telegram: {
-            api_id: parseInt(document.getElementById('cfgTelegramApiId').value) || 0,
-            api_hash: document.getElementById('cfgTelegramApiHash').value,
-            channel_id: parseInt(document.getElementById('cfgTelegramChannelId').value) || 0,
-            sync_interval: parseInt(document.getElementById('cfgTelegramSyncInterval').value) || 10,
-            sync_enabled: document.getElementById('cfgTelegramSyncEnabled').checked
-        },
-        telegram_db: {
-            host: document.getElementById('cfgDbHost').value,
-            port: parseInt(document.getElementById('cfgDbPort').value) || 5432,
-            user: document.getElementById('cfgDbUser').value,
-            password: document.getElementById('cfgDbPassword').value,
-            name: document.getElementById('cfgDbName').value || 'postgres'
-        }
-    };
+    const cfg = collectSettingsConfig();
+
 
     try {
         const resp = await fetch('/api/settings', {

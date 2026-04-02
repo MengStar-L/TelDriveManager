@@ -11,8 +11,10 @@ password = ""
 
 # ─── PikPak 离线下载 ───
 [pikpak]
+login_mode = "password"             # "password" 或 "session"
 username = ""
 password = ""
+session = ""                        # 当 login_mode = "session" 时填写 encoded_token / session
 save_dir = "/"
 delete_after_download = true
 poll_interval = 3
