@@ -710,16 +710,20 @@ async def _process_share_download(share_id: str, file_ids: List[str], pass_code_
         for i, fid in enumerate(saved_ids, 1):
             await _broadcast({"type": "task_status", "index": i, "status": f"获取下载链接 [{i}/{len(saved_ids)}]"})
             urls = []
+            last_err = None
             for attempt in range(3):
                 try:
                     urls = await asyncio.wait_for(_pikpak.get_download_urls(fid), timeout=30.0)
                     if urls:
                         break
-                except Exception:
+                except Exception as e:
+                    last_err = e
+                    logger.warning(f"获取下载链接失败 (尝试 {attempt+1}/3, fid={fid}): {e}")
                     if attempt < 2:
                         await asyncio.sleep(2)
             if not urls:
-                await _broadcast({"type": "task_error", "index": i, "message": "获取链接失败"})
+                err_detail = f": {last_err}" if last_err else ""
+                await _broadcast({"type": "task_error", "index": i, "message": f"获取链接失败{err_detail}"})
                 continue
             all_urls.extend(urls)
 
