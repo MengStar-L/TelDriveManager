@@ -569,8 +569,10 @@
                         <div class="card-body">
                             <div id="t2tdQrArea" style="text-align:center; padding: 20px 0;">
                                 <p style="margin-bottom: 20px; color: var(--text-secondary);">服务尚未登录或二维码获取中...</p>
-                                <img id="t2tdQrImg" src="" style="display:none; margin:0 auto; border-radius:12px; border:2px solid var(--border);" width="250">
+                                <img id="t2tdQrImg" src="" onclick="refreshT2TDQr(true)" title="点击二维码刷新" style="display:none; margin:0 auto; border-radius:12px; border:2px solid var(--border); cursor:pointer;" width="250">
+                                <div id="t2tdQrHint" style="display:none; margin-top: 12px; font-size: 13px; color: var(--text-secondary);">点击二维码可主动刷新</div>
                                 <form id="t2td2faForm" style="display:none; max-width:300px; margin: 20px auto 0;">
+
                                     <div class="form-group">
                                         <label>需要两步验证密码</label>
                                         <input type="password" id="t2tdPassword" class="form-input" placeholder="输入云密码">

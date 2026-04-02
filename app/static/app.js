@@ -582,14 +582,149 @@ function renderA2TDStats(stats) {
     }
 }
 
-// renderA2TDTasks 已被移除
+function escapeA2TDHtml(value) {
+    return String(value ?? '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+}
+
+function getA2TDTaskStatusLabel(status) {
+    const map = {
+        pending: '等待中',
+        downloading: '下载中',
+        paused: '已暂停',
+        uploading: '上传中',
+        completed: '已完成',
+        failed: '失败',
+        cancelled: '已取消'
+    };
+    return map[status] || (status || '未知状态');
+}
+
+function getA2TDTaskProgress(task) {
+    if (task.status === 'completed') return 100;
+    if (task.status === 'uploading') return Number(task.upload_progress || 0);
+    if (Number(task.upload_progress || 0) > 0 && Number(task.download_progress || 0) >= 100) {
+        return Number(task.upload_progress || 0);
+    }
+    return Number(task.download_progress || 0);
+}
+
+function getA2TDTaskMode(task) {
+    if (task.status === 'completed') return 'done';
+    if (task.status === 'uploading') return 'upload';
+    return 'download';
+}
+
+function getA2TDTaskActions(task) {
+    const taskId = encodeURIComponent(task.task_id);
+    if (task.status === 'downloading') {
+        return `
+            <button class="btn btn-ghost btn-sm" onclick="a2tdAction('${taskId}', 'pause')"><i class="ph ph-pause"></i> 暂停</button>
+            <button class="btn btn-ghost btn-sm" onclick="a2tdAction('${taskId}', 'cancel')" style="color:var(--error);"><i class="ph ph-x"></i> 取消</button>
+        `;
+    }
+    if (task.status === 'paused') {
+        return `
+            <button class="btn btn-ghost btn-sm" onclick="a2tdAction('${taskId}', 'resume')" style="color:var(--success);"><i class="ph ph-play"></i> 恢复</button>
+            <button class="btn btn-ghost btn-sm" onclick="a2tdAction('${taskId}', 'cancel')" style="color:var(--error);"><i class="ph ph-x"></i> 取消</button>
+        `;
+    }
+    if (task.status === 'uploading') {
+        return `
+            <button class="btn btn-ghost btn-sm" onclick="a2tdAction('${taskId}', 'retry')" style="color:var(--warning);"><i class="ph ph-arrow-clockwise"></i> 重传</button>
+            <button class="btn btn-ghost btn-sm" onclick="a2tdAction('${taskId}', 'cancel')" style="color:var(--error);"><i class="ph ph-x"></i> 取消</button>
+        `;
+    }
+    if (task.status === 'failed') {
+        return `
+            <button class="btn btn-ghost btn-sm" onclick="a2tdAction('${taskId}', 'retry')" style="color:var(--warning);"><i class="ph ph-arrow-clockwise"></i> 重试</button>
+            <button class="btn btn-ghost btn-sm" onclick="a2tdAction('${taskId}', 'delete')" style="color:var(--error);"><i class="ph ph-trash"></i> 删除</button>
+        `;
+    }
+    if (task.status === 'pending') {
+        return `<button class="btn btn-ghost btn-sm" onclick="a2tdAction('${taskId}', 'cancel')" style="color:var(--error);"><i class="ph ph-x"></i> 取消</button>`;
+    }
+    return `<button class="btn btn-ghost btn-sm" onclick="a2tdAction('${taskId}', 'delete')"><i class="ph ph-trash"></i> 删除记录</button>`;
+}
+
+function renderA2TDTasks(tasks) {
+    const container = document.getElementById('progressBarsContainer');
+    const barsEl = document.getElementById('progressBars');
+    const placeholder = document.getElementById('a2tdEmptyPlaceholder');
+    if (!container || !barsEl || !placeholder) return;
+
+    if (!Array.isArray(tasks) || tasks.length === 0) {
+        barsEl.innerHTML = '';
+        container.style.display = 'none';
+        placeholder.style.display = 'block';
+        return;
+    }
+
+    container.style.display = 'block';
+    placeholder.style.display = 'none';
+    barsEl.innerHTML = '';
+
+    tasks.forEach(task => {
+        const mode = getA2TDTaskMode(task);
+        const progress = Math.max(0, Math.min(100, getA2TDTaskProgress(task)));
+        const filename = escapeA2TDHtml(task.filename || task.task_id || '未命名任务');
+        const statusLabel = escapeA2TDHtml(getA2TDTaskStatusLabel(task.status));
+        const downloadProgress = Number(task.download_progress || 0).toFixed(1);
+        const uploadProgress = Number(task.upload_progress || 0).toFixed(1);
+        const speedText = task.status === 'downloading' ? (task.download_speed || '') : (task.upload_speed || '');
+        const sizeText = task.file_size || '';
+        const extraParts = [`状态：${statusLabel}`];
+        if (task.status === 'uploading') extraParts.push(`上传 ${uploadProgress}%`);
+        else if (task.status !== 'completed') extraParts.push(`下载 ${downloadProgress}%`);
+        if (task.updated_at) extraParts.push(`更新于 ${escapeA2TDHtml(task.updated_at)}`);
+
+        const card = document.createElement('div');
+        card.id = 'pb-' + String(task.filename || task.task_id || 'unknown').replace(/[^a-zA-Z0-9_-]/g, '_');
+        card.className = 'progress-card ' + (task.status === 'completed' ? 'completed' : mode === 'upload' ? 'uploading' : 'downloading');
+        card.innerHTML = `
+            <div class="progress-header">
+                <div class="progress-filename">
+                    <i class="ph ${mode === 'upload' ? 'ph-upload-simple ul-icon' : task.status === 'completed' ? 'ph-check-circle' : 'ph-download-simple dl-icon'}" data-icon></i>
+                    <span data-name>${filename}</span>
+                </div>
+                <div class="progress-pct" data-pct>${Math.round(progress)}%</div>
+            </div>
+            <div class="progress-bar-track">
+                <div class="progress-bar-fill ${mode === 'done' ? 'done' : mode}" data-bar style="width:${progress}%"></div>
+            </div>
+            <div class="progress-meta">
+                <span data-size>${escapeA2TDHtml(sizeText)}</span>
+                <span class="speed" data-speed>${escapeA2TDHtml(speedText)}</span>
+                <span data-extra>${extraParts.join(' · ')}</span>
+            </div>
+            ${task.error ? `<div style="margin-top:10px; color:var(--error); font-size:12px; line-height:1.5;">${escapeA2TDHtml(task.error)}</div>` : ''}
+            <div class="page-actions" style="display:flex; flex-wrap:wrap; justify-content:flex-end; gap:8px; margin-top:12px;">
+                ${getA2TDTaskActions(task)}
+            </div>
+        `;
+        barsEl.appendChild(card);
+    });
+}
 
 async function a2tdAction(taskId, action) {
     try {
-        await fetch(`/api/a2td/task/${taskId}/${action}`, { method: 'POST' });
+        const url = action === 'delete' ? `/api/a2td/task/${taskId}` : `/api/a2td/task/${taskId}/${action}`;
+        const method = action === 'delete' ? 'DELETE' : 'POST';
+        const resp = await fetch(url, { method });
+        if (!resp.ok) {
+            const err = await resp.json().catch(() => ({}));
+            throw new Error(err.detail || '操作失败');
+        }
         loadA2TDTasks();
-    } catch(e) {}
+    } catch(e) {
+        alert(e.message || '任务操作失败');
+    }
 }
+
 
 async function a2tdBulkAction(action) {
     try {
@@ -846,6 +981,15 @@ window.onload = () => {
 };
 
 // ── Tel2TelDrive Integration ──
+let t2tdQrRefreshPending = false;
+
+function formatT2TDExpireAt(expiresAt) {
+    if (!expiresAt) return '';
+    const date = new Date(expiresAt);
+    if (Number.isNaN(date.getTime())) return '';
+    return date.toLocaleString('zh-CN', { hour12: false });
+}
+
 async function loadT2TDState() {
     try {
         const res = await fetch('/api/t2td/bootstrap');
@@ -859,32 +1003,105 @@ async function loadT2TDState() {
     } catch(e) {}
 }
 
+async function refreshT2TDQr(manual = false) {
+    if (t2tdQrRefreshPending) return;
+    const area = document.getElementById('t2tdQrArea');
+    const qrImg = document.getElementById('t2tdQrImg');
+    const hint = document.getElementById('t2tdQrHint');
+    try {
+        t2tdQrRefreshPending = true;
+        if (qrImg) {
+            qrImg.style.display = 'none';
+            qrImg.removeAttribute('src');
+            qrImg.style.pointerEvents = 'none';
+        }
+        if (hint) {
+            hint.style.display = 'block';
+            hint.textContent = '正在获取新二维码...';
+        }
+        if (area) {
+            const text = area.querySelector('p');
+            if (text) text.textContent = manual ? '二维码刷新中，请稍候...' : '二维码获取中，请稍候...';
+        }
+        const resp = await fetch('/api/t2td/login/refresh', { method: 'POST' });
+        if (!resp.ok) {
+            const err = await resp.json().catch(() => ({}));
+            throw new Error(err.detail || '刷新二维码失败');
+        }
+    } catch (e) {
+        t2tdQrRefreshPending = false;
+        if (hint) hint.textContent = e.message || '刷新二维码失败';
+        if (qrImg) qrImg.style.pointerEvents = 'auto';
+        alert(e.message || '刷新二维码失败');
+    }
+}
+
 function updateT2TDState(state) {
     const area = document.getElementById('t2tdQrArea');
     const qrImg = document.getElementById('t2tdQrImg');
     const form = document.getElementById('t2td2faForm');
-    if (!area) return;
+    const hint = document.getElementById('t2tdQrHint');
+    if (!area || !qrImg || !form) return;
+
+    const text = area.querySelector('p');
+    const expireText = formatT2TDExpireAt(state.qr_expires_at);
 
     if (state.phase === 'awaiting_qr' || (state.qr_image && !state.authorized)) {
-        qrImg.style.display = 'block';
-        qrImg.src = state.qr_image || state.url;
         form.style.display = 'none';
-        area.querySelector('p').textContent = `请使用 Telegram App 扫描登录二维码 (${state.session_name || ''})`;
+        if (state.qr_image || state.url) {
+            t2tdQrRefreshPending = false;
+            qrImg.style.display = 'block';
+            qrImg.style.pointerEvents = 'auto';
+            qrImg.src = state.qr_image || state.url;
+            if (text) text.textContent = `请使用 Telegram App 扫描登录二维码 (${state.session_name || ''})`;
+            if (hint) {
+                hint.style.display = 'block';
+                hint.textContent = expireText ? `二维码有效至 ${expireText}，点击二维码可主动刷新` : '点击二维码可主动刷新';
+            }
+        } else {
+            qrImg.style.display = 'none';
+            qrImg.removeAttribute('src');
+            if (text) text.textContent = t2tdQrRefreshPending ? '二维码刷新中，请稍候...' : '二维码获取中，请稍候...';
+            if (hint) {
+                hint.style.display = 'block';
+                hint.textContent = '正在获取新二维码...';
+            }
+        }
     } else if (state.type === 'password_required' || (state.phase === 'awaiting_password')) {
+        t2tdQrRefreshPending = false;
         qrImg.style.display = 'none';
+        qrImg.removeAttribute('src');
+        qrImg.style.pointerEvents = 'auto';
         form.style.display = 'block';
-        area.querySelector('p').textContent = '两步验证: 账号存在密码锁，请在此输入';
+        if (hint) hint.style.display = 'none';
+        if (text) text.textContent = '两步验证: 账号存在密码锁，请在此输入';
         form.onsubmit = async (e) => {
             e.preventDefault();
             const pass = document.getElementById('t2tdPassword').value;
             await fetch('/api/t2td/login/password', { method:'POST', body: JSON.stringify({password: pass}), headers: {'Content-Type': 'application/json'}});
         }
     } else if (state.authorized || state.phase === 'running' || state.phase === 'authorized') {
+        t2tdQrRefreshPending = false;
         qrImg.style.display = 'none';
+        qrImg.removeAttribute('src');
+        qrImg.style.pointerEvents = 'auto';
         form.style.display = 'none';
-        area.querySelector('p').innerHTML = `<span style="color:var(--success)"><b><i class="ph-fill ph-check-circle"></i> 服务运行中</b></span> - 频道监听已激活`;
+        if (hint) hint.style.display = 'none';
+        if (text) text.innerHTML = `<span style="color:var(--success)"><b><i class="ph-fill ph-check-circle"></i> 服务运行中</b></span> - 频道监听已激活`;
+    } else {
+        t2tdQrRefreshPending = false;
+        qrImg.style.display = 'none';
+        qrImg.removeAttribute('src');
+        qrImg.style.pointerEvents = 'auto';
+        form.style.display = 'none';
+        if (hint) {
+            hint.style.display = 'block';
+            hint.textContent = state.last_error || state.phase_label || '服务准备中...';
+        }
+        if (text) text.textContent = state.last_error || state.phase_label || '服务准备中...';
     }
 }
+
 
 function appendT2TDLog(log) {
     const container = document.getElementById('t2tdLogContainer');

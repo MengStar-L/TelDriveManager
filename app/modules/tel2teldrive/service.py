@@ -1277,8 +1277,17 @@ class Tel2TelDriveService:
         phase = broker.snapshot().get("phase")
         if phase != "awaiting_qr":
             raise RuntimeError("当前不是扫码登录状态，无需刷新二维码")
+        await broker.update_state(
+            phase="awaiting_qr",
+            authorized=False,
+            needs_password=False,
+            qr_image=None,
+            qr_expires_at=None,
+            last_error=None,
+        )
         self.refresh_qr_event.set()
         logger.info("管理员发起二维码刷新请求")
+
 
     async def submit_password(self, password: str):
         if not password:
