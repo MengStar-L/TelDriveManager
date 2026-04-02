@@ -258,6 +258,7 @@ class PikPakClient:
     async def save_share_files(self, share_id: str, file_ids: List[str],
                                 pass_code_token: str) -> List[str]:
         result = await self.client.restore(share_id, pass_code_token, file_ids)
+        print(f"DEBUG RESTORE RESP: {result}")
         saved_ids = []
         # 优先读取 task_info，因为这是真正转存的目标文件清单
         for task_info in result.get("task_info", []):

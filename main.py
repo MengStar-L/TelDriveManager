@@ -12,6 +12,9 @@ logging.basicConfig(
     handlers=[logging.StreamHandler(sys.stdout)],
 )
 
+# 屏蔽底层框架的大量网络请求日志输出，防止刷屏造成误解
+logging.getLogger("httpx").setLevel(logging.WARNING)
+
 # 确保项目根目录在 sys.path 中
 ROOT_DIR = Path(__file__).parent
 if str(ROOT_DIR) not in sys.path:

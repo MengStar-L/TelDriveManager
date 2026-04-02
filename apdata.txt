@@ -1,0 +1,129 @@
+
+--- Found get_download_urls in d:/Code/AutoPikDown\pikpak_client.py ---
+async def get_download_urls(self, file_id: str) -> List[Dict[str, str]]:
+    """
+        获取文件的下载链接。
+        如果 file_id 对应的是文件夹，会递归获取内部所有文件的链接（带路径前缀）。
+
+        Returns:
+            [{"name": "文件名", "url": "下载链接", "file_id": "文件ID", "path": "相对路径"}, ...]
+        """
+    try:
+        info = await self.client.get_download_url(file_id)
+    except Exception as e:
+        print(f'[PikPak] 获取下载链接失败: {e}')
+        raise
+    kind = info.get('kind', '')
+    if kind == 'drive#folder':
+        folder_name = info.get('name', '')
+        return await self._list_folder_files(file_id, prefix=folder_name)
+    url = info.get('web_content_link', '')
+    name = info.get('name', '未知文件')
+    if not url:
+        medias = info.get('medias', [])
+        if medias:
+            link = medias[0].get('link', {})
+            url = link.get('url', '')
+    if url:
+        return [{'name': name, 'url': url, 'file_id': file_id, 'path': name}]
+    else:
+        print(f'[PikPak] ⚠ 无法获取下载链接: {name}')
+        return []
+
+--- Found save_share_files in d:/Code/AutoPikDown\pikpak_client.py ---
+async def save_share_files(self, share_id: str, file_ids: List[str], pass_code_token: str) -> List[str]:
+    """
+        将分享文件转存到自己的网盘（使用库内置 restore 方法）。
+
+        Returns:
+            保存后在自己网盘中的文件 ID 列表
+        """
+    result = await self.client.restore(share_id, pass_code_token, file_ids)
+    print(f'[PikPak] restore 响应: {json.dumps(result, ensure_ascii=False, indent=2)}')
+    saved_ids = []
+    if result.get('file_id'):
+        saved_ids.append(result['file_id'])
+    if not saved_ids:
+        for task_info in result.get('task_info', []):
+            fid = task_info.get('file_id', '')
+            if fid:
+                saved_ids.append(fid)
+    print(f'[PikPak] 已保存 {len(saved_ids)} 个分享文件到网盘, IDs: {saved_ids}')
+    return saved_ids
+
+--- Found _process_share_download in d:/Code/AutoPikDown\web_server.py ---
+async def _process_share_download(self, share_id: str, file_ids: List[str], pass_code_token: str, keep_structure: bool=True, file_paths: Dict[str, str]=None, rename_by_folder: bool=False):
+    """后台处理分享文件下载"""
+    try:
+        await self._ensure_clients()
+        total = len(file_ids)
+        await self._broadcast({'type': 'task_start', 'index': 1, 'total': total, 'magnet': f'分享文件 ({total} 个)'})
+        await self._broadcast({'type': 'task_status', 'index': 1, 'status': '正在保存到网盘...'})
+        saved_ids = await self._pikpak.save_share_files(share_id, file_ids, pass_code_token)
+        if not saved_ids:
+            await self._broadcast({'type': 'task_error', 'index': 1, 'message': '保存失败，未获取到文件'})
+            return
+        success_count = 0
+        all_file_ids = []
+        _orig_paths_by_name = {}
+        if rename_by_folder and file_paths:
+            for _fid, _path in file_paths.items():
+                _name = _path.rsplit('/', 1)[-1]
+                _orig_paths_by_name.setdefault(_name, []).append(_path)
+        print(f'[PikPak] 开始处理 {len(saved_ids)} 个文件')
+        for i, fid in enumerate(saved_ids, 1):
+            await self._broadcast({'type': 'task_status', 'index': i, 'status': f'获取下载链接 [{i}/{len(saved_ids)}]'})
+            max_retries = 3
+            urls = []
+            for attempt in range(max_retries):
+                try:
+                    import asyncio
+                    urls = await asyncio.wait_for(self._pikpak.get_download_urls(fid), timeout=30.0)
+                    if urls:
+                        break
+                except asyncio.TimeoutError:
+                    print(f'[PikPak] 文件 {i} 获取超时，第 {attempt + 1}/{max_retries} 次尝试')
+                    if attempt < max_retries - 1:
+                        await self._broadcast({'type': 'task_status', 'index': i, 'status': f'获取超时，第 {attempt + 2} 次重试...'})
+                        await asyncio.sleep(2)
+                except Exception as e:
+                    print(f'[PikPak] 文件 {i} 获取出错: {e}')
+                    if attempt < max_retries - 1:
+                        await asyncio.sleep(2)
+            if not urls:
+                print(f'[PikPak] 文件 {i} 获取下载链接失败，已重试 {max_retries} 次')
+                await self._broadcast({'type': 'task_error', 'index': i, 'message': f'获取链接失败 (重试{max_retries}次)'})
+                continue
+            try:
+                import posixpath
+                for url_info in urls:
+                    all_file_ids.append(url_info['file_id'])
+                    subdir = None
+                    if keep_structure:
+                        path = url_info.get('path', '')
+                        if path:
+                            parts = path.split('/')
+                            if len(parts) > 2:
+                                subdir = '/'.join(parts[1:-1]) or None
+                    orig_path = ''
+                    if rename_by_folder:
+                        fname = url_info.get('name', '')
+                        if fname in _orig_paths_by_name and _orig_paths_by_name[fname]:
+                            orig_path = _orig_paths_by_name[fname].pop(0)
+                    gid = await asyncio.wait_for(self._aria2.add_uri(url_info['url'], self._maybe_rename_by_folder(url_info, rename_by_folder, orig_path), subdir=subdir), timeout=10.0)
+                    if gid:
+                        success_count += 1
+                        await self._broadcast({'type': 'task_added', 'index': i, 'file_name': url_info['name']})
+            except asyncio.TimeoutError:
+                print(f'[PikPak] Aria2 推送超时: 文件 {i}')
+                await self._broadcast({'type': 'task_error', 'index': i, 'message': 'Aria2 请求超时'})
+            except Exception as e:
+                print(f'[PikPak] 处理文件出错: {e}')
+                await self._broadcast({'type': 'task_error', 'index': i, 'message': str(e)})
+        await self._broadcast({'type': 'aria2_done', 'index': 1, 'success_count': success_count, 'total_count': len(saved_ids)})
+        if saved_ids:
+            await self._broadcast({'type': 'task_status', 'index': 1, 'status': '正在删除网盘文件...'})
+            await self._pikpak.delete_files(saved_ids)
+        await self._broadcast({'type': 'all_done', 'total': total})
+    except Exception as e:
+        await self._broadcast({'type': 'error', 'message': f'分享下载失败: {e}'})
