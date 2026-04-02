@@ -403,6 +403,7 @@ function handleWSMessage(msg) {
         return;
     }
     if (msg.type === "task_update") {
+        loadA2TDTasks();
         return;
     }
 

@@ -373,7 +373,13 @@ def _get_teldrive_client():
 
 
 async def _builtin_download_and_upload(files: List[dict], index: int, delete_pikpak_ids: List[str] = None):
-    """内置引擎：下载文件列表 → 逐个上传 TelDrive → 清理"""
+    """内置引擎：下载文件列表 → 逐个上传 TelDrive → 清理
+    
+    每个文件会注册到 tasks 数据库，并通过 WS 广播更新到任务页面。
+    """
+    from app import database as db
+    from app.modules.aria2teldrive.task_manager import task_manager
+
     cfg = load_config()
     td_cfg = cfg.get("teldrive", {})
     target_path = td_cfg.get("target_path", "/")
@@ -390,20 +396,30 @@ async def _builtin_download_and_upload(files: List[dict], index: int, delete_pik
     for fi, f in enumerate(files, 1):
         url = f["url"]
         name = f["name"]
-        file_index = index  # 位于总任务列表中的位置
+        file_index = index
+
+        # === 注册到数据库 ===
+        import uuid
+        task_db_id = f"bd-{uuid.uuid4().hex[:10]}"
+        await db.add_task(task_db_id, url, name, target_path)
+        await db.update_task(task_db_id, status="downloading",
+                             local_path=str(DOWNLOAD_DIR / name))
+        await task_manager.broadcast({"type": "task_update",
+                                       "data": await db.get_task(task_db_id)})
 
         # === 下载阶段 ===
         dl_done_event = asyncio.Event()
-        dl_error = [None]
 
-        async def on_progress(task: DownloadTask):
+        async def on_progress(task: DownloadTask, _tid=task_db_id):
+            progress = round(task.downloaded / task.total_size * 100, 1) if task.total_size > 0 else 0
+            # 更新进度条
             await _broadcast({
                 "type": "download_progress",
                 "index": file_index,
                 "file_index": fi,
                 "total_files": total_files,
                 "filename": task.filename,
-                "progress": round(task.downloaded / task.total_size * 100, 1) if task.total_size > 0 else 0,
+                "progress": progress,
                 "speed": task.to_dict()["speed_str"],
                 "downloaded": task.to_dict()["downloaded_str"],
                 "total": task.to_dict()["total_str"],
@@ -411,6 +427,12 @@ async def _builtin_download_and_upload(files: List[dict], index: int, delete_pik
                 "connections": task.connections,
                 "status": task.status.value,
             })
+            # 更新数据库（节流：只在整数百分比变化时写库）
+            int_pct = int(progress)
+            if int_pct % 5 == 0:
+                await db.update_task(_tid, download_progress=progress,
+                                     download_speed=task.to_dict()["speed_str"],
+                                     file_size=task.to_dict()["total_str"])
 
         async def on_complete(task: DownloadTask):
             dl_done_event.set()
@@ -420,39 +442,49 @@ async def _builtin_download_and_upload(files: List[dict], index: int, delete_pik
             on_progress=on_progress, on_complete=on_complete,
         )
 
-        await _broadcast({"type": "task_status", "index": file_index,
-                          "status": f"下载中 [{fi}/{total_files}]: {name}"})
-
         # 等待下载完成
         await dl_done_event.wait()
 
         if dl_task.status == TaskStatus.FAILED:
+            await db.update_task(task_db_id, status="failed",
+                                 error=dl_task.error)
+            await task_manager.broadcast({"type": "task_update",
+                                           "data": await db.get_task(task_db_id)})
             await _broadcast({"type": "task_error", "index": file_index,
                               "message": f"下载失败: {dl_task.error}"})
             continue
         if dl_task.status == TaskStatus.CANCELLED:
+            await db.update_task(task_db_id, status="cancelled")
+            await task_manager.broadcast({"type": "task_update",
+                                           "data": await db.get_task(task_db_id)})
             continue
 
         # === 上传阶段 ===
-        await _broadcast({"type": "task_status", "index": file_index,
-                          "status": f"上传中 [{fi}/{total_files}]: {name}"})
+        await db.update_task(task_db_id, status="uploading",
+                             download_progress=100.0)
+        await task_manager.broadcast({"type": "task_update",
+                                       "data": await db.get_task(task_db_id)})
+
         try:
             teldrive = _get_teldrive_client()
             local_path = dl_task.dest_path
 
-            async def upload_progress_cb(uploaded: int, total: int):
+            async def upload_progress_cb(uploaded: int, total: int, _tid=task_db_id, _name=name):
                 pct = round(uploaded / total * 100, 1) if total > 0 else 0
                 await _broadcast({
                     "type": "upload_progress",
                     "index": file_index,
-                    "filename": name,
+                    "filename": _name,
                     "progress": pct,
                     "uploaded": _format_size(uploaded),
                     "total": _format_size(total),
                 })
+                # 更新数据库
+                int_pct = int(pct)
+                if int_pct % 5 == 0:
+                    await db.update_task(_tid, upload_progress=pct)
 
             if os.path.isdir(local_path):
-                # 文件夹场景：递归上传每个文件
                 for root, _dirs, fnames in os.walk(local_path):
                     for fname in fnames:
                         fpath = os.path.join(root, fname)
@@ -469,10 +501,15 @@ async def _builtin_download_and_upload(files: List[dict], index: int, delete_pik
                     progress_callback=upload_progress_cb,
                 )
 
+            # 上传完成
+            await db.update_task(task_db_id, status="completed",
+                                 upload_progress=100.0)
+            await task_manager.broadcast({"type": "task_update",
+                                           "data": await db.get_task(task_db_id)})
             await _broadcast({"type": "upload_done", "index": file_index,
                               "filename": name})
 
-            # 上传成功，清理本地文件
+            # 清理本地文件
             if auto_delete:
                 try:
                     if os.path.isdir(local_path):
@@ -485,6 +522,10 @@ async def _builtin_download_and_upload(files: List[dict], index: int, delete_pik
                     logger.warning(f"清理文件失败: {e}")
 
         except Exception as e:
+            await db.update_task(task_db_id, status="failed",
+                                 error=str(e))
+            await task_manager.broadcast({"type": "task_update",
+                                           "data": await db.get_task(task_db_id)})
             await _broadcast({"type": "task_error", "index": file_index,
                               "message": f"上传 TelDrive 失败: {e}"})
             continue
@@ -565,9 +606,8 @@ async def _process_magnets(magnets: List[str]):
             await _broadcast({"type": "task_error", "index": i, "message": "未获取到 task_id"})
             continue
 
-        # 等待 PikPak 离线完成
+        # 等待 PikPak 离线完成（不刷中间状态日志）
         start_time = time.time()
-        last_status = None
         offline_ok = False
         while True:
             if time.time() - start_time > max_wait_time:
@@ -578,9 +618,6 @@ async def _process_magnets(magnets: List[str]):
             except Exception:
                 await asyncio.sleep(poll_interval)
                 continue
-            if status != last_status:
-                await _broadcast({"type": "task_status", "index": i, "status": status.value})
-                last_status = status
             if status == DownloadStatus.done:
                 offline_ok = True
                 break
