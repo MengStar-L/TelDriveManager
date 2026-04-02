@@ -373,6 +373,11 @@ function connectWS() {
 function handleWSMessage(msg) {
     if (msg.type === "init") {
         if (msg.data.tasks) renderA2TDTasks(msg.data.tasks);
+        if (msg.data.global_stat) renderA2TDStats(msg.data.global_stat);
+        return;
+    }
+    if (msg.type === "global_stat") {
+        renderA2TDStats(msg.data);
         return;
     }
     if (msg.type === "tasks_update") {
@@ -449,7 +454,16 @@ async function submitMagnets() {
     } catch (e) { addLogEntry('<i class="ph-fill ph-warning error"></i>', `<span class="error">请求失败: ${e.message}</span>`); btn.disabled = false; btn.innerHTML = '<i class="ph ph-rocket-launch"></i> 一键推送'; }
 }
 
-// ── Aria2TelDrive Tasks ──
+// ── Aria2TelDrive Tasks & Stats ──
+
+function formatBytes(bytes, decimals = 2) {
+    if (!+bytes) return '0 B';
+    const k = 1024, dm = decimals < 0 ? 0 : decimals;
+    const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
+    const i = Math.floor(Math.log(bytes) / Math.log(k));
+    return `${parseFloat((bytes / Math.pow(k, i)).toFixed(dm))} ${sizes[i]}`;
+}
+
 async function loadA2TDTasks() {
     try {
         const resp = await fetch('/api/a2td/tasks');
@@ -458,7 +472,27 @@ async function loadA2TDTasks() {
     } catch (e) {}
 }
 
+function renderA2TDStats(stats) {
+    if (!stats) return;
+    
+    if (stats.cpu) {
+        document.getElementById('sysCpuStat').textContent = `${stats.cpu.percent.toFixed(1)}%`;
+    }
+    if (stats.disk) {
+        const totalStr = formatBytes(stats.disk.total || 0, 0);
+        const freeStr = formatBytes(stats.disk.free || 0, 0);
+        document.getElementById('sysDiskStat').textContent = `${freeStr} 可用 / ${totalStr}`;
+    }
+    if (stats.download_speed !== undefined) {
+        document.getElementById('sysDownloadStat').textContent = `${formatBytes(stats.download_speed)}/s`;
+    }
+    if (stats.upload_speed !== undefined) {
+        document.getElementById('sysUploadStat').textContent = `${formatBytes(stats.upload_speed)}/s`;
+    }
+}
+
 function renderA2TDTasks(tasks) {
+    // Already defined logic above
     const container = document.getElementById('a2tdTaskList');
     if (!container) return;
     if (!tasks || !tasks.length) {
@@ -496,6 +530,13 @@ function renderA2TDTasks(tasks) {
 async function a2tdAction(taskId, action) {
     try {
         await fetch(`/api/a2td/task/${taskId}/${action}`, { method: 'POST' });
+        loadA2TDTasks();
+    } catch(e) {}
+}
+
+async function a2tdBulkAction(action) {
+    try {
+        await fetch(`/api/a2td/tasks/${action}`, { method: 'POST' });
         loadA2TDTasks();
     } catch(e) {}
 }

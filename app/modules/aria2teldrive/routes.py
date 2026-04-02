@@ -125,16 +125,28 @@ async def retry_all_failed_tasks():
     return {"success": True, "message": f"已重试 {count} 个失败任务"}
 
 
-@router.post("/tasks/pause-downloads")
-async def pause_all_downloads():
+@router.post("/tasks/pause-all")
+async def pause_all_tasks():
     tasks = await task_manager.get_all_tasks()
     count = 0
     for t in tasks:
-        if t["status"] == "downloading":
+        if t["status"] in ("downloading", "uploading"):
             result = await task_manager.pause_task(t["task_id"])
             if result["success"]:
                 count += 1
-    return {"success": True, "message": f"已暂停 {count} 个下载任务"}
+    return {"success": True, "message": f"已暂停 {count} 个任务"}
+
+
+@router.post("/tasks/resume-all")
+async def resume_all_tasks():
+    tasks = await task_manager.get_all_tasks()
+    count = 0
+    for t in tasks:
+        if t["status"] == "paused":
+            result = await task_manager.resume_task(t["task_id"])
+            if result["success"]:
+                count += 1
+    return {"success": True, "message": f"已恢复 {count} 个任务"}
 
 
 @router.post("/tasks/pause-uploads")
