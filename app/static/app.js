@@ -749,7 +749,55 @@ function togglePikpakLoginMode() {
     if (sessionFields) sessionFields.style.display = mode === 'session' ? 'grid' : 'none';
 }
 
+function extractPikpakSessionValue(rawText) {
+    const text = String(rawText || '').replace(/^\uFEFF/, '').trim();
+    if (!text) return '';
+    try {
+        const parsed = JSON.parse(text);
+        if (typeof parsed === 'string' && parsed.trim()) return parsed.trim();
+        if (parsed && typeof parsed === 'object') {
+            for (const key of ['encoded_token', 'session', 'token']) {
+                if (typeof parsed[key] === 'string' && parsed[key].trim()) {
+                    return parsed[key].trim();
+                }
+            }
+        }
+    } catch (e) {}
+    return text;
+}
+
+async function importPikpakSessionFile(event) {
+    const fileInput = event?.target;
+    const file = fileInput?.files?.[0];
+    if (!file) return;
+
+    const modeInput = document.getElementById('cfgPikpakLoginMode');
+    const sessionInput = document.getElementById('cfgPikpakSession');
+    const fileNameLabel = document.getElementById('cfgPikpakSessionFileName');
+
+    try {
+        const rawText = await file.text();
+        const session = extractPikpakSessionValue(rawText);
+        if (!session) throw new Error('文件中未识别到有效的 Session / encoded_token');
+
+        if (modeInput) {
+            modeInput.value = 'session';
+            togglePikpakLoginMode();
+        }
+        if (sessionInput) sessionInput.value = session;
+        if (fileNameLabel) fileNameLabel.textContent = `已导入: ${file.name}`;
+
+        await doAutoSave(sessionInput || modeInput || fileInput);
+    } catch (e) {
+        if (fileNameLabel) fileNameLabel.textContent = '导入失败';
+        alert('Session 文件导入失败: ' + (e.message || '未知错误'));
+    } finally {
+        if (fileInput) fileInput.value = '';
+    }
+}
+
 function collectSettingsConfig() {
+
     return {
         auth: {
             username: document.getElementById('cfgAuthUser').value.trim(),
@@ -818,7 +866,9 @@ async function loadConfig() {
         document.getElementById('cfgPikpakUsername').value = cfg.pikpak?.username || '';
         document.getElementById('cfgPikpakPassword').value = cfg.pikpak?.password || '';
         document.getElementById('cfgPikpakSession').value = cfg.pikpak?.session || '';
+        document.getElementById('cfgPikpakSessionFileName').textContent = cfg.pikpak?.session ? '已保存 Session' : '未选择文件';
         document.getElementById('cfgPikpakSaveDir').value = cfg.pikpak?.save_dir || '/';
+
         document.getElementById('cfgPikpakDelete').checked = cfg.pikpak?.delete_after_download || false;
         document.getElementById('cfgPikpakEngine').value = cfg.pikpak?.download_engine || 'builtin';
         document.getElementById('cfgPikpakMaxDownloads').value = cfg.pikpak?.max_concurrent_downloads || 3;
