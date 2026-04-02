@@ -113,19 +113,31 @@ class PikPakClient:
                             poll_interval: float = 3.0, max_wait_time: float = 3600.0) -> DownloadStatus:
         start_time = time.time()
         last_status = None
+        poll_count = 0
         while True:
-            if time.time() - start_time > max_wait_time:
+            elapsed = int(time.time() - start_time)
+            if elapsed > max_wait_time:
+                logger.warning(f"转存等待超时 ({elapsed}s)，放弃")
                 return DownloadStatus.error
             try:
                 status = await self.client.get_task_status(task_id, file_id)
-            except Exception:
+            except Exception as e:
+                poll_count += 1
+                if poll_count % 3 == 0:
+                    logger.info(f"转存轮询中... 已等待 {elapsed}s (查询异常: {e})")
                 await asyncio.sleep(poll_interval)
                 continue
+            poll_count += 1
             if status != last_status:
+                logger.info(f"转存状态变更: {last_status} -> {status} (已等待 {elapsed}s)")
                 last_status = status
+            elif poll_count % 5 == 0:
+                logger.info(f"转存进行中... 状态={status}, 已等待 {elapsed}s")
             if status == DownloadStatus.done:
+                logger.info(f"转存完成！耗时 {elapsed}s")
                 return status
             elif status in (DownloadStatus.error, DownloadStatus.not_found):
+                logger.warning(f"转存异常终止: {status}, 耗时 {elapsed}s")
                 return status
             await asyncio.sleep(poll_interval)
 
@@ -256,26 +268,24 @@ class PikPakClient:
             })
 
     async def save_share_files(self, share_id: str, file_ids: List[str],
-                                pass_code_token: str) -> List[str]:
+                                pass_code_token: str) -> tuple:
+        """返回 (saved_ids, restore_task_id, restore_file_id)"""
         # 创建一个专属的接收文件夹，作为独立目标隔离此次分享。
-        # 这样即使是单文件且返回 RESTORE_START，我们也能精确拿到此隔离环境的 ID，避免污染全局 Pack 目录
         import time
         temp_name = f"Share_{share_id[:5]}_{int(time.time())}"
         try:
             folder_resp = await self.client.create_folder(name=temp_name, parent_id="")
-            # create_folder 直接返回顶层 dict，id 在 resp["file"]["id"] 或 resp["id"]
             temp_parent_id = folder_resp.get("file", {}).get("id", "") or folder_resp.get("id", "")
-            print(f"DEBUG CREATE FOLDER RESP: {folder_resp}")
         except Exception as e:
             print(f"DEBUG CREATE FOLDER ERROR: {e}")
             temp_parent_id = ""
 
-        # 将目标存入该专属文件夹，由于 pikpakapi 库未暴露 to_parent_id 参数，我们手动发包
+        # 手动发包以传入 to_parent_id
         import httpx
         url = "https://api-drive.mypikpak.com/drive/v1/share/restore"
         headers = {
             "Authorization": f"Bearer {self.client.access_token}",
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) width/1920",
+            "User-Agent": "Mozilla/5.0",
         }
         data = {
             "share_id": share_id,
@@ -289,19 +299,19 @@ class PikPakClient:
             result = resp.json()
             
         print(f"DEBUG RESTORE RESP: {result}")
-        saved_ids = []
         
-        # 优先读取 task_info，因为这是真正转存的目标文件清单（如果有的话）
+        restore_task_id = result.get("restore_task_id", "")
+        restore_file_id = result.get("file_id", "")
+        
+        saved_ids = []
         for task_info in result.get("task_info", []):
             fid = task_info.get("file_id", "")
             if fid:
                 saved_ids.append(fid)
                 
-        # 只有在没有 task_info 返回（大量/大文件转存进入 RESTORE_START 且被放进隔离文件夹）时，
-        # 我们返回该隔离文件夹的 ID 给后续阶段去独享扫描
         if not saved_ids and temp_parent_id:
             saved_ids.append(temp_parent_id)
-        elif not saved_ids and result.get("file_id"):
-            saved_ids.append(result["file_id"])
+        elif not saved_ids and restore_file_id:
+            saved_ids.append(restore_file_id)
         
-        return saved_ids
+        return saved_ids, restore_task_id, restore_file_id

@@ -696,6 +696,7 @@ async def _process_share_download(share_id: str, file_ids: List[str], pass_code_
                                    rename_by_folder: bool = False):
     try:
         await _ensure_clients()
+        from pikpakapi.enums import DownloadStatus
         total = len(file_ids)
         cfg = load_config()
         engine = _get_engine()
@@ -703,15 +704,27 @@ async def _process_share_download(share_id: str, file_ids: List[str], pass_code_
         await _broadcast({"type": "task_start", "index": 1, "total": total,
                           "magnet": f"分享文件 ({total} 个)"})
         await _broadcast({"type": "task_status", "index": 1, "status": "正在保存到网盘..."})
-        saved_ids = await _pikpak.save_share_files(share_id, file_ids, pass_code_token)
+        saved_ids, restore_task_id, restore_file_id = await _pikpak.save_share_files(share_id, file_ids, pass_code_token)
         if not saved_ids:
             await _broadcast({"type": "task_error", "index": 1, "message": "保存失败: restore 未返回 file_id"})
             return
 
-        logger.info(f"分享文件已保存, saved_ids={saved_ids}")
+        logger.info(f"分享文件已保存, saved_ids={saved_ids}, restore_task_id={restore_task_id}")
 
-        # 等待 PikPak 处理完成（restore 是异步的，大文件需要时间）
-        await asyncio.sleep(3)
+        # 等待 PikPak 异步转存任务完成（大文件转存是异步的，需要轮询状态）
+        if restore_task_id and restore_file_id:
+            await _broadcast({"type": "task_status", "index": 1, "status": "等待 PikPak 转存完成..."})
+            status = await _pikpak.wait_for_task(
+                restore_task_id, restore_file_id,
+                poll_interval=2.0, max_wait_time=300.0
+            )
+            logger.info(f"转存任务完成, status={status}")
+            if status != DownloadStatus.done:
+                # 即使状态不是 done，也继续尝试获取链接（可能已部分完成）
+                logger.warning(f"转存任务状态异常: {status}，仍然尝试获取链接")
+        else:
+            # 没有 task_id 说明是即时完成的小文件
+            await asyncio.sleep(2)
 
         all_urls = []
         for i, fid in enumerate(saved_ids, 1):
