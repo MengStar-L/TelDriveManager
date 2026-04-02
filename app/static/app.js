@@ -1304,8 +1304,14 @@ async function downloadShareFiles() {
 
     const keepStructure = document.getElementById('shareKeepStructure').checked;
     const renameByFolder = document.getElementById('shareRenameByFolder').checked;
+    const filePaths = Object.fromEntries(
+        shareFileData
+            .filter(item => selectedIds.includes(item.id))
+            .map(item => [item.id, item.path || item.name || ''])
+    );
     
     const btn = document.getElementById('downloadShareBtn');
+
     if(!btn) return;
     btn.disabled = true;
     btn.innerHTML = '<span class="spinner"></span> 同步中...';
@@ -1319,8 +1325,10 @@ async function downloadShareFiles() {
                 file_ids: selectedIds,
                 pass_code_token: shareCurrentData.pass_code_token,
                 keep_structure: keepStructure,
+                file_paths: filePaths,
                 rename_by_folder: renameByFolder
             })
+
         });
         const data = await resp.json();
         if(!resp.ok) throw new Error(data.error || '提交失败');

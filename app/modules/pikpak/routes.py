@@ -372,6 +372,20 @@ def _get_teldrive_client():
     )
 
 
+def _maybe_rename_by_folder(url_info: dict, rename: bool, original_path: str = "") -> str:
+    """根据上级目录名重命名分享文件，保持与 AutoPikDown 一致。"""
+    name = url_info.get("name", "")
+    if not rename:
+        return name
+    path = original_path or url_info.get("path", "")
+    parts = [p for p in path.split("/") if p]
+    if len(parts) >= 2:
+        folder_name = parts[-2]
+        dot_idx = name.rfind(".")
+        return f"{folder_name}{name[dot_idx:]}" if dot_idx != -1 else folder_name
+    return name
+
+
 async def _builtin_download_and_upload(files: List[dict], index: int, delete_pikpak_ids: List[str] = None):
     """内置引擎：下载文件列表 → 逐个上传 TelDrive → 清理
     
@@ -694,11 +708,15 @@ async def _process_magnet_selected(root_file_id: str, selected_ids: List[str],
 async def _process_share_download(share_id: str, file_ids: List[str], pass_code_token: str,
                                    keep_structure: bool = True, file_paths: Dict[str, str] = None,
                                    rename_by_folder: bool = False):
+    saved_ids: List[str] = []
     try:
         await _ensure_clients()
         total = len(file_ids)
         cfg = load_config()
         engine = _get_engine()
+        pikpak_cfg = cfg.get("pikpak", {})
+        share_url_timeout = float(pikpak_cfg.get("share_download_url_timeout", 60))
+        share_poll_interval = float(pikpak_cfg.get("share_download_url_poll_interval", 3))
 
         await _broadcast({"type": "task_start", "index": 1, "total": total,
                           "magnet": f"分享文件 ({total} 个)"})
@@ -710,30 +728,31 @@ async def _process_share_download(share_id: str, file_ids: List[str], pass_code_
 
         logger.info(f"分享文件已保存, saved_ids={saved_ids}")
 
-        all_urls = []
+        orig_paths_by_name: Dict[str, List[str]] = {}
+        if rename_by_folder and file_paths:
+            for _, path in file_paths.items():
+                name = path.rsplit("/", 1)[-1]
+                orig_paths_by_name.setdefault(name, []).append(path)
+
+        all_urls: List[dict] = []
         for i, fid in enumerate(saved_ids, 1):
             await _broadcast({"type": "task_status", "index": i, "status": f"获取下载链接 [{i}/{len(saved_ids)}]"})
-            max_retries = 3
-            urls = []
-            for attempt in range(max_retries):
-                try:
-                    urls = await asyncio.wait_for(_pikpak.get_download_urls(fid), timeout=30.0)
-                    if urls:
-                        break
-                except asyncio.TimeoutError:
-                    logger.warning(f"文件 {i} 获取超时，第 {attempt+1}/{max_retries} 次尝试")
-                    if attempt < max_retries - 1:
-                        await _broadcast({"type": "task_status", "index": i, "status": f"获取超时，第 {attempt+2} 次重试..."})
-                        await asyncio.sleep(2)
-                except Exception as e:
-                    logger.error(f"文件 {i} 获取出错: {e}")
-                    if attempt < max_retries - 1:
-                        await asyncio.sleep(2)
-            if not urls:
-                logger.warning(f"文件 {i} 获取下载链接失败，已重试 {max_retries} 次")
-                await _broadcast({"type": "task_error", "index": i, "message": f"获取链接失败 (重试{max_retries}次)"})
+            try:
+                urls = await _pikpak.wait_for_download_urls(
+                    fid,
+                    timeout=share_url_timeout,
+                    poll_interval=share_poll_interval,
+                )
+            except Exception as e:
+                logger.error(f"分享文件直链获取失败: file_id={fid}, error={e}")
+                await _broadcast({"type": "task_error", "index": i, "message": f"获取链接失败: {e}"})
                 continue
-            
+
+            if not urls:
+                await _broadcast({"type": "task_error", "index": i,
+                                  "message": f"获取链接失败 ({int(share_url_timeout)}s 内未就绪)"})
+                continue
+
             all_urls.extend(urls)
 
         if not all_urls:
@@ -742,34 +761,50 @@ async def _process_share_download(share_id: str, file_ids: List[str], pass_code_
 
         if engine == "builtin":
             await _builtin_download_and_upload(all_urls, 1, delete_pikpak_ids=saved_ids)
+            saved_ids = []
         else:
-            # Aria2 模式
             aria2_cfg = cfg.get("aria2", {})
             success_count = 0
+            download_dir = aria2_cfg.get("download_dir", "")
             for url_info in all_urls:
                 try:
                     opts = {}
-                    download_dir = aria2_cfg.get("download_dir", "")
                     if download_dir:
-                        opts["dir"] = download_dir
-                    name = url_info.get("name", "")
-                    if name:
-                        opts["out"] = name
+                        if keep_structure:
+                            path = url_info.get("path", "")
+                            parts = [p for p in path.split("/") if p]
+                            subdir = "/".join(parts[1:-1]) if len(parts) > 2 else ""
+                            target_dir = os.path.join(download_dir, subdir) if subdir else download_dir
+                        else:
+                            target_dir = download_dir
+                        opts["dir"] = target_dir.replace("\\", "/")
+
+                    original_path = ""
+                    if rename_by_folder:
+                        name = url_info.get("name", "")
+                        if orig_paths_by_name.get(name):
+                            original_path = orig_paths_by_name[name].pop(0)
+
+                    output_name = _maybe_rename_by_folder(url_info, rename_by_folder, original_path)
+                    if output_name:
+                        opts["out"] = output_name
+
                     gid = await _aria2.add_uri(url_info["url"], opts)
                     if gid:
                         success_count += 1
-                        await _broadcast({"type": "task_added", "index": 1, "file_name": name})
+                        await _broadcast({"type": "task_added", "index": 1,
+                                          "file_name": output_name or url_info.get("name", "")})
                 except Exception as e:
                     await _broadcast({"type": "task_error", "index": 1, "message": str(e)})
+
             await _broadcast({"type": "aria2_done", "index": 1,
                               "success_count": success_count, "total_count": len(all_urls)})
 
-        # 清理 PikPak 保存的文件
         if saved_ids:
             try:
                 await _pikpak.delete_files(saved_ids)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning(f"清理分享临时文件失败: {e}")
 
         await _broadcast({"type": "all_done", "total": total})
     except Exception as e:

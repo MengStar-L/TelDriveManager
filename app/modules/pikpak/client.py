@@ -144,20 +144,59 @@ class PikPakClient:
                 return status
             await asyncio.sleep(poll_interval)
 
+    @staticmethod
+    def _extract_download_url(info: Dict[str, Any]) -> str:
+        url = info.get("web_content_link", "")
+        if url:
+            return url
+        for media in info.get("medias", []) or []:
+            if not isinstance(media, dict):
+                continue
+            link = media.get("link", {})
+            if isinstance(link, dict) and link.get("url"):
+                return link["url"]
+        for link in info.get("links", []) or []:
+            if not isinstance(link, dict):
+                continue
+            if link.get("url"):
+                return link["url"]
+            nested = link.get("link", {})
+            if isinstance(nested, dict) and nested.get("url"):
+                return nested["url"]
+        return ""
+
     async def get_download_urls(self, file_id: str) -> List[Dict[str, str]]:
         info = await self.client.get_download_url(file_id)
         kind = info.get("kind", "")
         if kind == "drive#folder":
             folder_name = info.get("name", "")
             return await self._list_folder_files(file_id, prefix=folder_name)
-        url = info.get("web_content_link", "")
+        url = self._extract_download_url(info)
         name = info.get("name", "未知文件")
-        if not url:
-            medias = info.get("medias", [])
-            if medias:
-                url = medias[0].get("link", {}).get("url", "")
         if url:
             return [{"name": name, "url": url, "file_id": file_id, "path": name}]
+        logger.warning(f"文件暂无直链: file_id={file_id}, name={name}")
+        return []
+
+    async def wait_for_download_urls(self, file_id: str, timeout: float = 60.0,
+                                     poll_interval: float = 3.0) -> List[Dict[str, str]]:
+        deadline = time.time() + max(timeout, 0.0)
+        last_error: Optional[Exception] = None
+        attempt = 0
+        while True:
+            attempt += 1
+            try:
+                urls = await self.get_download_urls(file_id)
+                if urls:
+                    return urls
+            except Exception as e:
+                last_error = e
+                logger.warning(f"获取直链失败，等待重试: file_id={file_id}, attempt={attempt}, error={e}")
+            if time.time() >= deadline:
+                break
+            await asyncio.sleep(max(poll_interval, 0.1))
+        if last_error is not None:
+            raise last_error
         return []
 
     async def _list_folder_files(self, folder_id: str, prefix: str = "") -> List[Dict[str, str]]:
@@ -174,21 +213,17 @@ class PikPakClient:
                     sub_files = await self._list_folder_files(fid, prefix=full_path)
                     results.extend(sub_files)
                 else:
-                    url = f.get("web_content_link", "")
+                    url = self._extract_download_url(f)
                     if url:
                         results.append({"name": name, "url": url, "file_id": fid, "path": full_path})
                     else:
                         try:
                             info = await self.client.get_download_url(fid)
-                            dl_url = info.get("web_content_link", "")
-                            if not dl_url:
-                                medias = info.get("medias", [])
-                                if medias:
-                                    dl_url = medias[0].get("link", {}).get("url", "")
+                            dl_url = self._extract_download_url(info)
                             if dl_url:
                                 results.append({"name": name, "url": dl_url, "file_id": fid, "path": full_path})
-                        except Exception:
-                            pass
+                        except Exception as e:
+                            logger.warning(f"子文件直链获取失败: path={full_path}, error={e}")
             next_page_token = resp.get("next_page_token")
             if not next_page_token:
                 break
