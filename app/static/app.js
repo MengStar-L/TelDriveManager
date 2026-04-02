@@ -590,6 +590,9 @@ function renderA2TDStats(stats) {
         const freeStr = formatBytes(stats.disk.free || 0, 0);
         document.getElementById('sysDiskStat').textContent = `${freeStr} 可用 / ${totalStr}`;
     }
+    if (stats.download_speed !== undefined) {
+        document.getElementById('sysDownloadStat').textContent = `${formatBytes(stats.download_speed)}/s`;
+    }
     if (stats.upload_speed !== undefined) {
         document.getElementById('sysUploadStat').textContent = `${formatBytes(stats.upload_speed)}/s`;
     }
