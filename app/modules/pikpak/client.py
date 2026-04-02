@@ -272,49 +272,75 @@ class PikPakClient:
 
     async def save_share_files(self, share_id: str, file_ids: List[str],
                                 pass_code_token: str) -> tuple:
-        """返回 (saved_ids, restore_task_id, restore_file_id)"""
-        # 创建一个专属的接收文件夹，作为独立目标隔离此次分享。
-        import time
-        temp_name = f"Share_{share_id[:5]}_{int(time.time())}"
-        try:
-            folder_resp = await self.client.create_folder(name=temp_name, parent_id="")
-            temp_parent_id = folder_resp.get("file", {}).get("id", "") or folder_resp.get("id", "")
-        except Exception as e:
-            print(f"DEBUG CREATE FOLDER ERROR: {e}")
-            temp_parent_id = ""
-
-        # 手动发包以传入 to_parent_id
-        import httpx
-        url = "https://api-drive.mypikpak.com/drive/v1/share/restore"
-        headers = {
-            "Authorization": f"Bearer {self.client.access_token}",
-            "User-Agent": "Mozilla/5.0",
-        }
-        data = {
-            "share_id": share_id,
-            "pass_code_token": pass_code_token,
-            "file_ids": file_ids,
-            "to_parent_id": temp_parent_id
-        }
-        
-        async with httpx.AsyncClient() as hc:
-            resp = await hc.post(url, headers=headers, json=data)
-            result = resp.json()
-            
-        print(f"DEBUG RESTORE RESP: {result}")
+        """
+        转存分享文件到网盘，返回 (saved_ids, restore_task_id)。
+        对于异步转存（大文件），会轮询任务状态直到完成，然后从任务详情中提取真实文件 ID。
+        """
+        result = await self.client.restore(share_id, pass_code_token, file_ids)
+        logger.info(f"restore 响应: {json.dumps(result, ensure_ascii=False)}")
         
         restore_task_id = result.get("restore_task_id", "")
-        restore_file_id = result.get("file_id", "")
+        restore_status = result.get("restore_status", "")
         
         saved_ids = []
+        # 优先从 task_info 中提取（某些场景下 API 会直接返回）
         for task_info in result.get("task_info", []):
             fid = task_info.get("file_id", "")
             if fid:
                 saved_ids.append(fid)
-                
-        if not saved_ids and temp_parent_id:
-            saved_ids.append(temp_parent_id)
-        elif not saved_ids and restore_file_id:
-            saved_ids.append(restore_file_id)
         
-        return saved_ids, restore_task_id, restore_file_id
+        # 如果有 task_info 就直接返回（同步完成的场景）
+        if saved_ids:
+            return saved_ids, restore_task_id
+        
+        # 异步转存场景：需要轮询任务状态获取真实文件 ID
+        if restore_status == "RESTORE_START" and restore_task_id:
+            logger.info(f"转存为异步模式，开始轮询任务 {restore_task_id}")
+            actual_ids = await self._poll_restore_task(restore_task_id)
+            if actual_ids:
+                return actual_ids, restore_task_id
+        
+        # 最终 fallback：用 restore 返回的 file_id（可能是根目录，但聊胜于无）
+        root_id = result.get("file_id", "")
+        if root_id:
+            saved_ids.append(root_id)
+        return saved_ids, restore_task_id
+
+    async def _poll_restore_task(self, task_id: str, 
+                                  poll_interval: float = 3.0, 
+                                  max_wait: float = 300.0) -> List[str]:
+        """轮询离线任务状态，直到完成后从任务详情中提取真实目标文件 ID"""
+        import httpx
+        start = time.time()
+        
+        while True:
+            elapsed = int(time.time() - start)
+            if elapsed > max_wait:
+                logger.warning(f"转存任务轮询超时 ({elapsed}s)")
+                return []
+            
+            try:
+                url = f"https://api-drive.mypikpak.com/drive/v1/tasks/{task_id}"
+                headers = {"Authorization": f"Bearer {self.client.access_token}"}
+                async with httpx.AsyncClient() as hc:
+                    resp = await hc.get(url, headers=headers)
+                    task = resp.json()
+                
+                phase = task.get("phase", "")
+                file_id = task.get("file_id", "")
+                file_name = task.get("file_name", task.get("name", ""))
+                
+                logger.info(f"转存轮询: phase={phase}, file_id={file_id}, name={file_name}, 已等待 {elapsed}s")
+                
+                if phase == "PHASE_TYPE_COMPLETE" and file_id:
+                    logger.info(f"转存完成！目标文件 ID={file_id}, 名称={file_name}, 耗时 {elapsed}s")
+                    return [file_id]
+                elif phase in ("PHASE_TYPE_ERROR", "PHASE_TYPE_FAILED"):
+                    logger.error(f"转存任务失败: phase={phase}")
+                    return []
+                    
+            except Exception as e:
+                logger.warning(f"转存轮询异常: {e}, 已等待 {elapsed}s")
+            
+            await asyncio.sleep(poll_interval)
+
