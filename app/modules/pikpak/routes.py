@@ -721,18 +721,19 @@ async def _process_share_download(share_id: str, file_ids: List[str], pass_code_
             delays = [2, 3, 5, 8]  # 递增等待
             for attempt in range(len(delays) + 1):
                 try:
-                    urls = await asyncio.wait_for(_pikpak.get_download_urls(fid), timeout=30.0)
+                    # 增加超时到 120秒 (分享文件 restore 后 PikPak 后端可能需要较长时间准备)
+                    urls = await asyncio.wait_for(_pikpak.get_download_urls(fid), timeout=120.0)
                     if urls:
                         break
                     else:
                         logger.warning(f"get_download_urls 返回空 (尝试 {attempt+1}, fid={fid})")
                 except Exception as e:
                     last_err = e
-                    logger.warning(f"get_download_urls 异常 (尝试 {attempt+1}, fid={fid}): {e}")
+                    logger.warning(f"get_download_urls 异常 (尝试 {attempt+1}, fid={fid}): {repr(e)}")
                 if attempt < len(delays):
                     await asyncio.sleep(delays[attempt])
             if not urls:
-                err_detail = f": {last_err}" if last_err else "(文件可能未就绪)"
+                err_detail = f": {repr(last_err)}" if last_err else "(文件可能未就绪)"
                 await _broadcast({"type": "task_error", "index": i, "message": f"获取链接失败{err_detail}"})
                 continue
             all_urls.extend(urls)
