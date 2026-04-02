@@ -1,17 +1,94 @@
 
 // ── Setup Wizard ──
+function sanitizeSettingsPayload(payload) {
+    const clean = JSON.parse(JSON.stringify(payload || {}));
+    if (clean && typeof clean === 'object') {
+        delete clean._meta;
+    }
+    return clean;
+}
+
+async function saveSettingsPayload(payload) {
+    const resp = await fetch('/api/settings', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(sanitizeSettingsPayload(payload))
+    });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok || data.success === false) {
+        throw new Error(data.message || data.detail || `保存配置失败 (${resp.status})`);
+    }
+    return data;
+}
+
+async function ensureSetupCompleted() {
+    const resp = await fetch('/api/settings');
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) {
+        throw new Error(data.message || data.detail || '无法重新读取配置状态');
+    }
+    if (data._meta && data._meta.needs_setup) {
+        throw new Error('当前配置仍未完成，请确认 PikPak 登录方式与凭据已正确保存');
+    }
+    window.currentConfig = sanitizeSettingsPayload(data);
+}
+
+function toggleWizardPikpakLoginMode() {
+    const mode = document.getElementById('wPikLoginMode')?.value || 'password';
+    const passwordFields = document.getElementById('wPikPasswordFields');
+    const sessionFields = document.getElementById('wPikSessionFields');
+    if (passwordFields) passwordFields.style.display = mode === 'session' ? 'none' : 'grid';
+    if (sessionFields) sessionFields.style.display = mode === 'session' ? 'grid' : 'none';
+}
+
+async function importPikpakSessionFileToWizard(event) {
+    const fileInput = event?.target;
+    const file = fileInput?.files?.[0];
+    if (!file) return;
+
+    const modeInput = document.getElementById('wPikLoginMode');
+    const sessionInput = document.getElementById('wPikSession');
+    const fileNameLabel = document.getElementById('wPikSessionFileName');
+
+    try {
+        const rawText = await file.text();
+        const session = extractPikpakSessionValue(rawText);
+        if (!session) throw new Error('文件中未识别到有效的 Session / encoded_token');
+
+        if (modeInput) {
+            modeInput.value = 'session';
+            toggleWizardPikpakLoginMode();
+        }
+        if (sessionInput) sessionInput.value = session;
+        if (fileNameLabel) fileNameLabel.textContent = `已导入: ${file.name}`;
+    } catch (e) {
+        if (fileNameLabel) fileNameLabel.textContent = '导入失败';
+        alert('向导 Session 文件导入失败: ' + (e.message || '未知错误'));
+    } finally {
+        if (fileInput) fileInput.value = '';
+    }
+}
+
 async function checkSetupRequired() {
     try {
         const resp = await fetch('/api/settings');
         if (!resp.ok) return;
         const data = await resp.json();
-        window.currentConfig = data;
+        window.currentConfig = sanitizeSettingsPayload(data);
 
         // Auto-fill existing data into wizard inputs
         try {
             if (data.pikpak) {
-                if(data.pikpak.username) document.getElementById('wPikUser').value = data.pikpak.username;
-                if(data.pikpak.password) document.getElementById('wPikPass').value = data.pikpak.password;
+                const pikMode = data.pikpak.login_mode || (data.pikpak.session ? 'session' : 'password');
+                const modeInput = document.getElementById('wPikLoginMode');
+                const sessionInput = document.getElementById('wPikSession');
+                const sessionLabel = document.getElementById('wPikSessionFileName');
+                if (modeInput) modeInput.value = pikMode;
+                if (data.pikpak.username) document.getElementById('wPikUser').value = data.pikpak.username;
+                if (data.pikpak.password) document.getElementById('wPikPass').value = data.pikpak.password;
+                if (sessionInput) sessionInput.value = data.pikpak.session || '';
+                if (sessionLabel) sessionLabel.textContent = data.pikpak.session ? '已保存 Session' : '未选择文件';
+                toggleWizardPikpakLoginMode();
             }
 
             if (data.teldrive) {
@@ -72,6 +149,7 @@ async function checkSetupRequired() {
     }
 }
 
+
 async function wizardNext(current, next) {
     if (next < current) { // "Previous" button
         document.getElementById('wStep' + current).classList.remove('active');
@@ -93,43 +171,50 @@ async function wizardNext(current, next) {
 
     try {
         if (current === 1) { // PikPak
-            const user = document.getElementById('wPikUser').value.trim();
-            const pass = document.getElementById('wPikPass').value.trim();
-            if(!user || !pass) throw new Error("您必须填写 PikPak 账密");
-            const payload = {username: user, password: pass};
+            const loginMode = document.getElementById('wPikLoginMode')?.value || 'password';
+            let payload = {};
+            if (loginMode === 'session') {
+                const session = document.getElementById('wPikSession').value.trim();
+                if(!session) throw new Error('您必须填写 PikPak Session');
+                payload = { login_mode: 'session', session };
+            } else {
+                const user = document.getElementById('wPikUser').value.trim();
+                const pass = document.getElementById('wPikPass').value.trim();
+                if(!user || !pass) throw new Error('您必须填写 PikPak 账密');
+                payload = { login_mode: 'password', username: user, password: pass };
+            }
             const r = await fetch('/api/settings/test/pikpak', {
                 method: 'POST', headers: {'Content-Type': 'application/json'},
                 body: JSON.stringify(payload)
             });
-            const d = await r.json();
-            if(!d.success) throw new Error(d.message || "PikPak验证失败");
+            const d = await r.json().catch(() => ({}));
+            if(!r.ok || !d.success) throw new Error(d.message || 'PikPak验证失败');
             dataToSave.pikpak = payload;
         }
         else if (current === 2) { // TelDrive
             const tUrl = document.getElementById('wTdUrl').value.trim();
             const tTok = document.getElementById('wTdToken').value.trim();
-            if(!tUrl || !tTok) throw new Error("TelDrive API和Token为必填");
+            if(!tUrl || !tTok) throw new Error('TelDrive API和Token为必填');
             const tdPayload = {api_host: tUrl, access_token: tTok};
             const r = await fetch('/api/settings/test/teldrive', {
                 method: 'POST', headers: {'Content-Type': 'application/json'},
                 body: JSON.stringify(tdPayload)
             });
-            const d = await r.json();
-            if(!d.success && !d.ok) throw new Error("TelDrive连接失败");
-
+            const d = await r.json().catch(() => ({}));
+            if(!r.ok || (!d.success && !d.ok)) throw new Error(d.message || 'TelDrive连接失败');
             dataToSave.teldrive = tdPayload;
         }
         else if (current === 3) { // Telegram
             const tid = document.getElementById('wTgId').value.trim();
             const tHash = document.getElementById('wTgHash').value.trim();
-            if(!tid || !tHash) throw new Error("必须提供 Telegram 授权参数");
+            if(!tid || !tHash) throw new Error('必须提供 Telegram 授权参数');
             const tgPayload = {api_id: parseInt(tid), api_hash: tHash};
             const r = await fetch('/api/settings/test/telegram', {
                 method: 'POST', headers: {'Content-Type': 'application/json'},
                 body: JSON.stringify(tgPayload)
             });
-            const d = await r.json();
-            if(!d.success) throw new Error(d.message || "Telegram验证失败");
+            const d = await r.json().catch(() => ({}));
+            if(!r.ok || !d.success) throw new Error(d.message || 'Telegram验证失败');
             dataToSave.telegram = tgPayload;
         }
     } catch (e) {
@@ -157,18 +242,39 @@ async function wizardNext(current, next) {
         return;
     }
 
-    // Success! Save config incrementally if there is data to save
     if (Object.keys(dataToSave).length > 0) {
         if (!window.currentConfig) window.currentConfig = {};
+        window.currentConfig = sanitizeSettingsPayload(window.currentConfig);
         for(let k in dataToSave) {
             if(!window.currentConfig[k]) window.currentConfig[k] = {};
-            // merge
             Object.assign(window.currentConfig[k], dataToSave[k]);
         }
-        await fetch('/api/settings', {
-            method: 'PUT', headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify(window.currentConfig)
-        });
+        try {
+            await saveSettingsPayload(window.currentConfig);
+        } catch (e) {
+            errMsg = e.message;
+        }
+    }
+
+    if (errMsg) {
+        btn.disabled = false;
+        btn.innerHTML = oldHtml;
+        const info = document.createElement('div');
+        info.className = 'wizard-err-toast';
+        info.innerHTML = `<i class="ph-fill ph-warning-circle"></i> ${errMsg}`;
+        info.style = 'position:absolute; bottom:-45px; right:0; background:var(--error); color:white; padding:8px 16px; border-radius:8px; font-size:13px; display:flex; align-items:center; gap:8px; box-shadow:0 4px 12px rgba(239,68,68,0.3); z-index:100; opacity:0; transform:translateY(-10px); transition:all 0.3s;';
+
+        const footer = btn.parentElement;
+        footer.style.position = 'relative';
+        const oldToast = footer.querySelector('.wizard-err-toast');
+        if(oldToast) oldToast.remove();
+        footer.appendChild(info);
+        setTimeout(() => { info.style.opacity='1'; info.style.transform='translateY(0)'; }, 10);
+        window._wizardErrTimeout = setTimeout(() => {
+            info.style.opacity='0';
+            setTimeout(() => info.remove(), 300);
+        }, 3500);
+        return;
     }
 
     btn.disabled = false;
@@ -181,6 +287,7 @@ async function wizardNext(current, next) {
     if(dot) dot.classList.add('active');
 }
 
+
 async function wizardFinish() {
     const btn = event.currentTarget;
     const oldHtml = btn.innerHTML;
@@ -190,7 +297,7 @@ async function wizardFinish() {
     // validate DB
     const dbHost = document.getElementById('wDbHost').value.trim();
     if (!dbHost) {
-        alert("请输入数据库地址");
+        alert('请输入数据库地址');
         btn.disabled = false;
         btn.innerHTML = oldHtml;
         return;
@@ -209,8 +316,8 @@ async function wizardFinish() {
             method: 'POST', headers: {'Content-Type': 'application/json'},
             body: JSON.stringify(dbPayload)
         });
-        const d = await r.json();
-        if(!d.success) throw new Error(d.message || "连接失败");
+        const d = await r.json().catch(() => ({}));
+        if(!r.ok || !d.success) throw new Error(d.message || '连接失败');
     } catch(e) {
         alert('数据库连接失败: ' + e.message);
         btn.disabled = false;
@@ -221,24 +328,23 @@ async function wizardFinish() {
     btn.innerHTML = '<span class="spinner" style="width:14px;height:14px;border-width:2px;display:inline-block;margin-right:8px;"></span> 部署中...';
     
     if (!window.currentConfig) window.currentConfig = {};
+    window.currentConfig = sanitizeSettingsPayload(window.currentConfig);
     if (!window.currentConfig.telegram_db) window.currentConfig.telegram_db = {};
     Object.assign(window.currentConfig.telegram_db, dbPayload);
     
     try {
-        await fetch('/api/settings', {
-            method: 'PUT',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(window.currentConfig)
-        });
+        await saveSettingsPayload(window.currentConfig);
+        await ensureSetupCompleted();
         const wiz = document.getElementById('setupWizard');
         if(wiz) { wiz.classList.remove('active'); wiz.classList.remove('show'); }
         location.reload();
     } catch (e) {
-        alert("保存最终配置失败", e);
+        alert('保存最终配置失败: ' + (e.message || '未知错误'));
         btn.disabled = false;
         btn.innerHTML = oldHtml;
     }
 }
+
 
 
 // ── 全局 401 拦截 ──
@@ -910,14 +1016,11 @@ async function saveConfig() {
     
     const cfg = collectSettingsConfig();
     
-
     try {
-        const resp = await fetch('/api/settings', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(cfg) });
-        if (resp.ok) { 
-            const msg = document.getElementById('saveMsg'); 
-            msg.classList.add('show'); 
-            setTimeout(() => msg.classList.remove('show'), 2500); 
-        }
+        await saveSettingsPayload(cfg);
+        const msg = document.getElementById('saveMsg'); 
+        msg.classList.add('show'); 
+        setTimeout(() => msg.classList.remove('show'), 2500); 
     } catch (e) { 
         alert('保存失败: ' + e.message); 
     }
@@ -945,16 +1048,12 @@ function initAutoSave() {
 async function doAutoSave(triggerInput) {
     const cfg = collectSettingsConfig();
 
-
     try {
-        const resp = await fetch('/api/settings', {
-            method: 'PUT',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(cfg)
-        });
-        if (resp.ok) showFieldCheck(triggerInput);
+        await saveSettingsPayload(cfg);
+        showFieldCheck(triggerInput);
     } catch (e) { /* silent fail */ }
 }
+
 
 function showFieldCheck(input) {
     // 在输入框旁边显示一个临时绿色对号
