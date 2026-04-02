@@ -327,20 +327,66 @@ class PikPakClient:
                     task = resp.json()
                 
                 phase = task.get("phase", "")
-                file_id = task.get("file_id", "")
-                file_name = task.get("file_name", task.get("name", ""))
                 
-                logger.info(f"转存轮询: phase={phase}, file_id={file_id}, name={file_name}, 已等待 {elapsed}s")
+                # 尝试从多个可能的字段提取 file_id
+                file_id = (task.get("file_id", "") 
+                          or task.get("params", {}).get("file_id", "")
+                          or task.get("file", {}).get("id", ""))
+                file_name = (task.get("file_name", "") 
+                           or task.get("name", "")
+                           or task.get("file", {}).get("name", ""))
                 
-                if phase == "PHASE_TYPE_COMPLETE" and file_id:
-                    logger.info(f"转存完成！目标文件 ID={file_id}, 名称={file_name}, 耗时 {elapsed}s")
-                    return [file_id]
+                if phase == "PHASE_TYPE_COMPLETE":
+                    # 首次到达 COMPLETE 时，打印完整响应便于排查
+                    logger.info(f"转存任务完成，完整响应: {json.dumps(task, ensure_ascii=False, default=str)}")
+                    
+                    if file_id:
+                        logger.info(f"转存完成！目标文件 ID={file_id}, 名称={file_name}, 耗时 {elapsed}s")
+                        return [file_id]
+                    else:
+                        # file_id 为空，回退到查找根目录下最新文件
+                        logger.info(f"任务已完成但未返回 file_id，将通过根目录最新文件查找")
+                        recent = await self._find_recent_files(seconds=180)
+                        if recent:
+                            return recent
+                        # 如果还找不到，等几秒再试一次（文件可能还在索引中）
+                        await asyncio.sleep(3)
+                        recent = await self._find_recent_files(seconds=180)
+                        return recent
+                        
                 elif phase in ("PHASE_TYPE_ERROR", "PHASE_TYPE_FAILED"):
-                    logger.error(f"转存任务失败: phase={phase}")
+                    logger.error(f"转存任务失败: {json.dumps(task, ensure_ascii=False, default=str)}")
                     return []
+                else:
+                    logger.info(f"转存进行中: phase={phase}, 已等待 {elapsed}s")
                     
             except Exception as e:
                 logger.warning(f"转存轮询异常: {e}, 已等待 {elapsed}s")
             
             await asyncio.sleep(poll_interval)
+
+    async def _find_recent_files(self, seconds: int = 180) -> List[str]:
+        """在网盘根目录查找最近 N 秒内创建的文件（非文件夹）"""
+        from datetime import datetime, timezone, timedelta
+        try:
+            resp = await self.client.file_list(parent_id="", next_page_token=None)
+            now = datetime.now(timezone.utc)
+            cutoff = now - timedelta(seconds=seconds)
+            results = []
+            for f in resp.get("files", []):
+                if f.get("kind") == "drive#folder":
+                    continue
+                created = f.get("created_time", "")
+                if created:
+                    try:
+                        ct = datetime.fromisoformat(created.replace("Z", "+00:00"))
+                        if ct > cutoff:
+                            results.append(f["id"])
+                            logger.info(f"找到最新文件: {f.get('name', '?')} (id={f['id']}, 创建于 {created})")
+                    except Exception:
+                        pass
+            return results
+        except Exception as e:
+            logger.error(f"查找最新文件失败: {e}")
+            return []
 
