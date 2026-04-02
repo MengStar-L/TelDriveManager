@@ -263,7 +263,9 @@ class PikPakClient:
         temp_name = f"Share_{share_id[:5]}_{int(time.time())}"
         try:
             folder_resp = await self.client.create_folder(name=temp_name, parent_id="")
-            temp_parent_id = folder_resp.get("file", {}).get("id", "")
+            # create_folder 直接返回顶层 dict，id 在 resp["file"]["id"] 或 resp["id"]
+            temp_parent_id = folder_resp.get("file", {}).get("id", "") or folder_resp.get("id", "")
+            print(f"DEBUG CREATE FOLDER RESP: {folder_resp}")
         except Exception as e:
             print(f"DEBUG CREATE FOLDER ERROR: {e}")
             temp_parent_id = ""
@@ -272,12 +274,12 @@ class PikPakClient:
         import httpx
         url = "https://api-drive.mypikpak.com/drive/v1/share/restore"
         headers = {
-            "Authorization": f"Bearer {self.client._access_token}",
+            "Authorization": f"Bearer {self.client.access_token}",
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) width/1920",
         }
         data = {
             "share_id": share_id,
-            "pass_code": pass_code_token,
+            "pass_code_token": pass_code_token,
             "file_ids": file_ids,
             "to_parent_id": temp_parent_id
         }
