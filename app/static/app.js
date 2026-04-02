@@ -849,3 +849,350 @@ function appendT2TDLog(log) {
     container.appendChild(entry);
     container.scrollTop = container.scrollHeight;
 }
+// ==========================================
+
+
+// ==========================================
+// PikPak Magnet, Share & RSS Parsing Implementations
+// ==========================================
+
+let magnetCurrentFileId = null;
+let magnetFileData = [];
+
+// === Magnet Parsing ===
+async function parseMagnet() {
+    const input = document.getElementById('magnetInput').value.trim();
+    if (!input) return alert('请输入磁力链接');
+    const parseBtn = document.getElementById('magnetParseBtn');
+    parseBtn.disabled = true;
+    parseBtn.innerHTML = '<span class="spinner"></span> 解析中...';
+    document.getElementById('magnetFileArea').style.display = 'none';
+
+    try {
+        const resp = await fetch('/api/pikpak/magnet/parse', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ magnet: input.split('\n')[0] })
+        });
+        const data = await resp.json();
+        
+        if (!resp.ok) {
+            throw new Error(data.error || '解析失败');
+        }
+
+        magnetCurrentFileId = data.file_id;
+        document.getElementById('magnetFileName').innerHTML = `<i class="ph-fill ph-folder-open"></i> ${data.file_name}`;
+        
+        magnetFileData = data.files || [];
+        renderPickerTree('magnetFileList', magnetFileData, 'magnet');
+        
+        document.getElementById('magnetFileArea').style.display = 'block';
+        updatePickerSelection('magnet');
+    } catch(e) {
+        alert(e.message);
+    } finally {
+        parseBtn.disabled = false;
+        parseBtn.innerHTML = '<i class="ph ph-magnifying-glass"></i> 解析后选择';
+    }
+}
+
+async function submitMagnets() {
+    const input = document.getElementById('magnetInput').value.trim();
+    if (!input) return alert('请输入磁力链接');
+    
+    const btn = document.getElementById('submitBtn');
+    if(!btn) return;
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner"></span> 提交中...';
+
+    try {
+        const resp = await fetch('/api/pikpak/add', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ magnets: input })
+        });
+        const data = await resp.json();
+        if(!resp.ok) throw new Error(data.error || '提交失败');
+        
+        switchPage('progress');
+    } catch(e) {
+        alert(e.message);
+        btn.disabled = false;
+        btn.innerHTML = '<i class="ph ph-rocket-launch"></i> 一键推送';
+    } 
+}
+
+function toggleMagnetSelectAll() {
+    const isChecked = document.getElementById('magnetSelectAll').checked;
+    const checkboxes = document.querySelectorAll('#magnetFileList input[type="checkbox"]');
+    checkboxes.forEach(cb => cb.checked = isChecked);
+    updatePickerSelection('magnet');
+}
+
+async function downloadMagnetFiles() {
+    if (!magnetCurrentFileId) return;
+    const checkboxes = document.querySelectorAll('#magnetFileList input[type="checkbox"]:checked');
+    const selectedIds = Array.from(checkboxes).map(cb => cb.value);
+    
+    if (!selectedIds.length) {
+        return alert('请先选择需要下载的文件');
+    }
+
+    const keepStructure = document.getElementById('magnetKeepStructure').checked;
+    const btn = document.getElementById('magnetDownloadBtn');
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner"></span> 提交中...';
+
+    try {
+        const resp = await fetch('/api/pikpak/magnet/download', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                file_id: magnetCurrentFileId,
+                selected_ids: selectedIds,
+                keep_structure: keepStructure
+            })
+        });
+        const data = await resp.json();
+        if(!resp.ok) throw new Error(data.error || '提交失败');
+        
+        switchPage('progress');
+    } catch(e) {
+        alert(e.message);
+    } finally {
+        btn.disabled = false;
+        btn.innerHTML = '<i class="ph ph-download-simple"></i> 同步到 Aria2';
+    }
+}
+
+
+// === Share Parsing ===
+let shareCurrentData = null;
+let shareFileData = [];
+
+async function parseShareLink() {
+    const shareLink = document.getElementById('shareLink').value.trim();
+    const passCode = document.getElementById('sharePassCode').value.trim();
+    if (!shareLink) return alert('请输入 分享链接');
+
+    const parseBtn = document.getElementById('shareParseBtn');
+    parseBtn.disabled = true;
+    parseBtn.innerHTML = '<span class="spinner"></span> 解析中...';
+    document.getElementById('shareFileArea').style.display = 'none';
+
+    try {
+        const resp = await fetch('/api/pikpak/share/list', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ share_link: shareLink, pass_code: passCode })
+        });
+        const data = await resp.json();
+        if (!resp.ok) throw new Error(data.error || '解析失败');
+
+        shareCurrentData = data;
+        shareFileData = data.files || [];
+        renderPickerTree('fileList', shareFileData, 'share');
+        
+        document.getElementById('shareFileArea').style.display = 'block';
+        updatePickerSelection('share');
+    } catch(e) {
+        alert(e.message);
+    } finally {
+        parseBtn.disabled = false;
+        parseBtn.innerHTML = '<i class="ph ph-magnifying-glass"></i> 解析';
+    }
+}
+
+function toggleSelectAll() {
+    const isChecked = document.getElementById('selectAll').checked;
+    const checkboxes = document.querySelectorAll('#fileList input[type="checkbox"]');
+    checkboxes.forEach(cb => cb.checked = isChecked);
+    updatePickerSelection('share');
+}
+
+function reRenderShareFileList() {
+    renderPickerTree('fileList', shareFileData, 'share');
+}
+
+async function downloadShareFiles() {
+    if (!shareCurrentData) return;
+    const checkboxes = document.querySelectorAll('#fileList input[type="checkbox"]:checked');
+    const selectedIds = Array.from(checkboxes).map(cb => cb.value);
+    
+    if (!selectedIds.length) return alert('请先选择需要下载的分享节点');
+
+    const keepStructure = document.getElementById('shareKeepStructure').checked;
+    const renameByFolder = document.getElementById('shareRenameByFolder').checked;
+    
+    const btn = document.getElementById('downloadShareBtn');
+    if(!btn) return;
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner"></span> 同步中...';
+
+    try {
+        const resp = await fetch('/api/pikpak/share/download', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                share_id: shareCurrentData.share_id,
+                file_ids: selectedIds,
+                pass_code_token: shareCurrentData.pass_code_token,
+                keep_structure: keepStructure,
+                rename_by_folder: renameByFolder
+            })
+        });
+        const data = await resp.json();
+        if(!resp.ok) throw new Error(data.error || '提交失败');
+        
+        switchPage('progress');
+    } catch(e) {
+        alert(e.message);
+    } finally {
+        btn.disabled = false;
+        btn.innerHTML = '<i class="ph ph-cloud-arrow-down"></i> 执行下载';
+    }
+}
+
+// === RSS Parsing ===
+let rssFileData = [];
+
+async function parseRSS() {
+    const url = document.getElementById('rssUrl').value.trim();
+    if (!url) return alert('请输入 RSS 地址');
+
+    const parseBtn = document.getElementById('rssParseBtn');
+    parseBtn.disabled = true;
+    parseBtn.innerHTML = '<span class="spinner"></span> 扫描中...';
+    document.getElementById('rssResultArea').style.display = 'none';
+
+    try {
+        const resp = await fetch('/api/pikpak/rss/parse', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ url: url })
+        });
+        const data = await resp.json();
+        if (!resp.ok) throw new Error(data.error || '扫描失败');
+
+        document.getElementById('rssFeedTitle').innerHTML = `<i class="ph ph-feed"></i> ${data.title} (${data.count} 项)`;
+        rssFileData = data.items || [];
+        renderPickerTree('rssList', rssFileData, 'rss');
+        
+        document.getElementById('rssResultArea').style.display = 'block';
+        updatePickerSelection('rss');
+    } catch(e) {
+        alert(e.message);
+    } finally {
+        parseBtn.disabled = false;
+        parseBtn.innerHTML = '<i class="ph ph-radar"></i> 扫描提取';
+    }
+}
+
+function toggleRssSelectAll() {
+    const isChecked = document.getElementById('rssSelectAll').checked;
+    const checkboxes = document.querySelectorAll('#rssList input[type="checkbox"]');
+    checkboxes.forEach(cb => cb.checked = isChecked);
+    updatePickerSelection('rss');
+}
+
+async function downloadRssItems() {
+    const checkboxes = document.querySelectorAll('#rssList input[type="checkbox"]:checked');
+    const selectedUrls = Array.from(checkboxes).map(cb => cb.value);
+    
+    if (!selectedUrls.length) return alert('请先选择需要订阅的项目');
+
+    const btn = document.getElementById('rssDownloadBtn');
+    if(!btn) return;
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner"></span> 提交中...';
+
+    try {
+        const resp = await fetch('/api/pikpak/rss/download', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ urls: selectedUrls })
+        });
+        const data = await resp.json();
+        if(!resp.ok) throw new Error(data.error || '提交失败');
+        
+        switchPage('progress');
+    } catch(e) {
+        alert(e.message);
+    } finally {
+        btn.disabled = false;
+        btn.innerHTML = '<i class="ph ph-download-simple"></i> 执行订阅下载';
+    }
+}
+
+
+// === File Picker UI Utils ===
+
+function renderPickerTree(containerId, files, prefix) {
+    const container = document.getElementById(containerId);
+    if (!container) return;
+    
+    if (!files || files.length === 0) {
+        container.innerHTML = '<div style="padding:24px;text-align:center;color:var(--text-dim);">没有找到任何内容或空文件夹</div>';
+        return;
+    }
+
+    let html = '';
+    files.forEach(f => {
+        let isFolder = !!f.original_url && f.size_str === 0 && !f.extension; 
+        if (f.type === 'folder' || f.mime_type === 'application/vnd.google-apps.folder') isFolder = true;
+        
+        let icon = isFolder ? '<i class="ph-fill ph-folder"></i>' : '<i class="ph-fill ph-file"></i>';
+        let rowClass = isFolder ? 'file-row folder-row' : 'file-row';
+        
+        // For RSS, the value is the download_url, for others it's file_id / id
+        let val = f.download_url || f.file_id || f.id;
+        let title = f.name || f.title;
+        let sizeOrTime = f.size_str || f.published || '0 B';
+        
+        html += `
+            <label class="${rowClass}">
+                <input type="checkbox" value="${val}" onchange="updatePickerSelection('${prefix}')" checked>
+                <div class="file-icon">${icon}</div>
+                <div class="file-name" title="${title}">${title}</div>
+                <div class="file-size">${sizeOrTime}</div>
+            </label>
+        `;
+    });
+    
+    container.innerHTML = html;
+}
+
+function updatePickerSelection(prefix) {
+    let cbList = [];
+    let countSpan = null;
+    let selectedInfoSpan = null;
+    
+    if (prefix === 'magnet') {
+        cbList = document.querySelectorAll('#magnetFileList input[type="checkbox"]');
+        countSpan = document.getElementById('magnetFileCount');
+        selectedInfoSpan = document.getElementById('magnetSelectedInfo');
+    } else if (prefix === 'share') {
+        cbList = document.querySelectorAll('#fileList input[type="checkbox"]');
+        countSpan = document.getElementById('fileCount');
+        selectedInfoSpan = document.getElementById('selectedInfo');
+    } else if (prefix === 'rss') {
+        cbList = document.querySelectorAll('#rssList input[type="checkbox"]');
+        countSpan = document.getElementById('rssCount');
+        selectedInfoSpan = document.getElementById('rssSelectedInfo');
+    }
+
+    if (!cbList || cbList.length === 0) return;
+
+    let total = cbList.length;
+    let checkedCount = 0;
+    cbList.forEach(cb => { if(cb.checked) checkedCount++; });
+
+    if (countSpan) countSpan.textContent = `共 ${total} 项`;
+    if (selectedInfoSpan) {
+        if (prefix === 'rss') {
+            selectedInfoSpan.textContent = `已选 ${checkedCount} 项准备下载`;
+        } else {
+            selectedInfoSpan.textContent = `已选 ${checkedCount} 个对象`;
+        }
+    }
+}

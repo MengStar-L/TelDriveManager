@@ -289,7 +289,7 @@
                             <div class="input-footer">
                                 <span class="input-hint"><i class="ph-fill ph-info"></i> 单链可以解析选择文件，多行直接全量并行下载。</span>
                                 <div style="display:flex; gap:12px;">
-                                    <button class="btn btn-ghost" id="parseBtn" onclick="parseMagnet()"><i class="ph ph-magnifying-glass"></i> 解析后选择</button>
+                                    <button class="btn btn-ghost" id="magnetParseBtn" onclick="parseMagnet()"><i class="ph ph-magnifying-glass"></i> 解析后选择</button>
                                     <button class="btn btn-primary" id="submitBtn" onclick="submitMagnets()"><i class="ph ph-rocket-launch"></i> 一键推送</button>
                                 </div>
                             </div>
@@ -327,7 +327,7 @@
                             <div style="display:flex; gap:12px; margin-bottom: 24px;">
                                 <input class="form-input" type="text" id="shareLink" placeholder="输入 PikPak 分享链接...">
                                 <input class="form-input" style="width:180px" type="text" id="sharePassCode" placeholder="提取码">
-                                <button class="btn btn-primary" id="parseBtn" onclick="parseShareLink()"><i class="ph ph-magnifying-glass"></i> 解析</button>
+                                <button class="btn btn-primary" id="shareParseBtn" onclick="parseShareLink()"><i class="ph ph-magnifying-glass"></i> 解析</button>
                             </div>
                             
                             <div id="shareFileArea" style="display:none; border:1px solid var(--border); border-radius:var(--radius-lg);">
