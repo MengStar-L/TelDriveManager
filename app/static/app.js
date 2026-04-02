@@ -365,9 +365,27 @@ let ws = null;
 function connectWS() {
     const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
     ws = new WebSocket(`${proto}//${location.host}/ws`);
-    ws.onopen = () => { document.getElementById('wsDot').classList.add('connected'); };
-    ws.onclose = () => { document.getElementById('wsDot').classList.remove('connected'); setTimeout(connectWS, 3000); };
-    ws.onmessage = (e) => handleWSMessage(JSON.parse(e.data));
+    ws.onopen = () => {
+        console.log('[WS] Connected');
+        const dot = document.getElementById('wsDot');
+        if (dot) dot.classList.add('connected');
+    };
+    ws.onclose = () => {
+        console.log('[WS] Disconnected, reconnecting in 3s...');
+        const dot = document.getElementById('wsDot');
+        if (dot) dot.classList.remove('connected');
+        setTimeout(connectWS, 3000);
+    };
+    ws.onerror = (e) => { console.error('[WS] Error:', e); };
+    ws.onmessage = (e) => {
+        try {
+            const msg = JSON.parse(e.data);
+            console.log('[WS] Received:', msg.type, msg);
+            handleWSMessage(msg);
+        } catch(err) {
+            console.error('[WS] Parse error:', err, e.data);
+        }
+    };
 }
 
 function handleWSMessage(msg) {
@@ -438,21 +456,6 @@ function clearLog() {
 }
 
 // ── PikPak Magnet Logic ──
-async function submitMagnets() {
-    const input = document.getElementById('magnetInput');
-    const text = input.value.trim();
-    if (!text) return;
-    const btn = document.getElementById('submitBtn');
-    btn.disabled = true; btn.innerHTML = '<span class="spinner"></span> 处理中...';
-    try {
-        const resp = await fetch('/api/add', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ magnets: text }) });
-        const data = await resp.json();
-        if (!resp.ok) { addLogEntry('<i class="ph-fill ph-x-circle error"></i>', `<span class="error">${data.error}</span>`); btn.disabled = false; btn.innerHTML = '<i class="ph ph-rocket-launch"></i> 一键推送'; return; }
-        addLogEntry('<i class="ph ph-envelope-simple"></i>', data.message);
-        input.value = '';
-        switchPage('progress');
-    } catch (e) { addLogEntry('<i class="ph-fill ph-warning error"></i>', `<span class="error">请求失败: ${e.message}</span>`); btn.disabled = false; btn.innerHTML = '<i class="ph ph-rocket-launch"></i> 一键推送'; }
-}
 
 // ── Aria2TelDrive Tasks & Stats ──
 
@@ -917,6 +920,7 @@ async function submitMagnets() {
         switchPage('progress');
     } catch(e) {
         alert(e.message);
+    } finally {
         btn.disabled = false;
         btn.innerHTML = '<i class="ph ph-rocket-launch"></i> 一键推送';
     } 

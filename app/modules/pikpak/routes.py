@@ -69,14 +69,17 @@ def reset_clients():
 
 async def _broadcast(msg: dict):
     import json
+    import logging
     dead = set()
     data = json.dumps(msg, ensure_ascii=False)
-    for ws in _ws_clients:
+    for ws in list(_ws_clients):
         try:
             await ws.send_text(data)
-        except Exception:
+        except Exception as e:
+            logging.error(f"WS send error: {e}")
             dead.add(ws)
-    _ws_clients -= dead
+    if dead:
+        _ws_clients.difference_update(dead)
 
 
 def register_ws(ws: WebSocket):
