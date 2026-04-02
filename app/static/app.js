@@ -476,16 +476,19 @@ function renderA2TDTasks(tasks) {
         if (t.progress_str) progressStr = `<span class="task-progress" style="width:120px;text-align:right;">${t.progress_str}</span>`;
         else if (t.progress !== undefined) progressStr = `<span class="task-progress">${t.progress.toFixed(1)}%</span>`;
         
-        return `<div class="task-item">
-            <span class="task-badge ${bc}">${status.toUpperCase()}</span>
-            <span class="task-name" title="${t.filename || t.url}">${t.filename || 'PikPak 数据流'}</span>
-            ${progressStr}
-            <div style="flex-shrink:0;">
-               ${(status==='failed' || status==='cancelled') ? `<button class="btn btn-sm btn-ghost" onclick="a2tdAction('${t.task_id}', 'retry')" title="重试"><i class="ph ph-arrows-clockwise"></i></button>` : ''}
-               ${(status==='downloading' || status==='uploading') ? `<button class="btn btn-sm btn-ghost" onclick="a2tdAction('${t.task_id}', 'pause')" title="暂停"><i class="ph ph-pause"></i></button>` : ''}
-               ${(status==='paused') ? `<button class="btn btn-sm btn-ghost" onclick="a2tdAction('${t.task_id}', 'resume')" title="恢复"><i class="ph ph-play"></i></button>` : ''}
-               <button class="btn btn-sm btn-ghost" onclick="a2tdAction('${t.task_id}', 'cancel')" title="取消" style="color:var(--error);"><i class="ph ph-x"></i></button>
+        return `<div class="task-item" style="flex-wrap: wrap;">
+            <div style="display:flex; align-items:center; width:100%;">
+                <span class="task-badge ${bc}">${status.toUpperCase()}</span>
+                <span class="task-name" title="${t.filename || t.url}">${t.filename || 'PikPak 数据流'}</span>
+                ${progressStr}
+                <div style="flex-shrink:0;">
+                   ${(status==='failed' || status==='cancelled') ? `<button class="btn btn-sm btn-ghost" onclick="a2tdAction('${t.task_id}', 'retry')" title="重试"><i class="ph ph-arrows-clockwise"></i></button>` : ''}
+                   ${(status==='downloading' || status==='uploading') ? `<button class="btn btn-sm btn-ghost" onclick="a2tdAction('${t.task_id}', 'pause')" title="暂停"><i class="ph ph-pause"></i></button>` : ''}
+                   ${(status==='paused') ? `<button class="btn btn-sm btn-ghost" onclick="a2tdAction('${t.task_id}', 'resume')" title="恢复"><i class="ph ph-play"></i></button>` : ''}
+                   <button class="btn btn-sm btn-ghost" onclick="a2tdAction('${t.task_id}', 'cancel')" title="取消" style="color:var(--error);"><i class="ph ph-x"></i></button>
+                </div>
             </div>
+            ${t.error ? `<div style="width:100%; margin-top:8px; font-size:12px; color:var(--error); padding: 5px 10px; background:var(--accent-light); border-radius:6px;"><i class="ph ph-warning-circle"></i> ${t.error}</div>` : ''}
         </div>`;
     }).join('');
 }
