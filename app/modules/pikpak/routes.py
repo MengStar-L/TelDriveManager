@@ -643,6 +643,8 @@ async def _process_magnets(magnets: List[str]):
 
         # 按引擎分发
         delete_ids = [file_id] if delete_after else None
+        engine_label = "内置引擎下载" if engine == "builtin" else "Aria2 推送"
+        await _broadcast({"type": "task_status", "index": i, "status": f"✓ 解析完成, 开始{engine_label}..."})
         if engine == "builtin":
             await _builtin_download_and_upload(files, i, delete_pikpak_ids=delete_ids)
         else:

@@ -461,6 +461,84 @@ function handleWSMessage(msg) {
     }
 }
 
+
+function updateProgressBar(filename, mode, progress, speed, downloaded, total, eta, connections, status) {
+    const container = document.getElementById('progressBarsContainer');
+    const barsEl = document.getElementById('progressBars');
+    if (!container || !barsEl) return;
+    container.style.display = 'block';
+    
+    const cardId = 'pb-' + filename.replace(/[^a-zA-Z0-9_-]/g, '_');
+    let card = document.getElementById(cardId);
+    
+    if (!card) {
+        card = document.createElement('div');
+        card.id = cardId;
+        card.className = 'progress-card ' + (mode === 'download' ? 'downloading' : mode === 'upload' ? 'uploading' : 'completed');
+        card.innerHTML = `
+            <div class="progress-header">
+                <div class="progress-filename">
+                    <i class="ph ${mode === 'download' ? 'ph-download-simple dl-icon' : mode === 'upload' ? 'ph-upload-simple ul-icon' : 'ph-check-circle'}" data-icon></i>
+                    <span data-name>${filename}</span>
+                </div>
+                <div class="progress-pct" data-pct>0%</div>
+            </div>
+            <div class="progress-bar-track">
+                <div class="progress-bar-fill ${mode}" data-bar style="width:0%"></div>
+            </div>
+            <div class="progress-meta">
+                <span data-size></span>
+                <span class="speed" data-speed></span>
+                <span data-extra></span>
+            </div>
+        `;
+        barsEl.prepend(card);
+    }
+
+    // 更新卡片样式
+    card.className = 'progress-card ' + (status === 'completed' ? 'completed' : mode === 'download' ? 'downloading' : mode === 'upload' ? 'uploading' : 'completed');
+    
+    // 更新图标
+    const iconEl = card.querySelector('[data-icon]');
+    if (iconEl) {
+        if (mode === 'download') { iconEl.className = 'ph ph-download-simple dl-icon'; }
+        else if (mode === 'upload') { iconEl.className = 'ph ph-upload-simple ul-icon'; }
+        else { iconEl.className = 'ph-fill ph-check-circle'; iconEl.style.color = 'var(--success)'; }
+    }
+
+    // 更新百分比
+    const pctEl = card.querySelector('[data-pct]');
+    if (pctEl) pctEl.textContent = Math.round(progress) + '%';
+
+    // 更新进度条
+    const barEl = card.querySelector('[data-bar]');
+    if (barEl) {
+        barEl.style.width = progress + '%';
+        barEl.className = 'progress-bar-fill ' + (mode === 'done' ? 'done' : mode);
+    }
+
+    // 更新元数据
+    const sizeEl = card.querySelector('[data-size]');
+    if (sizeEl && downloaded && total) sizeEl.textContent = `${downloaded} / ${total}`;
+
+    const speedEl = card.querySelector('[data-speed]');
+    if (speedEl) speedEl.textContent = speed || '';
+
+    const extraEl = card.querySelector('[data-extra]');
+    if (extraEl) {
+        const parts = [];
+        if (eta) parts.push('ETA: ' + eta);
+        if (connections > 0) parts.push(connections + ' 连接');
+        extraEl.textContent = parts.join(' · ');
+    }
+
+    // 自动切换到进度页
+    const progressPage = document.getElementById('page-progress');
+    if (progressPage && !progressPage.classList.contains('active') && mode === 'download' && progress < 2) {
+        switchPage('progress');
+    }
+}
+
 function addLogEntry(icon, text) {
     const container = document.getElementById('logContainer');
     if(!container) return;
