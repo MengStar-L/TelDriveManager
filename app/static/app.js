@@ -730,9 +730,9 @@ window.onload = () => {
         try {
             const data = JSON.parse(e.data);
             if(data.type === "state" || data.type === "qr" || data.type === "password_required") {
-                updateT2TDState(data);
+                updateT2TDState(data.payload || data);
             } else if(data.type === "log") {
-                appendT2TDLog(data);
+                appendT2TDLog(data.payload || data);
             }
         }catch(e){}
     };
@@ -784,12 +784,24 @@ function appendT2TDLog(log) {
     if (!container) return;
     const empty = document.getElementById('t2tdLogEmpty');
     if (empty) empty.remove();
+    
+    // Normalize log fields (handle both direct object and payload wrapper)
+    const logData = log.payload || log;
+    
     const entry = document.createElement('div');
     entry.className = 'log-entry';
     let c = '#fff';
-    if(log.level === 'ERROR') c = '#f87171';
-    else if(log.level === 'WARNING') c = '#f59e0b';
-    entry.innerHTML = `<span style="color:${c}">[${log.time}] [${log.level}] ${log.message}</span>`;
+    if(logData.level === 'ERROR') c = '#f87171';
+    else if(logData.level === 'WARN' || logData.level === 'WARNING') c = '#f59e0b';
+    
+    // Extract time from timestamp
+    let t = logData.time || logData.timestamp || '(none)';
+    if (t && t.includes('T')) {
+        t = t.split('T')[1].split('.')[0] || t;
+        t = t.replace('Z', '').replace(/[+-]\d+:\d+$/, ''); // Strip extra timezone fragments visually
+    }
+
+    entry.innerHTML = `<span style="color:${c}">[${t}] [${logData.level || 'INFO'}] ${logData.message || ''}</span>`;
     container.appendChild(entry);
     container.scrollTop = container.scrollHeight;
 }
