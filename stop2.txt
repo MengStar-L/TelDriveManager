@@ -1,0 +1,17 @@
+async def stop(self):
+    self.stop_event.set()
+    self.reload_event.set()
+    self.refresh_qr_event.set()
+    if self.password_future and (not self.password_future.done()):
+        self.password_future.cancel()
+    if self.sync_task and (not self.sync_task.done()):
+        self.sync_task.cancel()
+        try:
+            await self.sync_task
+        except (asyncio.CancelledError, Exception):
+            pass
+    if self.client:
+        try:
+            await self.client.disconnect()
+        except Exception:
+            pass

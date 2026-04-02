@@ -38,7 +38,7 @@ def main():
         "app.main:app",
         host="0.0.0.0",
         port=port,
-        reload=True,
+        reload=False,
         log_level="warning",
     )
 

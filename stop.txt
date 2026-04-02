@@ -1,0 +1,19 @@
+async def stop(self):
+    """停止任务管理器"""
+    self._running = False
+    if self._monitor_task:
+        self._monitor_task.cancel()
+        try:
+            await self._monitor_task
+        except asyncio.CancelledError:
+            pass
+    if self._upload_tasks:
+        logger.info(f'正在取消 {len(self._upload_tasks)} 个后台上传任务...')
+        for t_id, task in self._upload_tasks.items():
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*self._upload_tasks.values(), return_exceptions=True)
+        self._upload_tasks.clear()
+    if self.aria2:
+        await self.aria2.close()
+    logger.info('任务管理器已停止')
