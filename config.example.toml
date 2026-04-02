@@ -17,6 +17,9 @@ save_dir = "/"
 delete_after_download = true
 poll_interval = 3
 max_wait_time = 3600
+download_engine = "builtin"          # "builtin"（内置下载+上传TelDrive） 或 "aria2"（仅推送直链）
+max_concurrent_downloads = 3         # 最大同时下载任务数
+connections_per_task = 8             # 单文件并行连接数（多线程下载）
 
 # ─── Aria2 下载引擎（共享） ───
 [aria2]

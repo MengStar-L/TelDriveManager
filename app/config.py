@@ -36,6 +36,8 @@ DEFAULTS: dict[str, Any] = {
     "pikpak": {
         "username": "", "password": "", "save_dir": "/",
         "delete_after_download": True, "poll_interval": 3, "max_wait_time": 3600,
+        "download_engine": "builtin", "max_concurrent_downloads": 3,
+        "connections_per_task": 8,
     },
     "aria2": {
         "rpc_url": "http://localhost", "rpc_port": 6800, "rpc_secret": "",

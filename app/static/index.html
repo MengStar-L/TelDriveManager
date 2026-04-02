@@ -219,6 +219,97 @@
         .storage-bar { height: 6px; background: var(--bg-input); border-radius: 3px; overflow: hidden; margin-top: 6px; width: 100%;}
         .storage-bar-fill { height: 100%; border-radius: 3px; background: linear-gradient(90deg, #0066ff, #a78bfa); transition: width 0.5s ease; }
         .storage-text { font-size: 11px; color: var(--text-dim); margin-top: 6px; width: 100%; text-align: left; }
+
+        /* ── 下载/上传进度条 ── */
+        #progressBarsContainer { margin-bottom: 16px; }
+        .progress-card {
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            padding: 16px 20px;
+            margin-bottom: 10px;
+            transition: all 0.3s ease;
+        }
+        .progress-card.downloading { border-left: 3px solid #3b82f6; }
+        .progress-card.uploading { border-left: 3px solid #a78bfa; }
+        .progress-card.completed {
+            border-left: 3px solid var(--success);
+            opacity: 0.7;
+        }
+        .progress-card.failed { border-left: 3px solid var(--error); }
+        .progress-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            margin-bottom: 10px;
+        }
+        .progress-filename {
+            font-size: 14px;
+            font-weight: 600;
+            color: var(--text-primary);
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+            max-width: 60%;
+        }
+        .progress-filename i { font-size: 18px; }
+        .progress-filename .dl-icon { color: #3b82f6; }
+        .progress-filename .ul-icon { color: #a78bfa; }
+        .progress-pct {
+            font-size: 20px;
+            font-weight: 700;
+            color: var(--text-primary);
+            font-variant-numeric: tabular-nums;
+        }
+        .progress-bar-track {
+            height: 8px;
+            background: var(--bg-input);
+            border-radius: 4px;
+            overflow: hidden;
+            margin-bottom: 10px;
+        }
+        .progress-bar-fill {
+            height: 100%;
+            border-radius: 4px;
+            transition: width 0.5s ease;
+            position: relative;
+            overflow: hidden;
+        }
+        .progress-bar-fill.download {
+            background: linear-gradient(90deg, #3b82f6, #60a5fa);
+        }
+        .progress-bar-fill.upload {
+            background: linear-gradient(90deg, #8b5cf6, #a78bfa);
+        }
+        .progress-bar-fill.done {
+            background: linear-gradient(90deg, var(--success), #34d399);
+        }
+        .progress-bar-fill::after {
+            content: '';
+            position: absolute;
+            top: 0; left: -100%; width: 100%; height: 100%;
+            background: linear-gradient(90deg, transparent, rgba(255,255,255,0.3), transparent);
+            animation: progressShine 2s ease-in-out infinite;
+        }
+        @keyframes progressShine {
+            0% { left: -100%; }
+            100% { left: 100%; }
+        }
+        .progress-meta {
+            display: flex;
+            justify-content: space-between;
+            font-size: 12px;
+            color: var(--text-dim);
+        }
+        .progress-meta span {
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+        }
+        .progress-meta .speed { color: var(--accent); font-weight: 600; }
     </style>
 </head>
 <body>
@@ -382,6 +473,11 @@
 
                 <!-- Progress -->
                 <div class="page" id="page-progress">
+                    <!-- 实时进度条区域 -->
+                    <div id="progressBarsContainer" style="display:none">
+                        <div id="progressBars"></div>
+                    </div>
+
                     <div class="card">
                         <div class="card-header">
                             <h3><i class="ph ph-terminal-window"></i> 实时控制台诊断</h3>
@@ -590,6 +686,20 @@
                                         任务下发完成销毁云端文件
                                         <div class="toggle-switch"><input type="checkbox" id="cfgPikpakDelete"><span class="toggle-slider"></span></div>
                                     </label>
+                                </div>
+                                <div style="margin-top:20px; padding-top:20px; border-top:1px solid var(--border)">
+                                    <h4 style="margin-bottom:12px; font-size:13px; color:var(--text-secondary)"><i class="ph ph-download-simple"></i> 下载引擎</h4>
+                                    <div class="field-grid">
+                                        <div class="form-group">
+                                            <label>引擎类型</label>
+                                            <select class="form-input" id="cfgPikpakEngine">
+                                                <option value="builtin">内置引擎（下载+上传 TelDrive）</option>
+                                                <option value="aria2">推送到 Aria2（仅导出直链）</option>
+                                            </select>
+                                        </div>
+                                        <div class="form-group"><label>最大并发下载</label><input class="form-input" type="number" id="cfgPikpakMaxDownloads" min="1" max="10" placeholder="3"></div>
+                                        <div class="form-group"><label>单文件连接数</label><input class="form-input" type="number" id="cfgPikpakConnections" min="1" max="32" placeholder="8"></div>
+                                    </div>
                                 </div>
                             </div>
                         </div>

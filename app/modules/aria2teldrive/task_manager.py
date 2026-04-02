@@ -620,12 +620,11 @@ class TaskManager:
                     if initial_status in ("completed", "failed", "cancelled"):
                         self._terminal_gids.add(gid)
 
-                    # 如果发现时已经完成，触发上传
+                    # 下载完成直接标记 completed（不再触发 TelDrive 上传，由内置引擎负责）
                     if aria2_status == "complete":
-                        local_path = parsed["file_path"]
-                        if local_path:
-                            t = asyncio.create_task(self._handle_download_complete(task_id, gid))
-                            self._upload_tasks[task_id] = t
+                        await db.update_task(task_id, status="completed",
+                                             download_progress=100.0)
+                        self._terminal_gids.add(gid)
                     continue
 
             # 已入库的任务，更新状态
@@ -678,15 +677,12 @@ class TaskManager:
             task.update(update_data)
             await self._broadcast_task_update(task_id, task)
 
-            # 下载完成 → 触发上传
-            if aria2_status == "complete" and current_status != "uploading":
-                local_path = parsed["file_path"]
-                if local_path:
-                    t = asyncio.create_task(self._handle_download_complete(task_id, gid))
-                    self._upload_tasks[task_id] = t
-                else:
-                    await db.update_task(task_id, status="completed")
-                    await self._broadcast_task_update(task_id)
+            # 下载完成 → 直接标记 completed（不再触发 TelDrive 上传，由内置引擎负责）
+            if aria2_status == "complete" and current_status not in ("completed", "uploading"):
+                await db.update_task(task_id, status="completed",
+                                     download_progress=100.0)
+                self._terminal_gids.add(gid)
+                await self._broadcast_task_update(task_id)
 
     def _calc_teldrive_path(self, local_path: str) -> str:
         """计算文件在 TelDrive 上的目标目录，保留下载目录中的子目录结构。"""

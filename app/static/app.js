@@ -403,11 +403,34 @@ function handleWSMessage(msg) {
         return;
     }
     if (msg.type === "task_update") {
-        // Individual update from A2TD
+        return;
+    }
+
+    // ── 内置引擎进度条 ──
+    if (msg.type === "download_progress") {
+        updateProgressBar(msg.filename, 'download', msg.progress, msg.speed, msg.downloaded, msg.total, msg.eta, msg.connections, msg.status);
+        return;
+    }
+    if (msg.type === "upload_progress") {
+        updateProgressBar(msg.filename, 'upload', msg.progress, '', msg.uploaded, msg.total, '', 0, 'uploading');
+        return;
+    }
+    if (msg.type === "upload_done") {
+        updateProgressBar(msg.filename, 'done', 100, '', '', '', '', 0, 'completed');
+        // 3 秒后淡出移除进度条
+        setTimeout(() => {
+            const card = document.getElementById('pb-' + CSS.escape(msg.filename));
+            if (card) { card.style.opacity = '0'; setTimeout(() => card.remove(), 500); }
+            // 隐藏容器
+            const barsEl = document.getElementById('progressBars');
+            if (barsEl && barsEl.children.length === 0) {
+                document.getElementById('progressBarsContainer').style.display = 'none';
+            }
+        }, 3000);
         return;
     }
     
-    // PikPak logic
+    // PikPak log messages
     const icons = { task_start: '<i class="ph-fill ph-spinner-gap info" style="animation:spin 2s linear infinite"></i>', task_added: '<i class="ph ph-cloud-arrow-up info"></i>', task_status: '<i class="ph ph-hourglass-high warning"></i>', task_error: '<i class="ph-fill ph-warning-circle error"></i>', files_found: '<i class="ph ph-files"></i>', aria2_done: '<i class="ph-fill ph-check-circle success"></i>', task_done: '<i class="ph-fill ph-check-square success"></i>', all_done: '<i class="ph-fill ph-flag-checkered success"></i>', error: '<i class="ph-fill ph-x-circle error"></i>' };
     const icon = icons[msg.type] || '<i class="ph-fill ph-asterisk"></i>';
     let text = '';
@@ -566,6 +589,9 @@ async function loadConfig() {
         document.getElementById('cfgPikpakPassword').value = cfg.pikpak?.password || '';
         document.getElementById('cfgPikpakSaveDir').value = cfg.pikpak?.save_dir || '/';
         document.getElementById('cfgPikpakDelete').checked = cfg.pikpak?.delete_after_download || false;
+        document.getElementById('cfgPikpakEngine').value = cfg.pikpak?.download_engine || 'builtin';
+        document.getElementById('cfgPikpakMaxDownloads').value = cfg.pikpak?.max_concurrent_downloads || 3;
+        document.getElementById('cfgPikpakConnections').value = cfg.pikpak?.connections_per_task || 8;
         
         document.getElementById('cfgAria2Url').value = cfg.aria2?.rpc_url || '';
         document.getElementById('cfgAria2Secret').value = cfg.aria2?.rpc_secret || '';
@@ -610,7 +636,10 @@ async function saveConfig() {
             username: document.getElementById('cfgPikpakUsername').value, 
             password: document.getElementById('cfgPikpakPassword').value, 
             save_dir: document.getElementById('cfgPikpakSaveDir').value || '/', 
-            delete_after_download: document.getElementById('cfgPikpakDelete').checked 
+            delete_after_download: document.getElementById('cfgPikpakDelete').checked,
+            download_engine: document.getElementById('cfgPikpakEngine').value || 'builtin',
+            max_concurrent_downloads: parseInt(document.getElementById('cfgPikpakMaxDownloads').value) || 3,
+            connections_per_task: parseInt(document.getElementById('cfgPikpakConnections').value) || 8
         },
         aria2: { 
             rpc_url: document.getElementById('cfgAria2Url').value, 

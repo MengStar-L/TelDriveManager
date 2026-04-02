@@ -1,6 +1,7 @@
 """PikPak 模块 API 路由 — 从 AutoPikDown web_server.py 迁移到 FastAPI"""
 
 import asyncio
+import os
 import posixpath
 import re
 import logging
@@ -14,6 +15,7 @@ from fastapi.responses import JSONResponse
 from app.config import load_config, save_config
 from app.modules.pikpak.client import PikPakClient
 from app.aria2_client import Aria2Client
+from app.downloader import downloader, DownloadTask, TaskStatus, DOWNLOAD_DIR, _format_size
 
 logger = logging.getLogger(__name__)
 
@@ -347,16 +349,196 @@ async def api_share_download(request: Request):
 
 # ── 后台处理 ──
 
+
+def _get_engine() -> str:
+    """获取用户配置的下载引擎"""
+    cfg = load_config()
+    return cfg.get("pikpak", {}).get("download_engine", "builtin")
+
+
+def _get_teldrive_client():
+    """按需创建 TelDrive 客户端（内置引擎上传用）"""
+    from app.modules.aria2teldrive.teldrive_client import TelDriveClient
+    cfg = load_config()
+    td_cfg = cfg.get("teldrive", {})
+    return TelDriveClient(
+        api_host=td_cfg.get("api_host", ""),
+        access_token=td_cfg.get("access_token", ""),
+        channel_id=td_cfg.get("channel_id", 0),
+        chunk_size=td_cfg.get("chunk_size", "500M"),
+        upload_concurrency=td_cfg.get("upload_concurrency", 4),
+        random_chunk_name=td_cfg.get("random_chunk_name", True),
+        max_retries=cfg.get("upload", {}).get("max_retries", 3),
+    )
+
+
+async def _builtin_download_and_upload(files: List[dict], index: int, delete_pikpak_ids: List[str] = None):
+    """内置引擎：下载文件列表 → 逐个上传 TelDrive → 清理"""
+    cfg = load_config()
+    td_cfg = cfg.get("teldrive", {})
+    target_path = td_cfg.get("target_path", "/")
+    auto_delete = cfg.get("upload", {}).get("auto_delete", True)
+
+    # 更新下载器配置
+    pikpak_cfg = cfg.get("pikpak", {})
+    downloader.update_config(
+        max_concurrent=pikpak_cfg.get("max_concurrent_downloads", 3),
+        connections_per_task=pikpak_cfg.get("connections_per_task", 8),
+    )
+
+    total_files = len(files)
+    for fi, f in enumerate(files, 1):
+        url = f["url"]
+        name = f["name"]
+        file_index = index  # 位于总任务列表中的位置
+
+        # === 下载阶段 ===
+        dl_done_event = asyncio.Event()
+        dl_error = [None]
+
+        async def on_progress(task: DownloadTask):
+            await _broadcast({
+                "type": "download_progress",
+                "index": file_index,
+                "file_index": fi,
+                "total_files": total_files,
+                "filename": task.filename,
+                "progress": round(task.downloaded / task.total_size * 100, 1) if task.total_size > 0 else 0,
+                "speed": task.to_dict()["speed_str"],
+                "downloaded": task.to_dict()["downloaded_str"],
+                "total": task.to_dict()["total_str"],
+                "eta": task.to_dict()["eta_str"],
+                "connections": task.connections,
+                "status": task.status.value,
+            })
+
+        async def on_complete(task: DownloadTask):
+            dl_done_event.set()
+
+        dl_task = await downloader.add_task(
+            url=url, filename=name,
+            on_progress=on_progress, on_complete=on_complete,
+        )
+
+        await _broadcast({"type": "task_status", "index": file_index,
+                          "status": f"下载中 [{fi}/{total_files}]: {name}"})
+
+        # 等待下载完成
+        await dl_done_event.wait()
+
+        if dl_task.status == TaskStatus.FAILED:
+            await _broadcast({"type": "task_error", "index": file_index,
+                              "message": f"下载失败: {dl_task.error}"})
+            continue
+        if dl_task.status == TaskStatus.CANCELLED:
+            continue
+
+        # === 上传阶段 ===
+        await _broadcast({"type": "task_status", "index": file_index,
+                          "status": f"上传中 [{fi}/{total_files}]: {name}"})
+        try:
+            teldrive = _get_teldrive_client()
+            local_path = dl_task.dest_path
+
+            async def upload_progress_cb(uploaded: int, total: int):
+                pct = round(uploaded / total * 100, 1) if total > 0 else 0
+                await _broadcast({
+                    "type": "upload_progress",
+                    "index": file_index,
+                    "filename": name,
+                    "progress": pct,
+                    "uploaded": _format_size(uploaded),
+                    "total": _format_size(total),
+                })
+
+            if os.path.isdir(local_path):
+                # 文件夹场景：递归上传每个文件
+                for root, _dirs, fnames in os.walk(local_path):
+                    for fname in fnames:
+                        fpath = os.path.join(root, fname)
+                        rel = os.path.relpath(fpath, local_path)
+                        sub_dir = os.path.dirname(rel).replace("\\", "/")
+                        td_path = target_path.rstrip("/") + ("/" + sub_dir if sub_dir and sub_dir != "." else "")
+                        await teldrive.upload_file_chunked(
+                            file_path=fpath, teldrive_path=td_path,
+                            progress_callback=upload_progress_cb,
+                        )
+            else:
+                await teldrive.upload_file_chunked(
+                    file_path=local_path, teldrive_path=target_path,
+                    progress_callback=upload_progress_cb,
+                )
+
+            await _broadcast({"type": "upload_done", "index": file_index,
+                              "filename": name})
+
+            # 上传成功，清理本地文件
+            if auto_delete:
+                try:
+                    if os.path.isdir(local_path):
+                        import shutil
+                        shutil.rmtree(local_path)
+                    elif os.path.exists(local_path):
+                        os.remove(local_path)
+                    logger.info(f"已清理本地文件: {local_path}")
+                except Exception as e:
+                    logger.warning(f"清理文件失败: {e}")
+
+        except Exception as e:
+            await _broadcast({"type": "task_error", "index": file_index,
+                              "message": f"上传 TelDrive 失败: {e}"})
+            continue
+
+    # PikPak 网盘文件清理
+    if delete_pikpak_ids:
+        try:
+            pikpak, _ = await _ensure_clients()
+            await pikpak.delete_files(delete_pikpak_ids)
+        except Exception:
+            pass
+
+
+async def _aria2_push_only(files: List[dict], index: int, delete_pikpak_ids: List[str] = None):
+    """Aria2 模式：仅推送直链到 Aria2，不触发 TelDrive 上传"""
+    try:
+        _, aria2 = await _ensure_clients()
+        cfg = load_config()
+        aria2_cfg = cfg.get("aria2", {})
+
+        tasks_to_add = []
+        for f in files:
+            path = f.get("path", f["name"])
+            parent_dir = posixpath.dirname(path)
+            tasks_to_add.append({"url": f["url"], "name": f["name"],
+                                 "subdir": parent_dir if parent_dir else None})
+        download_dir = aria2_cfg.get("download_dir", "")
+        gids = await aria2.add_uris_batch(tasks_to_add, base_dir=download_dir)
+        await _broadcast({"type": "aria2_done", "index": index,
+                          "success_count": len(gids), "total_count": len(files)})
+    except Exception as e:
+        await _broadcast({"type": "task_error", "index": index,
+                          "message": f"推送 Aria2 失败: {e}"})
+
+    if delete_pikpak_ids:
+        try:
+            pikpak, _ = await _ensure_clients()
+            cfg = load_config()
+            if cfg.get("pikpak", {}).get("delete_after_download", False):
+                await pikpak.delete_files(delete_pikpak_ids)
+        except Exception:
+            pass
+
+
 async def _process_magnets(magnets: List[str]):
     from pikpakapi.enums import DownloadStatus
     import time
 
     cfg = load_config()
     pikpak_cfg = cfg.get("pikpak", {})
-    aria2_cfg = cfg.get("aria2", {})
     poll_interval = pikpak_cfg.get("poll_interval", 3)
     max_wait_time = pikpak_cfg.get("max_wait_time", 3600)
     delete_after = pikpak_cfg.get("delete_after_download", False)
+    engine = _get_engine()
 
     try:
         pikpak, aria2 = await _ensure_clients()
@@ -383,8 +565,10 @@ async def _process_magnets(magnets: List[str]):
             await _broadcast({"type": "task_error", "index": i, "message": "未获取到 task_id"})
             continue
 
+        # 等待 PikPak 离线完成
         start_time = time.time()
         last_status = None
+        offline_ok = False
         while True:
             if time.time() - start_time > max_wait_time:
                 await _broadcast({"type": "task_error", "index": i, "message": f"等待超时 ({max_wait_time}s)"})
@@ -398,49 +582,34 @@ async def _process_magnets(magnets: List[str]):
                 await _broadcast({"type": "task_status", "index": i, "status": status.value})
                 last_status = status
             if status == DownloadStatus.done:
+                offline_ok = True
                 break
             elif status in (DownloadStatus.error, DownloadStatus.not_found):
                 await _broadcast({"type": "task_error", "index": i, "message": f"离线失败 ({status.value})"})
                 break
             await asyncio.sleep(poll_interval)
-        else:
+
+        if not offline_ok:
             continue
 
-        if last_status != DownloadStatus.done:
-            continue
-
+        # 获取直链
         try:
             files = await pikpak.get_download_urls(file_id)
         except Exception as e:
             await _broadcast({"type": "task_error", "index": i, "message": f"获取下载链接失败: {e}"})
             continue
-
         if not files:
             await _broadcast({"type": "task_error", "index": i, "message": "未找到可下载的文件"})
             continue
 
         await _broadcast({"type": "files_found", "index": i, "files": [f["name"] for f in files]})
 
-        try:
-            tasks_to_add = []
-            for f in files:
-                path = f.get("path", f["name"])
-                parent_dir = posixpath.dirname(path)
-                tasks_to_add.append({"url": f["url"], "name": f["name"],
-                                     "subdir": parent_dir if parent_dir else None})
-            download_dir = aria2_cfg.get("download_dir", "")
-            gids = await aria2.add_uris_batch(tasks_to_add, base_dir=download_dir)
-            await _broadcast({"type": "aria2_done", "index": i,
-                              "success_count": len(gids), "total_count": len(files)})
-        except Exception as e:
-            await _broadcast({"type": "task_error", "index": i, "message": f"推送 Aria2 失败: {e}"})
-            continue
-
-        if delete_after:
-            try:
-                await pikpak.delete_files([file_id])
-            except Exception:
-                pass
+        # 按引擎分发
+        delete_ids = [file_id] if delete_after else None
+        if engine == "builtin":
+            await _builtin_download_and_upload(files, i, delete_pikpak_ids=delete_ids)
+        else:
+            await _aria2_push_only(files, i, delete_pikpak_ids=delete_ids)
 
         await _broadcast({"type": "task_done", "index": i, "file_name": file_name})
 
@@ -450,10 +619,10 @@ async def _process_magnets(magnets: List[str]):
 async def _process_magnet_selected(root_file_id: str, selected_ids: List[str],
                                     keep_structure: bool = True):
     try:
-        pikpak, aria2 = await _ensure_clients()
+        pikpak, _ = await _ensure_clients()
         cfg = load_config()
         delete_after = cfg.get("pikpak", {}).get("delete_after_download", False)
-        aria2_cfg = cfg.get("aria2", {})
+        engine = _get_engine()
 
         await _broadcast({"type": "task_start", "index": 1, "total": 1,
                           "magnet": f"磁链选择下载 ({len(selected_ids)} 个文件)"})
@@ -472,21 +641,12 @@ async def _process_magnet_selected(root_file_id: str, selected_ids: List[str],
             return
         await _broadcast({"type": "files_found", "index": 1, "files": [f["name"] for f in files]})
 
-        tasks_to_add = []
-        for f in files:
-            path = f.get("path", f["name"])
-            parent_dir = posixpath.dirname(path) if keep_structure else None
-            tasks_to_add.append({"url": f["url"], "name": f["name"],
-                                 "subdir": parent_dir if parent_dir else None})
-        download_dir = aria2_cfg.get("download_dir", "")
-        gids = await aria2.add_uris_batch(tasks_to_add, base_dir=download_dir)
-        await _broadcast({"type": "aria2_done", "index": 1,
-                          "success_count": len(gids), "total_count": len(files)})
-        if delete_after:
-            try:
-                await pikpak.delete_files([root_file_id])
-            except Exception:
-                pass
+        delete_ids = [root_file_id] if delete_after else None
+        if engine == "builtin":
+            await _builtin_download_and_upload(files, 1, delete_pikpak_ids=delete_ids)
+        else:
+            await _aria2_push_only(files, 1, delete_pikpak_ids=delete_ids)
+
         await _broadcast({"type": "all_done", "total": 1})
     except Exception as e:
         await _broadcast({"type": "error", "message": f"选择下载失败: {e}"})
@@ -499,7 +659,7 @@ async def _process_share_download(share_id: str, file_ids: List[str], pass_code_
         await _ensure_clients()
         total = len(file_ids)
         cfg = load_config()
-        aria2_cfg = cfg.get("aria2", {})
+        engine = _get_engine()
 
         await _broadcast({"type": "task_start", "index": 1, "total": total,
                           "magnet": f"分享文件 ({total} 个)"})
@@ -509,7 +669,7 @@ async def _process_share_download(share_id: str, file_ids: List[str], pass_code_
             await _broadcast({"type": "task_error", "index": 1, "message": "保存失败"})
             return
 
-        success_count = 0
+        all_urls = []
         for i, fid in enumerate(saved_ids, 1):
             await _broadcast({"type": "task_status", "index": i, "status": f"获取下载链接 [{i}/{len(saved_ids)}]"})
             urls = []
@@ -524,38 +684,43 @@ async def _process_share_download(share_id: str, file_ids: List[str], pass_code_
             if not urls:
                 await _broadcast({"type": "task_error", "index": i, "message": "获取链接失败"})
                 continue
-            try:
-                for url_info in urls:
-                    subdir = None
-                    if keep_structure:
-                        path = url_info.get("path", "")
-                        if path:
-                            parts = path.split("/")
-                            if len(parts) > 2:
-                                subdir = "/".join(parts[1:-1]) or None
+            all_urls.extend(urls)
+
+        if not all_urls:
+            await _broadcast({"type": "error", "message": "所有文件链接获取失败"})
+            return
+
+        if engine == "builtin":
+            await _builtin_download_and_upload(all_urls, 1, delete_pikpak_ids=saved_ids)
+        else:
+            # Aria2 模式
+            aria2_cfg = cfg.get("aria2", {})
+            success_count = 0
+            for url_info in all_urls:
+                try:
                     opts = {}
                     download_dir = aria2_cfg.get("download_dir", "")
                     if download_dir:
-                        if subdir:
-                            import os
-                            opts["dir"] = os.path.join(download_dir, subdir).replace("\\", "/")
-                        else:
-                            opts["dir"] = download_dir
+                        opts["dir"] = download_dir
                     name = url_info.get("name", "")
                     if name:
                         opts["out"] = name
                     gid = await _aria2.add_uri(url_info["url"], opts)
                     if gid:
                         success_count += 1
-                        await _broadcast({"type": "task_added", "index": i, "file_name": name})
-            except Exception as e:
-                await _broadcast({"type": "task_error", "index": i, "message": str(e)})
+                        await _broadcast({"type": "task_added", "index": 1, "file_name": name})
+                except Exception as e:
+                    await _broadcast({"type": "task_error", "index": 1, "message": str(e)})
+            await _broadcast({"type": "aria2_done", "index": 1,
+                              "success_count": success_count, "total_count": len(all_urls)})
 
-        await _broadcast({"type": "aria2_done", "index": 1,
-                          "success_count": success_count, "total_count": len(saved_ids)})
+        # 清理 PikPak 保存的文件
         if saved_ids:
-            await _broadcast({"type": "task_status", "index": 1, "status": "正在删除网盘文件..."})
-            await _pikpak.delete_files(saved_ids)
+            try:
+                await _pikpak.delete_files(saved_ids)
+            except Exception:
+                pass
+
         await _broadcast({"type": "all_done", "total": total})
     except Exception as e:
         await _broadcast({"type": "error", "message": f"分享下载失败: {e}"})
