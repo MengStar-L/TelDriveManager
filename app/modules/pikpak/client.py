@@ -268,8 +268,24 @@ class PikPakClient:
             print(f"DEBUG CREATE FOLDER ERROR: {e}")
             temp_parent_id = ""
 
-        # 将目标存入该专属文件夹
-        result = await self.client.restore(share_id, pass_code_token, file_ids, to_parent_id=temp_parent_id)
+        # 将目标存入该专属文件夹，由于 pikpakapi 库未暴露 to_parent_id 参数，我们手动发包
+        import httpx
+        url = "https://api-drive.mypikpak.com/drive/v1/share/restore"
+        headers = {
+            "Authorization": f"Bearer {self.client._access_token}",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) width/1920",
+        }
+        data = {
+            "share_id": share_id,
+            "pass_code": pass_code_token,
+            "file_ids": file_ids,
+            "to_parent_id": temp_parent_id
+        }
+        
+        async with httpx.AsyncClient() as hc:
+            resp = await hc.post(url, headers=headers, json=data)
+            result = resp.json()
+            
         print(f"DEBUG RESTORE RESP: {result}")
         saved_ids = []
         
