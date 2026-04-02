@@ -537,14 +537,9 @@
                         </div>
                     </div>
 
-                    <!-- 实时进度条区域 -->
-                    <div id="progressBarsContainer" style="display:none; margin-bottom: 16px;">
-                        <div id="progressBars"></div>
-                    </div>
-
                     <div class="card">
                         <div class="card-header" style="flex-wrap: wrap; gap: 10px;">
-                            <h3><i class="ph ph-hard-drives"></i> Aria2 与 TelDrive 队列同步</h3>
+                            <h3><i class="ph ph-hard-drives"></i> 内置引擎上传拉取队列</h3>
                             <div class="page-actions" style="display:flex; flex-wrap: wrap; gap:8px;">
                                 <button class="btn btn-ghost btn-sm" onclick="a2tdBulkAction('resume-all')" style="color:var(--success);"><i class="ph ph-play"></i> 恢复全部</button>
                                 <button class="btn btn-ghost btn-sm" onclick="a2tdBulkAction('pause-all')" style="color:var(--warning);"><i class="ph ph-pause"></i> 暂停全部</button>
@@ -554,10 +549,12 @@
                                 <button class="btn btn-ghost btn-sm" onclick="a2tdBulkAction('clear-all')" style="color:var(--error);"><i class="ph ph-trash"></i> 强杀清空</button>
                             </div>
                         </div>
-                        <div class="card-body" style="padding:0">
-                            <div class="task-list" id="a2tdTaskList">
-                                <div class="log-empty" style="padding:40px;"><i class="ph ph-tray"></i> 队列空闲中</div>
+                        <div class="card-body" style="padding:16px">
+                            <!-- 实时进度条区域(内置下载引擎使用)代替原有的纯文本列表 -->
+                            <div id="progressBarsContainer" style="display:none;">
+                                <div id="progressBars"></div>
                             </div>
+                            <div id="a2tdEmptyPlaceholder" class="log-empty" style="padding:40px;"><i class="ph ph-tray"></i> 队列空闲中</div>
                         </div>
                     </div>
                 </div>
