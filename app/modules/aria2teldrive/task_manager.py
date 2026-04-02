@@ -12,7 +12,9 @@ from pathlib import Path
 from app.config import load_config
 from app.aria2_client import Aria2Client
 from app.modules.aria2teldrive.teldrive_client import TelDriveClient
+from app.downloader import downloader
 from app import database as db
+
 
 def get_aria2_rpc_url(config: dict) -> str:
     """获取 Aria2 RPC 地址"""
@@ -1111,9 +1113,16 @@ class TaskManager:
         if task["status"] != "downloading":
             return {"success": False, "message": "只能暂停下载中的任务"}
 
+        is_builtin_task = task_id.startswith("bd-") and not task.get("aria2_gid")
+
         try:
-            await self.aria2.pause(task["aria2_gid"])
-            await db.update_task(task_id, status="paused")
+            if is_builtin_task:
+                paused = await downloader.pause(task_id)
+                if not paused:
+                    return {"success": False, "message": "内置下载任务当前不可暂停"}
+            else:
+                await self.aria2.pause(task["aria2_gid"])
+            await db.update_task(task_id, status="paused", download_speed="")
             await self._broadcast_task_update(task_id)
             return {"success": True, "message": "已暂停"}
         except Exception as e:
@@ -1127,8 +1136,15 @@ class TaskManager:
         if task["status"] != "paused":
             return {"success": False, "message": "只能恢复已暂停的任务"}
 
+        is_builtin_task = task_id.startswith("bd-") and not task.get("aria2_gid")
+
         try:
-            await self.aria2.unpause(task["aria2_gid"])
+            if is_builtin_task:
+                resumed = await downloader.resume(task_id)
+                if not resumed:
+                    return {"success": False, "message": "内置下载任务当前不可恢复"}
+            else:
+                await self.aria2.unpause(task["aria2_gid"])
             await db.update_task(task_id, status="downloading")
             await self._broadcast_task_update(task_id)
             return {"success": True, "message": "已恢复"}
@@ -1143,24 +1159,37 @@ class TaskManager:
         if task["status"] in ("completed", "cancelled"):
             return {"success": False, "message": "任务已结束"}
 
+        is_builtin_task = task_id.startswith("bd-") and not task.get("aria2_gid")
+
         try:
-            if task.get("aria2_gid"):
+            if is_builtin_task and task["status"] == "uploading":
+                return {"success": False, "message": "内置引擎上传中的任务暂不支持取消"}
+
+            if is_builtin_task:
+                await downloader.cancel(task_id)
+            elif task.get("aria2_gid"):
                 try:
                     await self.aria2.force_remove(task["aria2_gid"])
                 except Exception:
                     pass
-            # 删除本地文件/文件夹（映射到实际路径）
+
+            self._cancel_existing_upload(task_id)
+            old_gid = task.get("aria2_gid", "")
+            if old_gid:
+                self._uploading_gids.discard(old_gid)
+
             local = self._get_upload_path(task.get("local_path", ""))
             if local and os.path.exists(local):
                 if os.path.isdir(local):
                     shutil.rmtree(local, ignore_errors=True)
                 else:
                     os.remove(local)
-            await db.update_task(task_id, status="cancelled")
+            await db.update_task(task_id, status="cancelled", download_speed="", upload_speed="")
             await self._broadcast_task_update(task_id)
             return {"success": True, "message": "已取消"}
         except Exception as e:
             return {"success": False, "message": str(e)}
+
 
     def _cancel_existing_upload(self, task_id: str):
         """取消正在进行的上传任务（如果有）"""

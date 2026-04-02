@@ -223,6 +223,13 @@ class BuiltinDownloader:
         await self.cancel(task_id)
         self._tasks.pop(task_id, None)
 
+    async def _notify_complete(self, task: DownloadTask):
+        if task._on_complete:
+            try:
+                await task._on_complete(task)
+            except Exception as e:
+                logger.error(f"[下载器] 完成回调异常: {e}")
+
     # ─── 内部实现 ───
 
     async def _run_task(self, task: DownloadTask):
@@ -234,6 +241,7 @@ class BuiltinDownloader:
                 if task.status not in (TaskStatus.CANCELLED, TaskStatus.COMPLETED):
                     task.status = TaskStatus.CANCELLED
                     self._cleanup_file(task)
+                await self._notify_complete(task)
             except Exception as e:
                 logger.error(f"[下载器] 任务 {task.task_id} 失败: {e}")
                 task.status = TaskStatus.FAILED
@@ -245,6 +253,7 @@ class BuiltinDownloader:
                         await task._on_progress(task)
                     except Exception:
                         pass
+                await self._notify_complete(task)
 
     async def _download_file(self, task: DownloadTask):
         """主下载逻辑"""
@@ -332,11 +341,7 @@ class BuiltinDownloader:
                 await task._on_progress(task)
             except Exception:
                 pass
-        if task._on_complete:
-            try:
-                await task._on_complete(task)
-            except Exception as e:
-                logger.error(f"[下载器] 完成回调异常: {e}")
+        await self._notify_complete(task)
 
     async def _download_single(self, task: DownloadTask, session: aiohttp.ClientSession):
         """单连接下载（不支持 Range 或小文件）"""

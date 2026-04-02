@@ -431,6 +431,7 @@ async def _builtin_download_and_upload(files: List[dict], index: int, delete_pik
             # 更新进度条
             await _broadcast({
                 "type": "download_progress",
+                "task_id": _tid,
                 "index": file_index,
                 "file_index": fi,
                 "total_files": total_files,
@@ -454,7 +455,7 @@ async def _builtin_download_and_upload(files: List[dict], index: int, delete_pik
             dl_done_event.set()
 
         dl_task = await downloader.add_task(
-            url=url, filename=name,
+            url=url, filename=name, task_id=task_db_id,
             on_progress=on_progress, on_complete=on_complete,
         )
 
@@ -486,9 +487,11 @@ async def _builtin_download_and_upload(files: List[dict], index: int, delete_pik
             local_path = dl_task.dest_path
 
             async def upload_progress_cb(uploaded: int, total: int, _tid=task_db_id, _name=name):
-                pct = round(uploaded / total * 100, 1) if total > 0 else 0
+                raw_pct = round(uploaded / total * 100, 1) if total > 0 else 0
+                pct = min(raw_pct, 99.9) if total > 0 else 0
                 await _broadcast({
                     "type": "upload_progress",
+                    "task_id": _tid,
                     "index": file_index,
                     "filename": _name,
                     "progress": pct,
@@ -519,10 +522,13 @@ async def _builtin_download_and_upload(files: List[dict], index: int, delete_pik
 
             # 上传完成
             await db.update_task(task_db_id, status="completed",
-                                 upload_progress=100.0)
+                                 download_progress=100.0,
+                                 upload_progress=100.0,
+                                 download_speed="",
+                                 upload_speed="")
             await task_manager.broadcast({"type": "task_update",
                                            "data": await db.get_task(task_db_id)})
-            await _broadcast({"type": "upload_done", "index": file_index,
+            await _broadcast({"type": "upload_done", "task_id": task_db_id, "index": file_index,
                               "filename": name})
 
             # 清理本地文件

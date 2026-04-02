@@ -132,13 +132,9 @@ def save_config(data: dict) -> None:
     if tomli_w is None:
         raise RuntimeError("tomli_w 未安装，无法保存配置")
     
-    # 增量合并：在现有配置的基础上覆盖，并去掉运行时元数据
-    current = copy.deepcopy(load_config())
-    current.pop("_meta", None)
-    payload = copy.deepcopy(data or {})
-    payload.pop("_meta", None)
-    merged = _deep_merge(current, payload)
-    merged.pop("_meta", None)
+    # 增量合并：在现有配置的基础上覆盖
+    current = load_config()
+    merged = _deep_merge(current, data)
     
     with open(CONFIG_PATH, "wb") as f:
         tomli_w.dump(merged, f)

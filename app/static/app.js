@@ -1,94 +1,17 @@
 
 // ── Setup Wizard ──
-function sanitizeSettingsPayload(payload) {
-    const clean = JSON.parse(JSON.stringify(payload || {}));
-    if (clean && typeof clean === 'object') {
-        delete clean._meta;
-    }
-    return clean;
-}
-
-async function saveSettingsPayload(payload) {
-    const resp = await fetch('/api/settings', {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(sanitizeSettingsPayload(payload))
-    });
-    const data = await resp.json().catch(() => ({}));
-    if (!resp.ok || data.success === false) {
-        throw new Error(data.message || data.detail || `保存配置失败 (${resp.status})`);
-    }
-    return data;
-}
-
-async function ensureSetupCompleted() {
-    const resp = await fetch('/api/settings');
-    const data = await resp.json().catch(() => ({}));
-    if (!resp.ok) {
-        throw new Error(data.message || data.detail || '无法重新读取配置状态');
-    }
-    if (data._meta && data._meta.needs_setup) {
-        throw new Error('当前配置仍未完成，请确认 PikPak 登录方式与凭据已正确保存');
-    }
-    window.currentConfig = sanitizeSettingsPayload(data);
-}
-
-function toggleWizardPikpakLoginMode() {
-    const mode = document.getElementById('wPikLoginMode')?.value || 'password';
-    const passwordFields = document.getElementById('wPikPasswordFields');
-    const sessionFields = document.getElementById('wPikSessionFields');
-    if (passwordFields) passwordFields.style.display = mode === 'session' ? 'none' : 'grid';
-    if (sessionFields) sessionFields.style.display = mode === 'session' ? 'grid' : 'none';
-}
-
-async function importPikpakSessionFileToWizard(event) {
-    const fileInput = event?.target;
-    const file = fileInput?.files?.[0];
-    if (!file) return;
-
-    const modeInput = document.getElementById('wPikLoginMode');
-    const sessionInput = document.getElementById('wPikSession');
-    const fileNameLabel = document.getElementById('wPikSessionFileName');
-
-    try {
-        const rawText = await file.text();
-        const session = extractPikpakSessionValue(rawText);
-        if (!session) throw new Error('文件中未识别到有效的 Session / encoded_token');
-
-        if (modeInput) {
-            modeInput.value = 'session';
-            toggleWizardPikpakLoginMode();
-        }
-        if (sessionInput) sessionInput.value = session;
-        if (fileNameLabel) fileNameLabel.textContent = `已导入: ${file.name}`;
-    } catch (e) {
-        if (fileNameLabel) fileNameLabel.textContent = '导入失败';
-        alert('向导 Session 文件导入失败: ' + (e.message || '未知错误'));
-    } finally {
-        if (fileInput) fileInput.value = '';
-    }
-}
-
 async function checkSetupRequired() {
     try {
         const resp = await fetch('/api/settings');
         if (!resp.ok) return;
         const data = await resp.json();
-        window.currentConfig = sanitizeSettingsPayload(data);
+        window.currentConfig = data;
 
         // Auto-fill existing data into wizard inputs
         try {
             if (data.pikpak) {
-                const pikMode = data.pikpak.login_mode || (data.pikpak.session ? 'session' : 'password');
-                const modeInput = document.getElementById('wPikLoginMode');
-                const sessionInput = document.getElementById('wPikSession');
-                const sessionLabel = document.getElementById('wPikSessionFileName');
-                if (modeInput) modeInput.value = pikMode;
-                if (data.pikpak.username) document.getElementById('wPikUser').value = data.pikpak.username;
-                if (data.pikpak.password) document.getElementById('wPikPass').value = data.pikpak.password;
-                if (sessionInput) sessionInput.value = data.pikpak.session || '';
-                if (sessionLabel) sessionLabel.textContent = data.pikpak.session ? '已保存 Session' : '未选择文件';
-                toggleWizardPikpakLoginMode();
+                if(data.pikpak.username) document.getElementById('wPikUser').value = data.pikpak.username;
+                if(data.pikpak.password) document.getElementById('wPikPass').value = data.pikpak.password;
             }
 
             if (data.teldrive) {
@@ -149,7 +72,6 @@ async function checkSetupRequired() {
     }
 }
 
-
 async function wizardNext(current, next) {
     if (next < current) { // "Previous" button
         document.getElementById('wStep' + current).classList.remove('active');
@@ -171,50 +93,43 @@ async function wizardNext(current, next) {
 
     try {
         if (current === 1) { // PikPak
-            const loginMode = document.getElementById('wPikLoginMode')?.value || 'password';
-            let payload = {};
-            if (loginMode === 'session') {
-                const session = document.getElementById('wPikSession').value.trim();
-                if(!session) throw new Error('您必须填写 PikPak Session');
-                payload = { login_mode: 'session', session };
-            } else {
-                const user = document.getElementById('wPikUser').value.trim();
-                const pass = document.getElementById('wPikPass').value.trim();
-                if(!user || !pass) throw new Error('您必须填写 PikPak 账密');
-                payload = { login_mode: 'password', username: user, password: pass };
-            }
+            const user = document.getElementById('wPikUser').value.trim();
+            const pass = document.getElementById('wPikPass').value.trim();
+            if(!user || !pass) throw new Error("您必须填写 PikPak 账密");
+            const payload = {username: user, password: pass};
             const r = await fetch('/api/settings/test/pikpak', {
                 method: 'POST', headers: {'Content-Type': 'application/json'},
                 body: JSON.stringify(payload)
             });
-            const d = await r.json().catch(() => ({}));
-            if(!r.ok || !d.success) throw new Error(d.message || 'PikPak验证失败');
+            const d = await r.json();
+            if(!d.success) throw new Error(d.message || "PikPak验证失败");
             dataToSave.pikpak = payload;
         }
         else if (current === 2) { // TelDrive
             const tUrl = document.getElementById('wTdUrl').value.trim();
             const tTok = document.getElementById('wTdToken').value.trim();
-            if(!tUrl || !tTok) throw new Error('TelDrive API和Token为必填');
+            if(!tUrl || !tTok) throw new Error("TelDrive API和Token为必填");
             const tdPayload = {api_host: tUrl, access_token: tTok};
             const r = await fetch('/api/settings/test/teldrive', {
                 method: 'POST', headers: {'Content-Type': 'application/json'},
                 body: JSON.stringify(tdPayload)
             });
-            const d = await r.json().catch(() => ({}));
-            if(!r.ok || (!d.success && !d.ok)) throw new Error(d.message || 'TelDrive连接失败');
+            const d = await r.json();
+            if(!d.success && !d.ok) throw new Error("TelDrive连接失败");
+
             dataToSave.teldrive = tdPayload;
         }
         else if (current === 3) { // Telegram
             const tid = document.getElementById('wTgId').value.trim();
             const tHash = document.getElementById('wTgHash').value.trim();
-            if(!tid || !tHash) throw new Error('必须提供 Telegram 授权参数');
+            if(!tid || !tHash) throw new Error("必须提供 Telegram 授权参数");
             const tgPayload = {api_id: parseInt(tid), api_hash: tHash};
             const r = await fetch('/api/settings/test/telegram', {
                 method: 'POST', headers: {'Content-Type': 'application/json'},
                 body: JSON.stringify(tgPayload)
             });
-            const d = await r.json().catch(() => ({}));
-            if(!r.ok || !d.success) throw new Error(d.message || 'Telegram验证失败');
+            const d = await r.json();
+            if(!d.success) throw new Error(d.message || "Telegram验证失败");
             dataToSave.telegram = tgPayload;
         }
     } catch (e) {
@@ -242,39 +157,18 @@ async function wizardNext(current, next) {
         return;
     }
 
+    // Success! Save config incrementally if there is data to save
     if (Object.keys(dataToSave).length > 0) {
         if (!window.currentConfig) window.currentConfig = {};
-        window.currentConfig = sanitizeSettingsPayload(window.currentConfig);
         for(let k in dataToSave) {
             if(!window.currentConfig[k]) window.currentConfig[k] = {};
+            // merge
             Object.assign(window.currentConfig[k], dataToSave[k]);
         }
-        try {
-            await saveSettingsPayload(window.currentConfig);
-        } catch (e) {
-            errMsg = e.message;
-        }
-    }
-
-    if (errMsg) {
-        btn.disabled = false;
-        btn.innerHTML = oldHtml;
-        const info = document.createElement('div');
-        info.className = 'wizard-err-toast';
-        info.innerHTML = `<i class="ph-fill ph-warning-circle"></i> ${errMsg}`;
-        info.style = 'position:absolute; bottom:-45px; right:0; background:var(--error); color:white; padding:8px 16px; border-radius:8px; font-size:13px; display:flex; align-items:center; gap:8px; box-shadow:0 4px 12px rgba(239,68,68,0.3); z-index:100; opacity:0; transform:translateY(-10px); transition:all 0.3s;';
-
-        const footer = btn.parentElement;
-        footer.style.position = 'relative';
-        const oldToast = footer.querySelector('.wizard-err-toast');
-        if(oldToast) oldToast.remove();
-        footer.appendChild(info);
-        setTimeout(() => { info.style.opacity='1'; info.style.transform='translateY(0)'; }, 10);
-        window._wizardErrTimeout = setTimeout(() => {
-            info.style.opacity='0';
-            setTimeout(() => info.remove(), 300);
-        }, 3500);
-        return;
+        await fetch('/api/settings', {
+            method: 'PUT', headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify(window.currentConfig)
+        });
     }
 
     btn.disabled = false;
@@ -287,7 +181,6 @@ async function wizardNext(current, next) {
     if(dot) dot.classList.add('active');
 }
 
-
 async function wizardFinish() {
     const btn = event.currentTarget;
     const oldHtml = btn.innerHTML;
@@ -297,7 +190,7 @@ async function wizardFinish() {
     // validate DB
     const dbHost = document.getElementById('wDbHost').value.trim();
     if (!dbHost) {
-        alert('请输入数据库地址');
+        alert("请输入数据库地址");
         btn.disabled = false;
         btn.innerHTML = oldHtml;
         return;
@@ -316,8 +209,8 @@ async function wizardFinish() {
             method: 'POST', headers: {'Content-Type': 'application/json'},
             body: JSON.stringify(dbPayload)
         });
-        const d = await r.json().catch(() => ({}));
-        if(!r.ok || !d.success) throw new Error(d.message || '连接失败');
+        const d = await r.json();
+        if(!d.success) throw new Error(d.message || "连接失败");
     } catch(e) {
         alert('数据库连接失败: ' + e.message);
         btn.disabled = false;
@@ -328,23 +221,24 @@ async function wizardFinish() {
     btn.innerHTML = '<span class="spinner" style="width:14px;height:14px;border-width:2px;display:inline-block;margin-right:8px;"></span> 部署中...';
     
     if (!window.currentConfig) window.currentConfig = {};
-    window.currentConfig = sanitizeSettingsPayload(window.currentConfig);
     if (!window.currentConfig.telegram_db) window.currentConfig.telegram_db = {};
     Object.assign(window.currentConfig.telegram_db, dbPayload);
     
     try {
-        await saveSettingsPayload(window.currentConfig);
-        await ensureSetupCompleted();
+        await fetch('/api/settings', {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(window.currentConfig)
+        });
         const wiz = document.getElementById('setupWizard');
         if(wiz) { wiz.classList.remove('active'); wiz.classList.remove('show'); }
         location.reload();
     } catch (e) {
-        alert('保存最终配置失败: ' + (e.message || '未知错误'));
+        alert("保存最终配置失败", e);
         btn.disabled = false;
         btn.innerHTML = oldHtml;
     }
 }
-
 
 
 // ── 全局 401 拦截 ──
@@ -480,7 +374,7 @@ function connectWS() {
 
 function handleWSMessage(msg) {
     if (msg.type === "init") {
-        if (msg.data.tasks) renderA2TDTasks(msg.data.tasks);
+        if (msg.data.tasks) setA2TDTasks(msg.data.tasks);
         if (msg.data.global_stat) renderA2TDStats(msg.data.global_stat);
         return;
     }
@@ -489,37 +383,32 @@ function handleWSMessage(msg) {
         return;
     }
     if (msg.type === "tasks_update") {
-        renderA2TDTasks(msg.data);
+        setA2TDTasks(msg.data);
         return;
     }
     if (msg.type === "task_update") {
-        loadA2TDTasks();
+        upsertA2TDTask(msg.data);
+        return;
+    }
+    if (msg.type === "task_deleted") {
+        removeA2TDTask(msg.data && msg.data.task_id);
         return;
     }
 
     // ── 内置引擎进度条 ──
     if (msg.type === "download_progress") {
-        updateProgressBar(msg.filename, 'download', msg.progress, msg.speed, msg.downloaded, msg.total, msg.eta, msg.connections, msg.status);
+        updateProgressBar(msg.task_id, msg.filename, 'download', msg.progress, msg.speed, msg.downloaded, msg.total, msg.eta, msg.connections, msg.status);
         return;
     }
     if (msg.type === "upload_progress") {
-        updateProgressBar(msg.filename, 'upload', msg.progress, '', msg.uploaded, msg.total, '', 0, 'uploading');
+        updateProgressBar(msg.task_id, msg.filename, 'upload', msg.progress, '', msg.uploaded, msg.total, '', 0, 'uploading');
         return;
     }
     if (msg.type === "upload_done") {
-        updateProgressBar(msg.filename, 'done', 100, '', '', '', '', 0, 'completed');
-        // 3 秒后淡出移除进度条
-        setTimeout(() => {
-            const card = document.getElementById('pb-' + CSS.escape(msg.filename));
-            if (card) { card.style.opacity = '0'; setTimeout(() => card.remove(), 500); }
-            // 隐藏容器
-            const barsEl = document.getElementById('progressBars');
-            if (barsEl && barsEl.children.length === 0) {
-                document.getElementById('progressBarsContainer').style.display = 'none';
-            }
-        }, 3000);
+        updateProgressBar(msg.task_id, msg.filename, 'done', 100, '', '', '', '', 0, 'completed');
         return;
     }
+
     
     // PikPak log messages
     const icons = { task_start: '<i class="ph-fill ph-spinner-gap info" style="animation:spin 2s linear infinite"></i>', task_added: '<i class="ph ph-cloud-arrow-up info"></i>', task_status: '<i class="ph ph-hourglass-high warning"></i>', task_error: '<i class="ph-fill ph-warning-circle error"></i>', files_found: '<i class="ph ph-files"></i>', aria2_done: '<i class="ph-fill ph-check-circle success"></i>', task_done: '<i class="ph-fill ph-check-square success"></i>', all_done: '<i class="ph-fill ph-flag-checkered success"></i>', error: '<i class="ph-fill ph-x-circle error"></i>' };
@@ -552,85 +441,89 @@ function handleWSMessage(msg) {
 }
 
 
-function updateProgressBar(filename, mode, progress, speed, downloaded, total, eta, connections, status) {
-    const container = document.getElementById('progressBarsContainer');
-    const barsEl = document.getElementById('progressBars');
-    const placeholder = document.getElementById('a2tdEmptyPlaceholder');
-    if (!container || !barsEl) return;
-    
-    container.style.display = 'block';
-    if (placeholder) placeholder.style.display = 'none';
-    
-    const cardId = 'pb-' + filename.replace(/[^a-zA-Z0-9_-]/g, '_');
-    let card = document.getElementById(cardId);
-    
-    if (!card) {
-        card = document.createElement('div');
-        card.id = cardId;
-        card.className = 'progress-card ' + (mode === 'download' ? 'downloading' : mode === 'upload' ? 'uploading' : 'completed');
-        card.innerHTML = `
-            <div class="progress-header">
-                <div class="progress-filename">
-                    <i class="ph ${mode === 'download' ? 'ph-download-simple dl-icon' : mode === 'upload' ? 'ph-upload-simple ul-icon' : 'ph-check-circle'}" data-icon></i>
-                    <span data-name>${filename}</span>
-                </div>
-                <div class="progress-pct" data-pct>0%</div>
-            </div>
-            <div class="progress-bar-track">
-                <div class="progress-bar-fill ${mode}" data-bar style="width:0%"></div>
-            </div>
-            <div class="progress-meta">
-                <span data-size></span>
-                <span class="speed" data-speed></span>
-                <span data-extra></span>
-            </div>
-        `;
-        barsEl.prepend(card);
+
+
+const a2tdTaskStore = new Map();
+
+function normalizeA2TDTaskId(taskId, fallback = '') {
+    return String(taskId || fallback || 'unknown');
+}
+
+function getA2TDTaskList() {
+    return Array.from(a2tdTaskStore.values()).sort((a, b) => {
+        const timeA = String(a.updated_at || a.created_at || '');
+        const timeB = String(b.updated_at || b.created_at || '');
+        return timeB.localeCompare(timeA);
+    });
+}
+
+function renderA2TDTaskStore() {
+    renderA2TDTasks(getA2TDTaskList());
+}
+
+function setA2TDTasks(tasks) {
+    a2tdTaskStore.clear();
+    if (Array.isArray(tasks)) {
+        tasks.forEach(task => {
+            if (!task) return;
+            const taskId = normalizeA2TDTaskId(task.task_id, task.filename);
+            a2tdTaskStore.set(taskId, { ...task, task_id: taskId });
+        });
+    }
+    renderA2TDTaskStore();
+}
+
+function upsertA2TDTask(task) {
+    if (!task) return;
+    const taskId = normalizeA2TDTaskId(task.task_id, task.filename);
+    const existing = a2tdTaskStore.get(taskId) || {};
+    a2tdTaskStore.set(taskId, { ...existing, ...task, task_id: taskId });
+    renderA2TDTaskStore();
+}
+
+function removeA2TDTask(taskId) {
+    if (!taskId) return;
+    a2tdTaskStore.delete(normalizeA2TDTaskId(taskId));
+    renderA2TDTaskStore();
+}
+
+function updateProgressBar(taskId, filename, mode, progress, speed, downloaded, total, eta, connections, status) {
+    const normalizedTaskId = normalizeA2TDTaskId(taskId, filename);
+    const existing = a2tdTaskStore.get(normalizedTaskId) || {};
+    const nextTask = {
+        ...existing,
+        task_id: normalizedTaskId,
+        filename: filename || existing.filename || normalizedTaskId,
+        updated_at: existing.updated_at,
+    };
+
+    if (mode === 'upload') {
+        nextTask.status = status || 'uploading';
+        nextTask.download_progress = Math.max(100, Number(existing.download_progress || 0));
+        nextTask.upload_progress = Number(progress || 0);
+        nextTask.upload_speed = speed || existing.upload_speed || '';
+        nextTask.file_size = total || existing.file_size || '';
+    } else if (mode === 'done') {
+        nextTask.status = 'completed';
+        nextTask.download_progress = 100;
+        nextTask.upload_progress = 100;
+        nextTask.download_speed = '';
+        nextTask.upload_speed = '';
+    } else {
+        nextTask.status = status || existing.status || 'downloading';
+        nextTask.download_progress = Number(progress || 0);
+        nextTask.download_speed = speed || '';
+        nextTask.file_size = total || existing.file_size || '';
     }
 
-    // 更新卡片样式
-    card.className = 'progress-card ' + (status === 'completed' ? 'completed' : mode === 'download' ? 'downloading' : mode === 'upload' ? 'uploading' : 'completed');
-    
-    // 更新图标
-    const iconEl = card.querySelector('[data-icon]');
-    if (iconEl) {
-        if (mode === 'download') { iconEl.className = 'ph ph-download-simple dl-icon'; }
-        else if (mode === 'upload') { iconEl.className = 'ph ph-upload-simple ul-icon'; }
-        else { iconEl.className = 'ph-fill ph-check-circle'; iconEl.style.color = 'var(--success)'; }
-    }
+    upsertA2TDTask(nextTask);
 
-    // 更新百分比
-    const pctEl = card.querySelector('[data-pct]');
-    if (pctEl) pctEl.textContent = Math.round(progress) + '%';
-
-    // 更新进度条
-    const barEl = card.querySelector('[data-bar]');
-    if (barEl) {
-        barEl.style.width = progress + '%';
-        barEl.className = 'progress-bar-fill ' + (mode === 'done' ? 'done' : mode);
-    }
-
-    // 更新元数据
-    const sizeEl = card.querySelector('[data-size]');
-    if (sizeEl && downloaded && total) sizeEl.textContent = `${downloaded} / ${total}`;
-
-    const speedEl = card.querySelector('[data-speed]');
-    if (speedEl) speedEl.textContent = speed || '';
-
-    const extraEl = card.querySelector('[data-extra]');
-    if (extraEl) {
-        const parts = [];
-        if (eta) parts.push('ETA: ' + eta);
-        if (connections > 0) parts.push(connections + ' 连接');
-        extraEl.textContent = parts.join(' · ');
-    }
-
-    // 自动切换到下载监控页
     const a2tdPage = document.getElementById('page-aria2teldrive');
     if (a2tdPage && !a2tdPage.classList.contains('active') && mode === 'download' && progress < 2) {
         switchPage('aria2teldrive');
     }
 }
+
 
 function addLogEntry(icon, text) {
     const container = document.getElementById('logContainer');
@@ -666,7 +559,7 @@ async function loadA2TDTasks() {
     try {
         const resp = await fetch('/api/a2td/tasks');
         const data = await resp.json();
-        renderA2TDTasks(data.tasks);
+        setA2TDTasks(data.tasks);
     } catch (e) {}
 }
 
@@ -712,11 +605,16 @@ function getA2TDTaskStatusLabel(status) {
 
 function getA2TDTaskProgress(task) {
     if (task.status === 'completed') return 100;
-    if (task.status === 'uploading') return Number(task.upload_progress || 0);
-    if (Number(task.upload_progress || 0) > 0 && Number(task.download_progress || 0) >= 100) {
-        return Number(task.upload_progress || 0);
+    let progress = 0;
+    if (task.status === 'uploading') {
+        progress = Number(task.upload_progress || 0);
+    } else if (Number(task.upload_progress || 0) > 0 && Number(task.download_progress || 0) >= 100) {
+        progress = Number(task.upload_progress || 0);
+    } else {
+        progress = Number(task.download_progress || 0);
     }
-    return Number(task.download_progress || 0);
+    if (task.status !== 'completed' && progress >= 100) return 99.9;
+    return progress;
 }
 
 function getA2TDTaskMode(task) {
@@ -779,8 +677,8 @@ function renderA2TDTasks(tasks) {
         const progress = Math.max(0, Math.min(100, getA2TDTaskProgress(task)));
         const filename = escapeA2TDHtml(task.filename || task.task_id || '未命名任务');
         const statusLabel = escapeA2TDHtml(getA2TDTaskStatusLabel(task.status));
-        const downloadProgress = Number(task.download_progress || 0).toFixed(1);
-        const uploadProgress = Number(task.upload_progress || 0).toFixed(1);
+        const downloadProgress = Math.min(99.9, Number(task.download_progress || 0)).toFixed(1);
+        const uploadProgress = Math.min(task.status === 'completed' ? 100 : 99.9, Number(task.upload_progress || 0)).toFixed(1);
         const speedText = task.status === 'downloading' ? (task.download_speed || '') : (task.upload_speed || '');
         const sizeText = task.file_size || '';
         const extraParts = [`状态：${statusLabel}`];
@@ -789,7 +687,7 @@ function renderA2TDTasks(tasks) {
         if (task.updated_at) extraParts.push(`更新于 ${escapeA2TDHtml(task.updated_at)}`);
 
         const card = document.createElement('div');
-        card.id = 'pb-' + String(task.filename || task.task_id || 'unknown').replace(/[^a-zA-Z0-9_-]/g, '_');
+        card.id = 'pb-' + String(task.task_id || 'unknown').replace(/[^a-zA-Z0-9_-]/g, '_');
         card.className = 'progress-card ' + (task.status === 'completed' ? 'completed' : mode === 'upload' ? 'uploading' : 'downloading');
         card.innerHTML = `
             <div class="progress-header">
@@ -825,7 +723,6 @@ async function a2tdAction(taskId, action) {
             const err = await resp.json().catch(() => ({}));
             throw new Error(err.detail || '操作失败');
         }
-        loadA2TDTasks();
     } catch(e) {
         alert(e.message || '任务操作失败');
     }
@@ -835,16 +732,15 @@ async function a2tdAction(taskId, action) {
 async function a2tdBulkAction(action) {
     try {
         await fetch(`/api/a2td/tasks/${action}`, { method: 'POST' });
-        loadA2TDTasks();
     } catch(e) {}
 }
 
 async function clearCompletedTasks() {
     try {
         await fetch('/api/a2td/tasks/clear-completed', { method: 'POST' });
-        loadA2TDTasks();
     } catch(e) {}
 }
+
 
 // ── Settings ──
 function togglePikpakLoginMode() {
@@ -1016,11 +912,14 @@ async function saveConfig() {
     
     const cfg = collectSettingsConfig();
     
+
     try {
-        await saveSettingsPayload(cfg);
-        const msg = document.getElementById('saveMsg'); 
-        msg.classList.add('show'); 
-        setTimeout(() => msg.classList.remove('show'), 2500); 
+        const resp = await fetch('/api/settings', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(cfg) });
+        if (resp.ok) { 
+            const msg = document.getElementById('saveMsg'); 
+            msg.classList.add('show'); 
+            setTimeout(() => msg.classList.remove('show'), 2500); 
+        }
     } catch (e) { 
         alert('保存失败: ' + e.message); 
     }
@@ -1048,12 +947,16 @@ function initAutoSave() {
 async function doAutoSave(triggerInput) {
     const cfg = collectSettingsConfig();
 
+
     try {
-        await saveSettingsPayload(cfg);
-        showFieldCheck(triggerInput);
+        const resp = await fetch('/api/settings', {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(cfg)
+        });
+        if (resp.ok) showFieldCheck(triggerInput);
     } catch (e) { /* silent fail */ }
 }
-
 
 function showFieldCheck(input) {
     // 在输入框旁边显示一个临时绿色对号

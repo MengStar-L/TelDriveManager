@@ -1,7 +1,5 @@
 """统一设置路由 — 管理所有模块的配置和连接测试"""
 
-import copy
-
 from fastapi import APIRouter, Body
 from app.config import load_config, save_config, reload_config
 from app.aria2_client import Aria2Client
@@ -10,27 +8,6 @@ from app.modules.aria2teldrive.task_manager import task_manager
 from app.modules.pikpak import routes as pikpak_routes
 
 router = APIRouter(prefix="/api/settings")
-
-
-def _sanitize_settings_payload(payload: dict | None) -> dict:
-    cleaned = copy.deepcopy(payload or {})
-    if not isinstance(cleaned, dict):
-        return {}
-
-    cleaned.pop("_meta", None)
-
-    pikpak_cfg = cleaned.get("pikpak")
-    if isinstance(pikpak_cfg, dict):
-        login_mode = str(pikpak_cfg.get("login_mode") or "password").strip().lower()
-        pikpak_cfg["login_mode"] = "session" if login_mode == "session" else "password"
-        if isinstance(pikpak_cfg.get("session"), str):
-            pikpak_cfg["session"] = pikpak_cfg["session"].strip()
-
-    telegram_cfg = cleaned.get("telegram")
-    if isinstance(telegram_cfg, dict) and isinstance(telegram_cfg.get("session_name"), str):
-        telegram_cfg["session_name"] = telegram_cfg["session_name"].strip() or "tel2teldrive_session"
-
-    return cleaned
 
 
 @router.get("")
@@ -46,13 +23,11 @@ async def get_settings():
 @router.put("")
 async def update_settings(request_body: dict):
     """保存配置"""
-    payload = _sanitize_settings_payload(request_body)
-    save_config(payload)
-    reload_config()
+    save_config(request_body)
+    # 重新加载到各模块
     task_manager.reload_config()
     pikpak_routes.reset_clients()
     return {"success": True, "message": "设置已保存"}
-
 
 
 @router.post("/test/aria2")
