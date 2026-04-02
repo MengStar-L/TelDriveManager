@@ -1429,7 +1429,7 @@ class Tel2TelDriveService:
                 await asyncio.sleep(2)
                 continue
 
-            token_b64 = base64.urlsafe_b64encode(result.token).decode("utf-8")
+            token_b64 = base64.urlsafe_b64encode(result.token).decode("utf-8").rstrip("=")
             qr_image = build_qr_data_uri(f"tg://login?token={token_b64}")
             expires_at = result.expires.astimezone().isoformat(timespec="seconds")
             await broker.update_state(
