@@ -13,11 +13,7 @@ async function checkSetupRequired() {
                 if(data.pikpak.username) document.getElementById('wPikUser').value = data.pikpak.username;
                 if(data.pikpak.password) document.getElementById('wPikPass').value = data.pikpak.password;
             }
-            if (data.aria2) {
-                if(data.aria2.rpc_url) document.getElementById('wAriaUrl').value = data.aria2.rpc_url;
-                const sec = document.getElementById('wAriaSecret');
-                if(sec && data.aria2.rpc_secret) sec.value = data.aria2.rpc_secret;
-            }
+
             if (data.teldrive) {
                 if(data.teldrive.api_host) document.getElementById('wTdUrl').value = data.teldrive.api_host;
                 if(data.teldrive.access_token) document.getElementById('wTdToken').value = data.teldrive.access_token;
@@ -55,7 +51,7 @@ async function checkSetupRequired() {
             const d = healthData.details || {};
             let firstStep = 1;
             if (d.pikpak) firstStep = 2;
-            if (firstStep === 2 && d.aria2 && d.teldrive) firstStep = 3;
+            if (firstStep === 2 && d.teldrive) firstStep = 3;
             if (firstStep === 3 && d.telegram) firstStep = 4;
 
             // Jump to first failed step
@@ -109,7 +105,7 @@ async function wizardNext(current, next) {
             if(!d.success) throw new Error(d.message || "PikPak验证失败");
             dataToSave.pikpak = payload;
         }
-        else if (current === 2) { // Aria2 & TelDrive
+        else if (current === 2) { // TelDrive
             const tUrl = document.getElementById('wTdUrl').value.trim();
             const tTok = document.getElementById('wTdToken').value.trim();
             if(!tUrl || !tTok) throw new Error("TelDrive API和Token为必填");
@@ -121,19 +117,7 @@ async function wizardNext(current, next) {
             const d = await r.json();
             if(!d.success && !d.ok) throw new Error("TelDrive连接失败");
 
-            const aUrl = document.getElementById('wAriaUrl').value.trim();
-            if(!aUrl) throw new Error("请填写Aria2 RPC完整地址");
-            const aSec = document.getElementById('wAriaSecret')?.value.trim() || '';
-            const arPayload = {rpc_url: aUrl, rpc_port: 6800, rpc_secret: aSec};
-            const r2 = await fetch('/api/settings/test/aria2', {
-                method: 'POST', headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify(arPayload)
-            });
-            const d2 = await r2.json();
-            if(!d2.success && !d2.ok) throw new Error("Aria2握手失败: " + (d2.message||""));
-            
             dataToSave.teldrive = tdPayload;
-            dataToSave.aria2 = arPayload;
         }
         else if (current === 3) { // Telegram
             const tid = document.getElementById('wTgId').value.trim();
