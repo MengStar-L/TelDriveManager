@@ -250,18 +250,80 @@ window.fetch = async function (...args) {
 };
 
 // ── Navigation ──
-function switchPage(name) {
-    document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
-    document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
-    document.getElementById('page-' + name).classList.add('active');
-    const navItem = document.querySelector(`.nav-item[data-page="${name}"]`);
-    if(navItem) navItem.classList.add('active');
-    
+let guidedPageSwitchTimer = null;
+let guidedPageSwitchTarget = '';
+
+function runPageSideEffects(name) {
     if (name === 'tasks') refreshPikPakTasks();
     if (name === 'aria2teldrive') loadA2TDTasks();
     if (name === 'tel2teldrive') loadT2TDState();
     if (name === 'settings') loadConfig();
 }
+
+function switchPage(name, options = {}) {
+    const targetPage = document.getElementById('page-' + name);
+    if (!targetPage) return;
+
+    if (guidedPageSwitchTimer) {
+        clearTimeout(guidedPageSwitchTimer);
+        guidedPageSwitchTimer = null;
+        guidedPageSwitchTarget = '';
+    }
+
+    if (targetPage.classList.contains('active')) {
+        runPageSideEffects(name);
+        return;
+    }
+
+    const animated = !!options.animated;
+    const pageContent = document.querySelector('.page-content');
+    const activateTargetPage = () => {
+        document.querySelectorAll('.page').forEach(p => {
+            p.classList.remove('active', 'page-enter', 'page-enter-active', 'page-exit');
+        });
+        document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
+        targetPage.classList.add('active');
+        const navItem = document.querySelector(`.nav-item[data-page="${name}"]`);
+        if (navItem) navItem.classList.add('active');
+        runPageSideEffects(name);
+    };
+
+    if (!animated || !pageContent) {
+        activateTargetPage();
+        return;
+    }
+
+    const currentPage = document.querySelector('.page.active');
+    pageContent.classList.add('page-switching');
+    if (currentPage) currentPage.classList.add('page-exit');
+
+    setTimeout(() => {
+        activateTargetPage();
+        targetPage.classList.add('page-enter');
+        requestAnimationFrame(() => targetPage.classList.add('page-enter-active'));
+        setTimeout(() => {
+            pageContent.classList.remove('page-switching');
+            targetPage.classList.remove('page-enter', 'page-enter-active');
+        }, 420);
+    }, 140);
+}
+
+function scheduleGuidedPageSwitch(name, message = '', delay = 620) {
+    const targetPage = document.getElementById('page-' + name);
+    if (!targetPage || targetPage.classList.contains('active')) return;
+    if (guidedPageSwitchTimer && guidedPageSwitchTarget === name) return;
+
+    if (guidedPageSwitchTimer) clearTimeout(guidedPageSwitchTimer);
+    guidedPageSwitchTarget = name;
+    if (message) showA2TDToast(message, 'info');
+
+    guidedPageSwitchTimer = setTimeout(() => {
+        guidedPageSwitchTimer = null;
+        guidedPageSwitchTarget = '';
+        switchPage(name, { animated: true });
+    }, delay);
+}
+
 
 async function logout() {
     await fetch('/api/logout', { method: 'POST' });
@@ -438,36 +500,14 @@ function handleWSMessage(msg) {
         return;
     }
 
-    
-    // PikPak log messages
-    const icons = { task_start: '<i class="ph-fill ph-spinner-gap info" style="animation:spin 2s linear infinite"></i>', task_added: '<i class="ph ph-cloud-arrow-up info"></i>', task_status: '<i class="ph ph-hourglass-high warning"></i>', task_error: '<i class="ph-fill ph-warning-circle error"></i>', files_found: '<i class="ph ph-files"></i>', aria2_done: '<i class="ph-fill ph-check-circle success"></i>', task_done: '<i class="ph-fill ph-check-square success"></i>', all_done: '<i class="ph-fill ph-flag-checkered success"></i>', error: '<i class="ph-fill ph-x-circle error"></i>' };
-    const icon = icons[msg.type] || '<i class="ph-fill ph-asterisk"></i>';
-    let text = '';
-    switch (msg.type) {
-        case 'task_start': text = `<span class="highlight">[${msg.index}/${msg.total}]</span> 开始处理: ${msg.magnet}`; break;
-        case 'task_added': text = `<span class="highlight">[${msg.index}]</span> 离线任务已添加: <span class="file-name">${msg.file_name}</span>`; break;
-        case 'task_status': text = `<span class="highlight">[${msg.index}]</span> 状态: ${msg.status}`; break;
-        case 'task_error': text = `<span class="highlight">[${msg.index}]</span> <span class="error">${msg.message}</span>`; break;
-        case 'files_found': text = `<span class="highlight">[${msg.index}]</span> 找到 ${msg.files.length} 个文件: <span class="file-name">${msg.files.join(', ')}</span>`; break;
-        case 'aria2_done': text = `<span class="highlight">[${msg.index}]</span> <span class="success">已推送 ${msg.success_count}/${msg.total_count} 到 Aria2</span>`; break;
-        case 'task_done': text = `<span class="highlight">[${msg.index}]</span> <span class="success">✓ ${msg.file_name} 完成</span>`; break;
-        case 'all_done':
-            text = `<span class="success">全部 ${msg.total} 个磁链处理完毕！</span>`;
-            const btn = document.getElementById('submitBtn');
-            if (btn) { btn.disabled = false; btn.innerHTML = '<i class="ph ph-rocket-launch"></i> 一键推送'; }
-            break;
-        case 'error':
-            text = `<span class="error">${msg.message}</span>`;
-            const btnE = document.getElementById('submitBtn');
-            if (btnE) { btnE.disabled = false; btnE.innerHTML = '<i class="ph ph-rocket-launch"></i> 一键推送'; }
-            break;
-    }
-    if (text) addLogEntry(icon, text);
-    
+    const logEntry = buildProgressLogEntry(msg);
+    if (logEntry) addLogEntry(logEntry.icon, logEntry.text);
+
     if (!document.getElementById('page-progress').classList.contains('active') && msg.type === 'task_start') {
-        switchPage('progress');
+        switchPage('progress', { animated: true });
     }
 }
+
 
 
 
@@ -700,14 +740,115 @@ function updateProgressBar(taskId, filename, mode, progress, speed, transferredT
 
     const a2tdPage = document.getElementById('page-aria2teldrive');
     if (a2tdPage && !a2tdPage.classList.contains('active') && mode === 'download' && progress < 2) {
-        switchPage('aria2teldrive');
+        scheduleGuidedPageSwitch('aria2teldrive', '下载已开始，正在切换到下载监控...', 680);
     }
+
 }
 
 
 
 
+
+
+
+
+function renderProgressLogMeta(items = []) {
+    const html = items.filter(Boolean).map(item => `<span class="log-meta-item">${item}</span>`).join('');
+    return html ? `<div class="log-meta">${html}</div>` : '';
+}
+
+function buildProgressLogEntry(msg) {
+    const icons = {
+        task_start: '<i class="ph-fill ph-spinner-gap info" style="animation:spin 2s linear infinite"></i>',
+        task_added: '<i class="ph ph-cloud-check info"></i>',
+        task_status: '<i class="ph ph-hourglass-high warning"></i>',
+        task_error: '<i class="ph-fill ph-warning-circle error"></i>',
+        files_found: '<i class="ph ph-files"></i>',
+        file_resolved: '<i class="ph-fill ph-file-arrow-down success"></i>',
+        link_pushed: '<i class="ph ph-paper-plane-tilt success"></i>',
+        push_done: '<i class="ph-fill ph-check-circle success"></i>',
+        aria2_done: '<i class="ph-fill ph-check-circle success"></i>',
+        task_done: '<i class="ph-fill ph-check-square success"></i>',
+        all_done: '<i class="ph-fill ph-flag-checkered success"></i>',
+        error: '<i class="ph-fill ph-x-circle error"></i>'
+    };
+    const icon = icons[msg.type] || '<i class="ph-fill ph-asterisk"></i>';
+    const indexLabel = msg.index !== undefined && msg.index !== null
+        ? `<span class="highlight">[${escapeA2TDHtml(msg.index)}]</span>`
+        : '';
+    let text = '';
+
+    switch (msg.type) {
+        case 'task_start': {
+            const totalText = msg.total ? `/${escapeA2TDHtml(msg.total)}` : '';
+            text = `<span class="highlight">[${escapeA2TDHtml(msg.index)}${totalText}]</span> 开始处理新的推送对象` + renderProgressLogMeta([
+                `来源：<span class="log-path">${escapeA2TDHtml(msg.magnet || '')}</span>`
+            ]);
+            break;
+        }
+        case 'task_added':
+            text = `${indexLabel} PikPak 离线任务创建成功：<span class="log-file">${escapeA2TDHtml(msg.file_name || '未命名对象')}</span>`
+                + renderProgressLogMeta([
+                    msg.task_id ? `任务ID：<span class="log-path">${escapeA2TDHtml(msg.task_id)}</span>` : ''
+                ]);
+            break;
+        case 'task_status':
+            text = `${indexLabel} ${escapeA2TDHtml(msg.status || '')}`;
+            break;
+        case 'task_error':
+            text = `${indexLabel} <span class="error">${escapeA2TDHtml(msg.message || '处理失败')}</span>`;
+            break;
+        case 'files_found': {
+            const preview = Array.isArray(msg.files) ? msg.files.slice(0, 3).map(item => escapeA2TDHtml(item)).join('、') : '';
+            text = `${indexLabel} 检测到 ${escapeA2TDHtml((msg.files || []).length)} 个可用文件` + renderProgressLogMeta([
+                preview ? `示例：${preview}${(msg.files || []).length > 3 ? ' ...' : ''}` : ''
+            ]);
+            break;
+        }
+        case 'file_resolved':
+            text = `${indexLabel} 解析成功 [${escapeA2TDHtml(msg.sequence)}/${escapeA2TDHtml(msg.total_files)}] <span class="log-file">${escapeA2TDHtml(msg.file_name || '未命名文件')}</span>`
+                + renderProgressLogMeta([
+                    msg.file_path ? `路径：<span class="log-path">${escapeA2TDHtml(msg.file_path)}</span>` : '',
+                    msg.file_size ? `大小：${escapeA2TDHtml(msg.file_size)}` : ''
+                ]);
+            break;
+        case 'link_pushed':
+            text = `${indexLabel} 下载链接已推送 [${escapeA2TDHtml(msg.sequence)}/${escapeA2TDHtml(msg.total_files)}] <span class="log-file">${escapeA2TDHtml(msg.file_name || '未命名文件')}</span>`
+                + renderProgressLogMeta([
+                    msg.target ? `目标：${escapeA2TDHtml(msg.target)}` : '',
+                    msg.file_path ? `路径：<span class="log-path">${escapeA2TDHtml(msg.file_path)}</span>` : '',
+                    msg.file_size ? `大小：${escapeA2TDHtml(msg.file_size)}` : ''
+                ]);
+            break;
+        case 'push_done':
+        case 'aria2_done':
+            text = `${indexLabel} <span class="success">下载链接推送完成 ${escapeA2TDHtml(msg.success_count)}/${escapeA2TDHtml(msg.total_count)}</span>`
+                + renderProgressLogMeta([
+                    msg.target ? `目标：${escapeA2TDHtml(msg.target)}` : ''
+                ]);
+            break;
+        case 'task_done':
+            text = `${indexLabel} <span class="success">当前对象处理完成：${escapeA2TDHtml(msg.file_name || '未命名对象')}</span>`;
+            break;
+        case 'all_done': {
+            text = `<span class="success">全部 ${escapeA2TDHtml(msg.total)} 个对象已处理完成</span>`;
+            const btn = document.getElementById('submitBtn');
+            if (btn) { btn.disabled = false; btn.innerHTML = '<i class="ph ph-rocket-launch"></i> 一键推送'; }
+            break;
+        }
+        case 'error': {
+            text = `<span class="error">${escapeA2TDHtml(msg.message || '操作失败')}</span>`;
+            const btnE = document.getElementById('submitBtn');
+            if (btnE) { btnE.disabled = false; btnE.innerHTML = '<i class="ph ph-rocket-launch"></i> 一键推送'; }
+            break;
+        }
+    }
+
+    return text ? { icon, text } : null;
+}
+
 function addLogEntry(icon, text) {
+
     const container = document.getElementById('logContainer');
     if(!container) return;
     const empty = document.getElementById('logEmpty');
@@ -754,21 +895,27 @@ function renderA2TDStats(stats) {
         const totalBytes = stats.disk.total !== undefined
             ? stats.disk.total
             : getA2TDNumber(stats.disk.total_gb) * 1024 * 1024 * 1024;
-        const freeBytes = stats.disk.free !== undefined
-            ? stats.disk.free
-            : getA2TDNumber(stats.disk.free_gb) * 1024 * 1024 * 1024;
+        const usedBytes = stats.disk.used !== undefined
+            ? stats.disk.used
+            : getA2TDNumber(stats.disk.used_gb) * 1024 * 1024 * 1024;
         const totalStr = formatBytes(totalBytes || 0, 0);
-        const freeStr = formatBytes(freeBytes || 0, 0);
-        document.getElementById('sysDiskStat').textContent = `${freeStr} 可用 / ${totalStr}`;
+        const usedStr = formatBytes(usedBytes || 0, 0);
+        const diskEl = document.getElementById('sysDiskStat');
+        diskEl.textContent = `${usedStr} / ${totalStr}`;
+        diskEl.title = stats.disk.percent !== undefined
+            ? `${getA2TDNumber(stats.disk.percent).toFixed(1)}%`
+            : '';
     }
+
     if (stats.download_speed !== undefined) {
         const detail = stats.download_speed_detail || {};
-        const aria2Speed = formatBytes(getA2TDNumber(detail.aria2));
+        const externalSpeed = formatBytes(getA2TDNumber(detail.aria2));
         const builtinSpeed = formatBytes(getA2TDNumber(detail.builtin));
         const el = document.getElementById('sysDownloadStat');
         el.textContent = `${formatBytes(stats.download_speed)}/s`;
-        el.title = `Aria2: ${aria2Speed}/s | 内置下载器: ${builtinSpeed}/s`;
+        el.title = `外部接收端: ${externalSpeed}/s | 内置下载器: ${builtinSpeed}/s`;
     }
+
     if (stats.upload_speed !== undefined) {
         document.getElementById('sysUploadStat').textContent = `${formatBytes(stats.upload_speed)}/s`;
     }
@@ -1123,11 +1270,9 @@ function collectSettingsConfig() {
         },
         upload: {
             auto_delete: document.getElementById('cfgUploadAutoDelete').checked,
-            max_retries: 3,
-            check_interval: 3,
-            max_disk_usage_gb: 0,
-            cpu_usage_limit: 85
+            max_retries: 3
         },
+
         telegram: {
             api_id: parseInt(document.getElementById('cfgTelegramApiId').value) || 0,
             api_hash: document.getElementById('cfgTelegramApiHash').value,
@@ -1516,7 +1661,7 @@ async function submitMagnets() {
         const data = await resp.json();
         if(!resp.ok) throw new Error(data.error || '提交失败');
         
-        switchPage('progress');
+        switchPage('progress', { animated: true });
     } catch(e) {
         alert(e.message);
     } finally {
@@ -1524,6 +1669,7 @@ async function submitMagnets() {
         btn.innerHTML = '<i class="ph ph-rocket-launch"></i> 一键推送';
     } 
 }
+
 
 function toggleMagnetSelectAll() {
     const isChecked = document.getElementById('magnetSelectAll').checked;
@@ -1559,12 +1705,14 @@ async function downloadMagnetFiles() {
         const data = await resp.json();
         if(!resp.ok) throw new Error(data.error || '提交失败');
         
-        switchPage('progress');
+        switchPage('progress', { animated: true });
     } catch(e) {
         alert(e.message);
     } finally {
         btn.disabled = false;
-        btn.innerHTML = '<i class="ph ph-download-simple"></i> 同步到 Aria2';
+        btn.innerHTML = '<i class="ph ph-download-simple"></i> 推送下载链接';
+
+
     }
 }
 
@@ -1655,12 +1803,13 @@ async function downloadShareFiles() {
         const data = await resp.json();
         if(!resp.ok) throw new Error(data.error || '提交失败');
         
-        switchPage('progress');
+        switchPage('progress', { animated: true });
     } catch(e) {
         alert(e.message);
     } finally {
         btn.disabled = false;
         btn.innerHTML = '<i class="ph ph-cloud-arrow-down"></i> 执行下载';
+
     }
 }
 
@@ -1726,12 +1875,13 @@ async function downloadRssItems() {
         const data = await resp.json();
         if(!resp.ok) throw new Error(data.error || '提交失败');
         
-        switchPage('progress');
+        switchPage('progress', { animated: true });
     } catch(e) {
         alert(e.message);
     } finally {
         btn.disabled = false;
         btn.innerHTML = '<i class="ph ph-download-simple"></i> 执行订阅下载';
+
     }
 }
 

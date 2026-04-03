@@ -66,16 +66,10 @@ class TaskManager:
         self._upload_total_snapshot: int = 0   # 上次快照时的总字节
         self._upload_time_snapshot: float = 0.0
         self._upload_speed: float = 0.0
-        # 磁盘空间限制：通过调控并发数防止新任务占用空间
-        self._disk_throttled: bool = False
-        self._disk_limited_concurrent: int = 0  # 磁盘限流期间的当前并发数限制，0=未限流
         self._disk_usage_info: dict = {}  # 缓存磁盘使用信息
-        self._disk_recovery_time: float = 0.0  # 上次恢复并发的时间戳，用于6s冷却
-        # CPU 限速：通过限制总下载速度控制 CPU 使用率
-        self._cpu_speed_limit: int = 0  # 当前速度限制(bytes/sec)，0=无限制
         self._cpu_info: dict = {}
-        self._cpu_samples: list = []  # CPU 采样历史，用于滑动平均
         self._last_download_speed: int = 0  # 缓存最近的 aria2 下载速度
+
 
     def _init_clients(self):
         """根据当前配置初始化客户端"""
@@ -140,8 +134,10 @@ class TaskManager:
             cfg = self.config
             options = {
                 "max-concurrent-downloads": str(cfg["aria2"].get("max_concurrent", 3)),
+                "max-overall-download-limit": "0",
                 "dir": cfg["aria2"].get("download_dir", "./downloads"),
             }
+
             await self.aria2.change_global_option(options)
             # logger.info(f"已同步 aria2 全局选项: {options}")
         except Exception as e:
@@ -321,8 +317,8 @@ class TaskManager:
                     self._upload_time_snapshot = now
 
                 # 每个步骤独立保护，单步失败不影响其他
-                # 注意顺序：先检测 CPU，再检测磁盘
-                # 确保磁盘恢复并发时能感知到最新的 CPU 状态
+                # 先采集 CPU / 磁盘状态，再同步任务和广播
+
                 try:
                     await self._check_cpu_usage()
                 except Exception as e:
@@ -378,209 +374,44 @@ class TaskManager:
                 await asyncio.sleep(5)
 
     async def _check_disk_usage(self):
-        """检测磁盘使用量，通过动态调控并发数限制新任务派发"""
-        max_gb = self.config.get("upload", {}).get("max_disk_usage", 0)
-        max_concurrent = self.config["aria2"].get("max_concurrent", 3)
-
-        # 始终采集磁盘信息用于仪表盘显示
+        """采集磁盘使用信息，供前端仪表盘显示"""
         try:
             download_dir = get_download_dir(self.config)
             usage = shutil.disk_usage(download_dir)
-            used_gb = round(usage.used / (1024 ** 3), 2)
-            total_gb = round(usage.total / (1024 ** 3), 2)
-            free_gb = round(usage.free / (1024 ** 3), 2)
-            percent = round(used_gb / total_gb * 100, 1) if total_gb > 0 else 0
         except Exception as e:
             logger.debug(f"检测磁盘使用失败: {e}")
             return
 
-        # 限流逻辑：仅在设置了上限时生效
-        if max_gb <= 0:
-            if self._disk_throttled:
-                await self._resume_aria2_downloads()
-        else:
-            upper_threshold = max_gb * 0.9
-            lower_threshold = max_gb * 0.6
-
-            if used_gb >= upper_threshold and not self._disk_throttled:
-                # 超上限 → 限制并发数为 1，阻止新任务派发
-                try:
-                    self._disk_throttled = True
-                    self._disk_limited_concurrent = 1
-                    await self._apply_concurrent()
-                    logger.warning(
-                        f"磁盘使用 {used_gb}GB >= 上限 {upper_threshold:.1f}GB，"
-                        f"限制并发数为 1")
-                except Exception as e:
-                    logger.error(f"磁盘限流设置并发数失败: {e}")
-
-            elif self._disk_throttled and used_gb < lower_threshold:
-                # 低于下限 → 逐步恢复并发数（每次+1，冷却6秒后再检查磁盘是否仍安全）
-                import time
-                now = time.monotonic()
-                if now - self._disk_recovery_time >= 6.0:
-                    # 如果 CPU 正在限速，暂不增加并发，避免雪崩
-                    if self._cpu_speed_limit > 0:
-                        logger.info(f"磁盘恢复暂停：CPU 正在限速({self._cpu_speed_limit // 1024}KB/s)，"
-                                    f"等待 CPU 负载降低后再增加并发")
-                    elif used_gb < upper_threshold:
-                        new_concurrent = min(self._disk_limited_concurrent + 1, max_concurrent)
-                        try:
-                            self._disk_limited_concurrent = new_concurrent
-                            self._disk_recovery_time = now
-                            await self._apply_concurrent()
-                            logger.info(f"磁盘空间释放(已用 {used_gb}GB < 下限 {lower_threshold:.1f}GB)，"
-                                        f"并发数恢复到 {new_concurrent}/{max_concurrent}")
-                            if new_concurrent >= max_concurrent:
-                                self._disk_throttled = False
-                                self._disk_limited_concurrent = 0
-                                self._disk_recovery_time = 0.0
-                                logger.info("磁盘限流解除，并发数已完全恢复")
-                        except Exception as e:
-                            logger.error(f"磁盘限流恢复并发数失败: {e}")
-                    else:
-                        logger.info(f"磁盘恢复暂停：已用 {used_gb}GB 接近上限 {upper_threshold:.1f}GB")
-
-        # 限流逻辑执行完后，构建前端显示数据（确保状态准确）
-        if not self._disk_throttled:
-            throttle_level = 0
-        elif self._disk_limited_concurrent < max_concurrent:
-            throttle_level = 1
-        else:
-            throttle_level = 0
-
-        if max_gb > 0:
-            display_free = round(max(0, max_gb - used_gb), 2)
-            display_percent = round(used_gb / max_gb * 100, 1)
-        else:
-            display_free = free_gb
-            display_percent = percent
+        total_bytes = int(usage.total or 0)
+        used_bytes = int(usage.used or 0)
+        free_bytes = int(usage.free or 0)
+        total_gb = round(total_bytes / (1024 ** 3), 2)
+        used_gb = round(used_bytes / (1024 ** 3), 2)
+        free_gb = round(free_bytes / (1024 ** 3), 2)
+        percent = round(used_bytes / total_bytes * 100, 1) if total_bytes > 0 else 0
 
         self._disk_usage_info = {
-            "used_gb": used_gb,
+            "total": total_bytes,
+            "used": used_bytes,
+            "free": free_bytes,
             "total_gb": total_gb,
-            "free_gb": display_free,
-            "percent": display_percent,
-            "limit_gb": max_gb,
-            "throttled": throttle_level,
-            "current_concurrent": self._disk_limited_concurrent if self._disk_throttled else max_concurrent,
-            "max_concurrent": max_concurrent
+            "used_gb": used_gb,
+            "free_gb": free_gb,
+            "percent": percent,
         }
 
-    def _get_effective_concurrent(self) -> int:
-        """获取磁盘限流后的有效并发数，绝不超过用户设定值"""
-        max_c = self.config["aria2"].get("max_concurrent", 3)
-        if self._disk_throttled and self._disk_limited_concurrent > 0:
-            return max(1, min(self._disk_limited_concurrent, max_c))
-        return max_c
-
-    async def _apply_concurrent(self):
-        """统一设置 aria2 并发数，确保磁盘和 CPU 限流不冲突"""
-        target = self._get_effective_concurrent()
-        try:
-            await self.aria2.change_global_option(
-                {"max-concurrent-downloads": str(target)})
-        except Exception as e:
-            logger.error(f"设置 aria2 并发数失败: {e}")
-        return target
-
-    async def _resume_aria2_downloads(self):
-        """解除磁盘限流"""
-        self._disk_throttled = False
-        self._disk_limited_concurrent = 0
-        if self._disk_usage_info:
-            self._disk_usage_info["throttled"] = 0
-        target = await self._apply_concurrent()
-        logger.info(f"磁盘限流解除，恢复 aria2 并发数={target}")
-
     async def _check_cpu_usage(self):
-        """检测 CPU 使用率，通过限制总下载速度控制资源占用"""
-        cpu_limit = self.config.get("upload", {}).get("cpu_limit", 85)
-
-        # 始终采集 CPU 数据用于仪表盘显示
+        """采集 CPU 使用率，供前端仪表盘显示"""
         try:
-            raw_pct = psutil.cpu_percent(interval=None)
-            self._cpu_samples.append(raw_pct)
-            if len(self._cpu_samples) > 3:
-                self._cpu_samples.pop(0)
-            cpu_pct = sum(self._cpu_samples) / len(self._cpu_samples)
+            cpu_pct = psutil.cpu_percent(interval=None)
         except Exception as e:
             logger.debug(f"检测 CPU 使用失败: {e}")
             return
 
-        if cpu_limit <= 0:
-            if self._cpu_speed_limit > 0:
-                self._cpu_speed_limit = 0
-                try:
-                    await self.aria2.change_global_option(
-                        {"max-overall-download-limit": "0"})
-                except Exception:
-                    pass
-            # 即使不限制也显示 CPU 数据
-            self._cpu_info = {
-                "percent": round(cpu_pct, 1),
-                "limit": 0,
-                "throttled": 0,
-                "speed_limit": 0
-            }
-            return
+        self._cpu_info = {
+            "percent": round(cpu_pct, 1),
+        }
 
-        try:
-            cpu_lower = cpu_limit * 0.75
-
-            # 限流级别用于前端显示
-            throttle_level = 0 if self._cpu_speed_limit == 0 else 1
-
-            self._cpu_info = {
-                "percent": round(cpu_pct, 1),
-                "limit": cpu_limit,
-                "throttled": throttle_level,
-                "speed_limit": self._cpu_speed_limit
-            }
-
-            if cpu_pct >= cpu_limit:
-                # CPU 超上限：降低下载速度
-                if self._cpu_speed_limit == 0:
-                    # 首次限速：获取当前下载速度，限制为 75%
-                    try:
-                        stat = await self.aria2.get_global_stat()
-                        current_speed = int(stat.get("downloadSpeed", 0))
-                        if current_speed > 0:
-                            self._cpu_speed_limit = max(102400, int(current_speed * 0.75))  # 最低 100KB/s
-                        else:
-                            self._cpu_speed_limit = 1048576  # 默认限速 1MB/s
-                    except Exception:
-                        self._cpu_speed_limit = 1048576
-                else:
-                    # 持续高负载：继续降低 25%
-                    self._cpu_speed_limit = max(102400, int(self._cpu_speed_limit * 0.75))
-                try:
-                    await self.aria2.change_global_option(
-                        {"max-overall-download-limit": str(self._cpu_speed_limit)})
-                    logger.info(f"CPU 限速：下载限速 {self._cpu_speed_limit // 1024}KB/s（CPU {cpu_pct:.0f}%）")
-                except Exception as e:
-                    logger.error(f"CPU 限速设置失败: {e}")
-
-            elif cpu_pct < cpu_lower and self._cpu_speed_limit > 0:
-                # CPU 低于下限：逐步提高限速 33%
-                new_limit = int(self._cpu_speed_limit * 1.33)
-                # 速度足够高时解除限制（超过 50MB/s 视为无需限速）
-                if new_limit >= 52428800:
-                    self._cpu_speed_limit = 0
-                    speed_str = "0"
-                    logger.info(f"CPU 恢复：解除下载限速（CPU {cpu_pct:.0f}%）")
-                else:
-                    self._cpu_speed_limit = new_limit
-                    speed_str = str(new_limit)
-                    logger.info(f"CPU 恢复：下载限速提升至 {new_limit // 1024}KB/s（CPU {cpu_pct:.0f}%）")
-                try:
-                    await self.aria2.change_global_option(
-                        {"max-overall-download-limit": speed_str})
-                except Exception as e:
-                    logger.error(f"CPU 限速恢复失败: {e}")
-
-        except Exception as e:
-            logger.debug(f"检测 CPU 使用失败: {e}")
 
     async def _sync_aria2_tasks(self):
         """从 aria2 获取所有任务，同步到本地数据库"""

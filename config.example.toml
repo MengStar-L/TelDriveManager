@@ -46,8 +46,6 @@ target_path = "/"
 [upload]
 max_retries = 3
 auto_delete = true
-max_disk_usage = 0
-cpu_limit = 85
 
 # ─── Telegram 消息同步 ───
 [telegram]

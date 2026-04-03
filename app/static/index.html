@@ -74,11 +74,28 @@
         .wizard-dot.active { background: #0066ff; width: 24px; border-radius: 4px; }
 
         /* ── Pages ── */
-        .page-content { flex: 1; min-height: 0; overflow-y: auto; padding-bottom: 20px; scrollbar-width: none; }
+        .page-content { flex: 1; min-height: 0; overflow-y: auto; padding-bottom: 20px; scrollbar-width: none; position: relative; }
         .page-content::-webkit-scrollbar { display: none; }
-        .page { display: none; animation: slideUp 0.3s cubic-bezier(0.16, 1, 0.3, 1); }
+        .page { display: none; animation: slideUp 0.3s cubic-bezier(0.16, 1, 0.3, 1); transform-origin: top center; }
         .page.active { display: block; }
+        .page.page-exit { animation: pageExit 0.16s ease forwards; }
+        .page.page-enter.page-enter-active { animation: pageEnterSmooth 0.42s cubic-bezier(0.16, 1, 0.3, 1) forwards; }
+        .page-content.page-switching::after {
+            content: '';
+            position: absolute;
+            inset: 0;
+            border-radius: 24px;
+            pointer-events: none;
+            background: linear-gradient(180deg, rgba(255,255,255,0.18), rgba(255,255,255,0.42));
+            backdrop-filter: blur(4px);
+            -webkit-backdrop-filter: blur(4px);
+            animation: pageSwitchMask 0.42s ease;
+        }
         @keyframes slideUp { from { opacity: 0; transform: translateY(16px); } to { opacity: 1; transform: translateY(0); } }
+        @keyframes pageExit { from { opacity: 1; transform: translateY(0) scale(1); } to { opacity: 0; transform: translateY(-10px) scale(0.985); } }
+        @keyframes pageEnterSmooth { from { opacity: 0; transform: translateY(18px) scale(0.985); filter: blur(6px); } to { opacity: 1; transform: translateY(0) scale(1); filter: blur(0); } }
+        @keyframes pageSwitchMask { from { opacity: 0; } 40% { opacity: 1; } to { opacity: 0; } }
+
 
         /* ── Card ── */
         .card { background: var(--bg-card); border: 1px solid var(--border); border-radius: var(--radius-lg); overflow: hidden; box-shadow: var(--shadow-card); margin-bottom: 20px; }
@@ -144,12 +161,17 @@
         .log-entry:last-child { border-bottom: none; }
         
         .log-icon { flex-shrink: 0; font-size: 18px; }
-        .log-text { flex: 1; line-height: 1.6; }
+        .log-text { flex: 1; line-height: 1.6; min-width: 0; }
         .log-text .highlight { color: #38bdf8; font-weight: 600; }
         .log-text .file-name { color: #fcd34d; }
+        .log-text .log-file { color: #fcd34d; font-weight: 600; }
+        .log-text .log-path { color: #cbd5e1; font-family: 'Cascadia Code', monospace; }
         .log-text .success { color: #34d399; }
         .log-text .error { color: #f87171; }
+        .log-meta { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+        .log-meta-item { display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px; border-radius: 999px; background: rgba(148, 163, 184, 0.14); color: #cbd5e1; font-size: 11px; max-width: 100%; }
         .log-time { flex-shrink: 0; font-size: 11px; color: #64748b; margin-top: 2px; }
+
 
         /* ── Tasks & Buttons ── */
         .btn { transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1); }
@@ -509,12 +531,14 @@
             <div class="nav-item" data-page="tasks" data-tooltip="Pik离线任务" onclick="switchPage('tasks')">
                 <i class="ph ph-cloud-arrow-down"></i>
             </div>
-            <div class="nav-item" data-page="progress" data-tooltip="Aria2下载推送" onclick="switchPage('progress')">
+            <div class="nav-item" data-page="progress" data-tooltip="下载链接推送" onclick="switchPage('progress')">
+
                 <i class="ph ph-list-dashes"></i>
             </div>
 
             <!-- Aria2TelDrive -->
-            <div class="nav-item" data-page="aria2teldrive" data-tooltip="Aria2 & TelDrive上传" onclick="switchPage('aria2teldrive')">
+            <div class="nav-item" data-page="aria2teldrive" data-tooltip="下载与上传监控" onclick="switchPage('aria2teldrive')">
+
                 <i class="ph ph-hard-drives"></i>
             </div>
 
@@ -584,7 +608,8 @@
                                         维持目录结构映射
                                     </label>
                                 </div>
-                                <button class="btn btn-primary" id="magnetDownloadBtn" onclick="downloadMagnetFiles()"><i class="ph ph-download-simple"></i> 同步到 Aria2</button>
+                                <button class="btn btn-primary" id="magnetDownloadBtn" onclick="downloadMagnetFiles()"><i class="ph ph-download-simple"></i> 推送下载链接</button>
+
                             </div>
                         </div>
                     </div>
@@ -787,12 +812,13 @@
                             <div class="test-icon-box aria2" style="background:#ecfdf5;color:var(--success)"><i class="ph-fill ph-download-simple"></i></div>
                             <div class="test-info" style="flex:1">
                                 <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:4px;">
-                                    <h3>Aria2 本地引擎</h3>
+                                    <h3>下载链接接收端</h3>
                                     <button class="btn btn-ghost btn-sm" style="padding:4px 10px; font-size:12px;" onclick="testSingle('aria2')">测试此项</button>
                                 </div>
                                 <p id="aria2Status"><i class="ph ph-circle-dashed"></i> 等待命令发射</p>
                             </div>
                         </div>
+
                         <div class="test-card">
                             <div class="test-icon-box teldrive" style="background:#eff6ff;color:#3b82f6"><i class="ph-fill ph-hard-drives"></i></div>
                             <div class="test-info" style="flex:1">
@@ -903,7 +929,8 @@
                                             <label>引擎类型</label>
                                             <select class="form-input" id="cfgPikpakEngine">
                                                 <option value="builtin">内置引擎（下载+上传 TelDrive）</option>
-                                                <option value="aria2">推送到 Aria2（仅导出直链）</option>
+                                                <option value="aria2">下载链接推送（仅导出直链）</option>
+
                                             </select>
                                         </div>
                                         <div class="form-group"><label>最大并发下载</label><input class="form-input" type="number" id="cfgPikpakMaxDownloads" min="1" max="10" placeholder="3"></div>
@@ -914,7 +941,8 @@
                         </div>
                         
                         <div class="card">
-                            <div class="card-header"><h3><i class="ph-fill ph-engine"></i> Aria2 落盘服务调优</h3></div>
+                            <div class="card-header"><h3><i class="ph-fill ph-engine"></i> 下载链接接收端配置</h3></div>
+
                             <div class="card-body">
                                 <div class="field-grid">
                                     <div class="form-group"><label>通讯端点 URL</label><input class="form-input" type="text" id="cfgAria2Url" placeholder="例如 http://localhost:6800/jsonrpc"></div>
@@ -992,7 +1020,9 @@
 
     <div id="a2tdToastContainer" class="app-toast-container"></div>
 
-    <script src="/static/app.js?v=20260403b"></script>
+    <script src="/static/app.js?v=20260403d"></script>
+
+
 
 
 

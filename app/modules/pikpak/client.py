@@ -182,7 +182,13 @@ class PikPakClient:
         url = self._extract_download_url(info)
         name = info.get("name", "未知文件")
         if url:
-            return [{"name": name, "url": url, "file_id": file_id, "path": name}]
+            return [{
+                "name": name,
+                "url": url,
+                "file_id": file_id,
+                "path": name,
+                "size": int(info.get("size", 0)),
+            }]
         logger.warning(f"文件暂无直链: file_id={file_id}, name={name}")
         return []
 
@@ -223,13 +229,25 @@ class PikPakClient:
                 else:
                     url = self._extract_download_url(f)
                     if url:
-                        results.append({"name": name, "url": url, "file_id": fid, "path": full_path})
+                        results.append({
+                            "name": name,
+                            "url": url,
+                            "file_id": fid,
+                            "path": full_path,
+                            "size": int(f.get("size", 0)),
+                        })
                     else:
                         try:
                             info = await self.client.get_download_url(fid)
                             dl_url = self._extract_download_url(info)
                             if dl_url:
-                                results.append({"name": name, "url": dl_url, "file_id": fid, "path": full_path})
+                                results.append({
+                                    "name": name,
+                                    "url": dl_url,
+                                    "file_id": fid,
+                                    "path": full_path,
+                                    "size": int(f.get("size", 0)),
+                                })
                         except Exception as e:
                             logger.warning(f"子文件直链获取失败: path={full_path}, error={e}")
             next_page_token = resp.get("next_page_token")

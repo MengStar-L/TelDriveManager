@@ -50,7 +50,6 @@ DEFAULTS: dict[str, Any] = {
     },
     "upload": {
         "max_retries": 3, "auto_delete": True,
-        "max_disk_usage": 0, "cpu_limit": 85,
     },
     "telegram": {
         "api_id": 0, "api_hash": "", "channel_id": 0,
@@ -135,6 +134,11 @@ def save_config(data: dict) -> None:
     # 增量合并：在现有配置的基础上覆盖
     current = load_config()
     merged = _deep_merge(current, data)
+
+    upload_cfg = merged.get("upload")
+    if isinstance(upload_cfg, dict):
+        for deprecated_key in ("max_disk_usage", "cpu_limit", "max_disk_usage_gb", "cpu_usage_limit", "check_interval"):
+            upload_cfg.pop(deprecated_key, None)
     
     with open(CONFIG_PATH, "wb") as f:
         tomli_w.dump(merged, f)
