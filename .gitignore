@@ -23,5 +23,8 @@ pikpak_token.json
 patch_*.py
 fix*.py
 
+# Temp history exports
+history_*.md
+
 # Downloads dir
 downloads/
