@@ -263,8 +263,9 @@
         .progress-card.failed { border-left: 3px solid var(--error); }
         .progress-header {
             display: flex;
-            align-items: center;
+            align-items: flex-start;
             justify-content: space-between;
+            gap: 12px;
             margin-bottom: 10px;
         }
         .progress-filename {
@@ -277,17 +278,25 @@
             overflow: hidden;
             text-overflow: ellipsis;
             white-space: nowrap;
-            max-width: 60%;
+            flex: 1 1 auto;
+            min-width: 0;
         }
         .progress-filename i { font-size: 18px; }
         .progress-filename .dl-icon { color: #3b82f6; }
         .progress-filename .ul-icon { color: #a78bfa; }
-        .progress-pct {
-            font-size: 20px;
-            font-weight: 700;
-            color: var(--text-primary);
-            font-variant-numeric: tabular-nums;
+        .progress-header-actions {
+            display: flex;
+            flex-wrap: wrap;
+            justify-content: flex-end;
+            gap: 8px;
+            flex-shrink: 0;
+            margin-left: auto;
         }
+        .progress-header-actions .btn-sm {
+            padding: 6px 12px;
+            min-height: 34px;
+        }
+
         .progress-bar-track {
             height: 8px;
             background: var(--bg-input);

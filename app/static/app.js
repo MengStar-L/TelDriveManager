@@ -252,6 +252,10 @@ window.fetch = async function (...args) {
 // ── Navigation ──
 let guidedPageSwitchTimer = null;
 let guidedPageSwitchTarget = '';
+let pageSwitchStageTimer = null;
+let pageSwitchCleanupTimer = null;
+let lastPageSwitchAt = 0;
+let lastPageSwitchName = '';
 
 function runPageSideEffects(name) {
     if (name === 'tasks') refreshPikPakTasks();
@@ -269,14 +273,23 @@ function switchPage(name, options = {}) {
         guidedPageSwitchTimer = null;
         guidedPageSwitchTarget = '';
     }
+    if (pageSwitchStageTimer) {
+        clearTimeout(pageSwitchStageTimer);
+        pageSwitchStageTimer = null;
+    }
+    if (pageSwitchCleanupTimer) {
+        clearTimeout(pageSwitchCleanupTimer);
+        pageSwitchCleanupTimer = null;
+    }
 
     if (targetPage.classList.contains('active')) {
         runPageSideEffects(name);
         return;
     }
 
-    const animated = !!options.animated;
     const pageContent = document.querySelector('.page-content');
+    const recentPageSwitch = Date.now() - lastPageSwitchAt < 900 && lastPageSwitchName !== name;
+    const animated = !!options.animated && !recentPageSwitch;
     const activateTargetPage = () => {
         document.querySelectorAll('.page').forEach(p => {
             p.classList.remove('active', 'page-enter', 'page-enter-active', 'page-exit');
@@ -285,8 +298,12 @@ function switchPage(name, options = {}) {
         targetPage.classList.add('active');
         const navItem = document.querySelector(`.nav-item[data-page="${name}"]`);
         if (navItem) navItem.classList.add('active');
+        lastPageSwitchAt = Date.now();
+        lastPageSwitchName = name;
         runPageSideEffects(name);
     };
+
+    if (pageContent) pageContent.classList.remove('page-switching');
 
     if (!animated || !pageContent) {
         activateTargetPage();
@@ -297,16 +314,19 @@ function switchPage(name, options = {}) {
     pageContent.classList.add('page-switching');
     if (currentPage) currentPage.classList.add('page-exit');
 
-    setTimeout(() => {
+    pageSwitchStageTimer = setTimeout(() => {
+        pageSwitchStageTimer = null;
         activateTargetPage();
         targetPage.classList.add('page-enter');
         requestAnimationFrame(() => targetPage.classList.add('page-enter-active'));
-        setTimeout(() => {
+        pageSwitchCleanupTimer = setTimeout(() => {
+            pageSwitchCleanupTimer = null;
             pageContent.classList.remove('page-switching');
             targetPage.classList.remove('page-enter', 'page-enter-active');
         }, 420);
     }, 140);
 }
+
 
 function scheduleGuidedPageSwitch(name, message = '', delay = 620) {
     const targetPage = document.getElementById('page-' + name);
@@ -647,7 +667,20 @@ function upsertA2TDTask(task) {
         nextTask.upload_progress = existingUpload;
     }
 
+    const completedByProgress = incomingDownload >= 100 && incomingUpload >= 100;
+    if (existingStatus === 'completed' || nextStatus === 'completed' || completedByProgress) {
+        nextTask.status = 'completed';
+        nextTask.download_progress = Math.max(100, existingDownload, incomingDownload);
+        nextTask.upload_progress = Math.max(100, existingUpload, incomingUpload);
+        nextTask.download_speed = '';
+        nextTask.upload_speed = '';
+        nextTask.eta_text = '';
+        nextTask.connections = 0;
+        nextTask.max_connections = 0;
+    }
+
     const progressed = getA2TDNumber(nextTask.download_progress) > existingDownload || getA2TDNumber(nextTask.upload_progress) > existingUpload;
+
     if (progressed || hasA2TDSpeed(nextTask.download_speed) || hasA2TDSpeed(nextTask.upload_speed)) {
         nextTask.last_progress_change_at = nowTs;
     } else {
@@ -1038,7 +1071,7 @@ function buildA2TDTaskCardContent(task) {
     const progress = Math.max(0, Math.min(100, getA2TDTaskProgress(task)));
     const filename = escapeA2TDHtml(task.filename || task.task_id || '未命名任务');
     const statusLabel = escapeA2TDHtml(getA2TDTaskStatusLabel(task.status));
-    const downloadProgress = Math.min(99.9, Number(task.download_progress || 0)).toFixed(1);
+    const downloadProgress = Math.min(task.status === 'completed' ? 100 : 99.9, Number(task.download_progress || 0)).toFixed(1);
     const uploadProgress = Math.min(task.status === 'completed' ? 100 : 99.9, Number(task.upload_progress || 0)).toFixed(1);
     const speedText = task.status === 'downloading'
         ? (task.download_speed || '0 B/s')
@@ -1053,7 +1086,9 @@ function buildA2TDTaskCardContent(task) {
         ? `${Math.max(0, getA2TDNumber(task.connections))}/${Math.max(1, getA2TDNumber(task.max_connections) || 1)}`
         : '--';
     const activityText = formatA2TDRelativeTime(task.last_event_at || task.updated_at || task.created_at);
-    const progressLabel = task.status === 'uploading' ? `上传 ${uploadProgress}%` : `下载 ${downloadProgress}%`;
+    const isUploadStage = task.status === 'uploading' || (task.status !== 'completed' && Number(task.upload_progress || 0) > 0 && Number(task.download_progress || 0) >= 100);
+    const progressLabel = task.status === 'completed' ? '' : (isUploadStage ? `上传 ${uploadProgress}%` : `下载 ${downloadProgress}%`);
+    const actionsHtml = getA2TDTaskActions(task);
 
     return {
         className: `progress-card ${task.status || 'pending'} ${mode === 'done' ? 'completed' : mode === 'upload' ? 'uploading' : 'downloading'} ${stalled ? 'stalled' : ''}`.trim(),
@@ -1063,11 +1098,13 @@ function buildA2TDTaskCardContent(task) {
                     <i class="ph ${stalled ? 'ph-warning-circle' : mode === 'upload' ? 'ph-upload-simple ul-icon' : task.status === 'completed' ? 'ph-check-circle' : 'ph-download-simple dl-icon'}" data-icon></i>
                     <span data-name>${filename}</span>
                 </div>
-                <div class="progress-pct" data-pct>${Math.round(progress)}%</div>
+                <div class="progress-header-actions">
+                    ${actionsHtml}
+                </div>
             </div>
             <div class="task-chip-row">
                 <span class="task-chip task-chip-status">${statusLabel}</span>
-                <span class="task-chip task-chip-phase">${escapeA2TDHtml(progressLabel)}</span>
+                ${progressLabel ? `<span class="task-chip task-chip-phase">${escapeA2TDHtml(progressLabel)}</span>` : ''}
                 ${stalled ? '<span class="task-chip task-chip-stalled"><i class="ph ph-warning"></i> 疑似卡住</span>' : ''}
             </div>
             <div class="progress-bar-track">
@@ -1097,12 +1134,10 @@ function buildA2TDTaskCardContent(task) {
             </div>
             ${task.error ? `<div class="task-note error"><i class="ph ph-warning-circle"></i><span>${escapeA2TDHtml(task.error)}</span></div>` : ''}
             ${!task.error && stalled ? '<div class="task-note warning"><i class="ph ph-warning"></i><span>连接长时间没有新数据，下载器会自动重试当前分块。</span></div>' : ''}
-            <div class="page-actions a2td-task-actions">
-                ${getA2TDTaskActions(task)}
-            </div>
         `
     };
 }
+
 
 function renderA2TDTasks(tasks) {
     const container = document.getElementById('progressBarsContainer');
