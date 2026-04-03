@@ -27,6 +27,9 @@ logger = logging.getLogger(__name__)
 DOWNLOAD_DIR = Path(__file__).resolve().parent.parent / "downloads"
 DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
+STALL_READ_TIMEOUT = 20
+CHUNK_MAX_RETRIES = 4
+
 
 class TaskStatus(str, Enum):
     PENDING = "pending"
@@ -144,12 +147,15 @@ class BuiltinDownloader:
         task_id: str = "",
         on_complete: Optional[Callable] = None,
         on_progress: Optional[Callable] = None,
+        base_dir: Optional[str] = None,
     ) -> DownloadTask:
         """添加下载任务"""
         if not task_id:
             task_id = uuid.uuid4().hex[:12]
 
-        dest_path = str(DOWNLOAD_DIR / filename)
+        dest_dir = Path(base_dir) if base_dir else DOWNLOAD_DIR
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        dest_path = str(dest_dir / filename)
         temp_path = dest_path + ".downloading"
 
         task = DownloadTask(
@@ -221,6 +227,10 @@ class BuiltinDownloader:
     async def remove_task(self, task_id: str):
         """移除任务记录（先取消再移除）"""
         await self.cancel(task_id)
+        self._tasks.pop(task_id, None)
+
+    def forget_task(self, task_id: str):
+        """仅从内存中移除任务，不触碰磁盘文件。"""
         self._tasks.pop(task_id, None)
 
     async def _notify_complete(self, task: DownloadTask):
@@ -357,18 +367,23 @@ class BuiltinDownloader:
                 headers["Range"] = f"bytes={chunk_state.downloaded}-"
 
             async with session.get(task.url, headers=headers, allow_redirects=True) as resp:
-                async for data in resp.content.iter_chunked(65536):
-                    # 检查取消
+                if resp.status not in (200, 206):
+                    raise Exception(f"HTTP {resp.status}")
+                while True:
                     if task._cancel_event.is_set():
                         return
-                    # 检查暂停
                     if not task._pause_event.is_set():
                         task.connections = 0
                         await task._pause_event.wait()
                         if task._cancel_event.is_set():
                             return
                         task.connections = 1
-
+                    try:
+                        data = await asyncio.wait_for(resp.content.read(65536), timeout=STALL_READ_TIMEOUT)
+                    except asyncio.TimeoutError:
+                        raise Exception(f"单连接超过 {STALL_READ_TIMEOUT}s 无数据")
+                    if not data:
+                        break
                     f.write(data)
                     n = len(data)
                     chunk_state.downloaded += n
@@ -378,49 +393,81 @@ class BuiltinDownloader:
         task.connections = 0
 
     async def _download_multi(self, task: DownloadTask, session: aiohttp.ClientSession):
-        """多连接并行下载"""
+        """多连接并行下载，支持分块级自动重试"""
         async def _worker(chunk: ChunkState):
             """单个分块的下载协程"""
-            current_pos = chunk.start + chunk.downloaded
-            if current_pos > chunk.end:
-                chunk.done = True
-                return
+            expected_size = chunk.end - chunk.start + 1
+            last_error: Optional[Exception] = None
 
-            headers = {"Range": f"bytes={current_pos}-{chunk.end}"}
+            for attempt in range(1, CHUNK_MAX_RETRIES + 1):
+                current_pos = chunk.start + chunk.downloaded
+                if current_pos > chunk.end or chunk.downloaded >= expected_size:
+                    chunk.done = True
+                    return
 
-            try:
-                task.connections += 1
-                async with session.get(task.url, headers=headers, allow_redirects=True) as resp:
-                    if resp.status not in (200, 206):
-                        raise Exception(f"HTTP {resp.status} for chunk {chunk.index}")
+                headers = {"Range": f"bytes={current_pos}-{chunk.end}"}
 
-                    with open(task.temp_path, "r+b") as f:
-                        f.seek(current_pos)
-                        async for data in resp.content.iter_chunked(65536):
-                            if task._cancel_event.is_set():
-                                return
-                            if not task._pause_event.is_set():
-                                task.connections = max(0, task.connections - 1)
-                                await task._pause_event.wait()
+                try:
+                    task.connections += 1
+                    async with session.get(task.url, headers=headers, allow_redirects=True) as resp:
+                        if resp.status != 206:
+                            raise Exception(f"分块 {chunk.index + 1} 收到异常状态码 {resp.status}")
+
+                        content_range = resp.headers.get("Content-Range", "")
+                        if not content_range.startswith(f"bytes {current_pos}-"):
+                            raise Exception(f"分块 {chunk.index + 1} Content-Range 异常: {content_range or 'missing'}")
+
+                        with open(task.temp_path, "r+b") as f:
+                            f.seek(current_pos)
+                            while True:
                                 if task._cancel_event.is_set():
                                     return
-                                task.connections += 1
+                                if not task._pause_event.is_set():
+                                    task.connections = max(0, task.connections - 1)
+                                    await task._pause_event.wait()
+                                    if task._cancel_event.is_set():
+                                        return
+                                    task.connections += 1
+                                try:
+                                    data = await asyncio.wait_for(resp.content.read(65536), timeout=STALL_READ_TIMEOUT)
+                                except asyncio.TimeoutError:
+                                    raise Exception(f"分块 {chunk.index + 1} 超过 {STALL_READ_TIMEOUT}s 无数据")
+                                if not data:
+                                    break
+                                f.write(data)
+                                n = len(data)
+                                chunk.downloaded += n
+                                task.downloaded += n
 
-                            f.write(data)
-                            n = len(data)
-                            chunk.downloaded += n
-                            task.downloaded += n
-            finally:
-                task.connections = max(0, task.connections - 1)
+                    if chunk.downloaded < expected_size:
+                        raise Exception(
+                            f"分块 {chunk.index + 1} 下载不完整: {chunk.downloaded}/{expected_size} bytes"
+                        )
 
-            chunk.done = True
+                    chunk.done = True
+                    return
+                except Exception as exc:
+                    last_error = exc
+                    if task._cancel_event.is_set():
+                        raise
+                    if attempt >= CHUNK_MAX_RETRIES:
+                        raise
+                    wait_seconds = min(2 ** (attempt - 1), 5)
+                    logger.warning(
+                        f"[下载器] 分块 {chunk.index + 1}/{len(task.chunks)} 失败: {exc}，"
+                        f"{wait_seconds}s 后第 {attempt} 次重试"
+                    )
+                    await asyncio.sleep(wait_seconds)
+                finally:
+                    task.connections = max(0, task.connections - 1)
 
-        # 并行启动所有分块
+            if last_error:
+                raise last_error
+
         workers = [asyncio.create_task(_worker(c)) for c in task.chunks]
         try:
             await asyncio.gather(*workers)
         except Exception:
-            # 取消所有未完成的 worker
             for w in workers:
                 if not w.done():
                     w.cancel()
@@ -431,7 +478,7 @@ class BuiltinDownloader:
         """定期计算速度和 ETA，触发进度回调"""
         try:
             while task.status in (TaskStatus.DOWNLOADING, TaskStatus.PAUSED):
-                await asyncio.sleep(1.0)
+                await asyncio.sleep(0.5)
 
                 if task.status == TaskStatus.PAUSED:
                     continue
@@ -475,6 +522,17 @@ class BuiltinDownloader:
         try:
             if os.path.exists(task.dest_path) and task.status != TaskStatus.COMPLETED:
                 os.remove(task.dest_path)
+        except Exception:
+            pass
+        self._cleanup_empty_parent(task.dest_path)
+
+    def _cleanup_empty_parent(self, filepath: str):
+        try:
+            root = DOWNLOAD_DIR.resolve()
+            current = Path(filepath).resolve().parent
+            while current != root and root in current.parents:
+                current.rmdir()
+                current = current.parent
         except Exception:
             pass
 

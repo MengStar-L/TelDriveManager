@@ -310,7 +310,186 @@
             gap: 4px;
         }
         .progress-meta .speed { color: var(--accent); font-weight: 600; }
+
+        /* ── A2TD 体验增强 ── */
+        .btn {
+            position: relative;
+            overflow: hidden;
+            transform: translateY(0) scale(1);
+            transition: transform 0.18s ease, box-shadow 0.18s ease, background 0.18s ease, border-color 0.18s ease, color 0.18s ease, opacity 0.18s ease;
+        }
+        .btn::after {
+            content: '';
+            position: absolute;
+            inset: 0;
+            background: linear-gradient(110deg, transparent 0%, rgba(255,255,255,0.18) 45%, transparent 100%);
+            transform: translateX(-120%);
+            transition: transform 0.45s ease;
+            pointer-events: none;
+        }
+        .btn:hover::after { transform: translateX(120%); }
+        .btn:hover { transform: translateY(-2px) scale(1.01); }
+        .btn:active { transform: translateY(0) scale(0.96); }
+        .btn.is-loading { cursor: wait; opacity: 0.9; }
+        .btn-action-success { color: var(--success); }
+        .btn-action-warning { color: var(--warning); }
+        .btn-action-danger { color: var(--error); }
+        .btn-action-neutral { color: var(--text-secondary); }
+
+        .app-toast-container {
+            position: fixed;
+            top: 24px;
+            right: 24px;
+            z-index: 1200;
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+            pointer-events: none;
+        }
+        .app-toast {
+            min-width: 240px;
+            max-width: 360px;
+            padding: 12px 14px;
+            border-radius: 14px;
+            background: rgba(15, 23, 42, 0.94);
+            color: #fff;
+            box-shadow: 0 12px 32px rgba(15, 23, 42, 0.18);
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            font-size: 13px;
+            line-height: 1.5;
+            transform: translateY(-10px);
+            opacity: 0;
+            transition: opacity 0.2s ease, transform 0.2s ease;
+        }
+        .app-toast.show { opacity: 1; transform: translateY(0); }
+        .app-toast.success { background: rgba(6, 95, 70, 0.94); }
+        .app-toast.error { background: rgba(153, 27, 27, 0.96); }
+        .app-toast.warning { background: rgba(146, 64, 14, 0.96); }
+        .app-toast i { font-size: 18px; }
+
+        .progress-card {
+            position: relative;
+            overflow: hidden;
+            margin-bottom: 14px;
+            border-radius: 16px;
+            box-shadow: 0 10px 24px rgba(15, 23, 42, 0.04);
+            transition: transform 0.18s ease, box-shadow 0.18s ease, border-color 0.18s ease;
+        }
+        .progress-card:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 16px 28px rgba(15, 23, 42, 0.08);
+        }
+        .progress-card.paused { border-left: 3px solid #f59e0b; }
+        .progress-card.failed { border-left: 3px solid var(--error); border-color: rgba(239, 68, 68, 0.22); }
+        .progress-card.pending { border-left: 3px solid #94a3b8; }
+        .progress-card.stalled { border-color: rgba(245, 158, 11, 0.36); box-shadow: 0 14px 32px rgba(245, 158, 11, 0.12); }
+        .progress-card.stalled::before {
+            content: '';
+            position: absolute;
+            inset: 0;
+            background: linear-gradient(90deg, rgba(245,158,11,0.08), transparent 36%);
+            pointer-events: none;
+        }
+        .progress-header { margin-bottom: 12px; }
+        .progress-bar-track {
+            height: 10px;
+            border-radius: 999px;
+            margin-bottom: 14px;
+            background: linear-gradient(180deg, #edf2f7, #e2e8f0);
+        }
+        .progress-bar-fill {
+            border-radius: 999px;
+            transition: width 0.85s linear;
+            box-shadow: 0 4px 12px rgba(59, 130, 246, 0.18);
+        }
+        .progress-bar-fill::after { animation: progressShine 1.4s ease-in-out infinite; }
+        .progress-bar-fill.done::after { display: none; }
+
+        .task-chip-row {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+            margin-bottom: 12px;
+        }
+        .task-chip {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            padding: 5px 10px;
+            border-radius: 999px;
+            font-size: 12px;
+            font-weight: 600;
+            background: #f8fafc;
+            border: 1px solid #e2e8f0;
+            color: #475569;
+        }
+        .task-chip-phase { color: var(--accent); background: rgba(59,130,246,0.08); border-color: rgba(59,130,246,0.16); }
+        .task-chip-stalled { color: #b45309; background: rgba(245,158,11,0.12); border-color: rgba(245,158,11,0.2); }
+
+        .progress-meta-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+            gap: 10px;
+        }
+        .task-meta-cell {
+            background: #f8fafc;
+            border: 1px solid rgba(226, 232, 240, 0.8);
+            border-radius: 12px;
+            padding: 10px 12px;
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+            min-width: 0;
+        }
+        .task-meta-cell.accent {
+            background: rgba(59,130,246,0.08);
+            border-color: rgba(59,130,246,0.14);
+        }
+        .task-meta-cell.wide { grid-column: span 2; }
+        .task-meta-label {
+            font-size: 11px;
+            color: var(--text-dim);
+            letter-spacing: 0.04em;
+        }
+        .task-meta-value {
+            font-size: 13px;
+            color: var(--text-primary);
+            font-weight: 600;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+        .task-note {
+            margin-top: 12px;
+            padding: 10px 12px;
+            border-radius: 12px;
+            display: flex;
+            align-items: flex-start;
+            gap: 8px;
+            font-size: 12px;
+            line-height: 1.5;
+        }
+        .task-note.warning {
+            color: #92400e;
+            background: rgba(245, 158, 11, 0.12);
+            border: 1px solid rgba(245, 158, 11, 0.18);
+        }
+        .task-note.error {
+            color: #b91c1c;
+            background: rgba(239, 68, 68, 0.1);
+            border: 1px solid rgba(239, 68, 68, 0.18);
+        }
+        .a2td-task-actions {
+            display: flex;
+            flex-wrap: wrap;
+            justify-content: flex-end;
+            gap: 8px;
+            margin-top: 14px;
+        }
     </style>
+
 </head>
 <body>
     <div class="layout">
@@ -542,12 +721,13 @@
                         <div class="card-header" style="flex-wrap: wrap; gap: 10px;">
                             <h3><i class="ph ph-hard-drives"></i> 内置引擎上传拉取队列</h3>
                             <div class="page-actions" style="display:flex; flex-wrap: wrap; gap:8px;">
-                                <button class="btn btn-ghost btn-sm" onclick="a2tdBulkAction('resume-all')" style="color:var(--success);"><i class="ph ph-play"></i> 恢复全部</button>
-                                <button class="btn btn-ghost btn-sm" onclick="a2tdBulkAction('pause-all')" style="color:var(--warning);"><i class="ph ph-pause"></i> 暂停全部</button>
-                                <button class="btn btn-ghost btn-sm" onclick="a2tdBulkAction('clear-failed')" style="color:var(--error);"><i class="ph ph-warning-circle"></i> 清理失败</button>
-                                <button class="btn btn-ghost btn-sm" onclick="a2tdBulkAction('clear-completed')"><i class="ph ph-check-circle"></i> 清理已完成</button>
+                                <button class="btn btn-ghost btn-sm btn-action btn-action-success" data-bulk-action="resume-all" onclick="a2tdBulkAction('resume-all')"><i class="ph ph-play"></i> 恢复全部</button>
+                                <button class="btn btn-ghost btn-sm btn-action btn-action-warning" data-bulk-action="pause-all" onclick="a2tdBulkAction('pause-all')"><i class="ph ph-pause"></i> 暂停全部</button>
+                                <button class="btn btn-ghost btn-sm btn-action btn-action-danger" data-bulk-action="clear-failed" onclick="a2tdBulkAction('clear-failed')"><i class="ph ph-warning-circle"></i> 清理失败</button>
+                                <button class="btn btn-ghost btn-sm btn-action btn-action-neutral" data-bulk-action="clear-completed" onclick="a2tdBulkAction('clear-completed')"><i class="ph ph-check-circle"></i> 清理已完成</button>
                                 <div style="width:1px; background:var(--border); margin: 0 4px;"></div>
-                                <button class="btn btn-ghost btn-sm" onclick="a2tdBulkAction('clear-all')" style="color:var(--error);"><i class="ph ph-trash"></i> 强杀清空</button>
+                                <button class="btn btn-ghost btn-sm btn-action btn-action-danger" data-bulk-action="clear-all" onclick="a2tdBulkAction('clear-all')"><i class="ph ph-trash"></i> 强杀清空</button>
+
                             </div>
                         </div>
                         <div class="card-body" style="padding:16px">
@@ -810,7 +990,11 @@
         </div>
     </div>
 
-    <script src="/static/app.js?v=20260402"></script>
+    <div id="a2tdToastContainer" class="app-toast-container"></div>
+
+    <script src="/static/app.js?v=20260403b"></script>
+
+
 
     <!-- Setup Wizard Overlay -->
     <div id="setupWizard" class="wizard-overlay">

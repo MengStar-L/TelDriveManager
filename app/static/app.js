@@ -397,13 +397,42 @@ function handleWSMessage(msg) {
 
     // ── 内置引擎进度条 ──
     if (msg.type === "download_progress") {
-        updateProgressBar(msg.task_id, msg.filename, 'download', msg.progress, msg.speed, msg.downloaded, msg.total, msg.eta, msg.connections, msg.status);
+        updateProgressBar(
+            msg.task_id,
+            msg.filename,
+            'download',
+            msg.progress,
+            msg.speed,
+            msg.downloaded,
+            msg.total,
+            msg.eta,
+            msg.connections,
+            msg.status,
+            msg.max_connections,
+            msg.downloaded_bytes,
+            msg.total_bytes
+        );
         return;
     }
     if (msg.type === "upload_progress") {
-        updateProgressBar(msg.task_id, msg.filename, 'upload', msg.progress, '', msg.uploaded, msg.total, '', 0, 'uploading');
+        updateProgressBar(
+            msg.task_id,
+            msg.filename,
+            'upload',
+            msg.progress,
+            msg.speed,
+            msg.uploaded,
+            msg.total,
+            '',
+            0,
+            'uploading',
+            0,
+            msg.uploaded_bytes,
+            msg.total_bytes
+        );
         return;
     }
+
     if (msg.type === "upload_done") {
         updateProgressBar(msg.task_id, msg.filename, 'done', 100, '', '', '', '', 0, 'completed');
         return;
@@ -445,9 +474,18 @@ function handleWSMessage(msg) {
 
 const a2tdTaskStore = new Map();
 const a2tdRemovedTaskIds = new Set();
+const a2tdPendingTaskActions = new Map();
+let a2tdRenderScheduled = false;
 
 function normalizeA2TDTaskId(taskId, fallback = '') {
     return String(taskId || fallback || 'unknown');
+}
+
+function parseA2TDTimestamp(value) {
+    if (!value) return 0;
+    if (typeof value === 'number') return value;
+    const ts = new Date(value).getTime();
+    return Number.isFinite(ts) ? ts : 0;
 }
 
 function rememberRemovedA2TDTask(taskId, fallback = '') {
@@ -464,30 +502,79 @@ function getA2TDNumber(value) {
     return Number.isFinite(num) ? num : 0;
 }
 
+function hasA2TDSpeed(speedText) {
+    const value = String(speedText || '').trim();
+    return !!value && value !== '0 B/s';
+}
+
+function queueA2TDTaskRender() {
+    if (a2tdRenderScheduled) return;
+    a2tdRenderScheduled = true;
+    const runner = () => {
+        a2tdRenderScheduled = false;
+        renderA2TDTasks(getA2TDTaskList());
+    };
+    if (typeof window !== 'undefined' && typeof window.requestAnimationFrame === 'function') {
+        window.requestAnimationFrame(runner);
+    } else {
+        setTimeout(runner, 16);
+    }
+}
+
+function showA2TDToast(message, type = 'info') {
+    const container = document.getElementById('a2tdToastContainer');
+    if (!container || !message) return;
+    const toast = document.createElement('div');
+    toast.className = `app-toast ${type}`;
+    const icons = {
+        success: 'ph-check-circle',
+        error: 'ph-warning-circle',
+        warning: 'ph-warning',
+        info: 'ph-info'
+    };
+    toast.innerHTML = `<i class="ph ${icons[type] || icons.info}"></i><span>${escapeA2TDHtml(message)}</span>`;
+    container.appendChild(toast);
+    requestAnimationFrame(() => toast.classList.add('show'));
+    setTimeout(() => {
+        toast.classList.remove('show');
+        setTimeout(() => toast.remove(), 220);
+    }, 2400);
+}
+
 function getA2TDTaskList() {
     return Array.from(a2tdTaskStore.values()).sort((a, b) => {
-        const timeA = String(a.updated_at || a.created_at || '');
-        const timeB = String(b.updated_at || b.created_at || '');
-        return timeB.localeCompare(timeA);
+        const timeA = getA2TDNumber(a.last_event_at || parseA2TDTimestamp(a.updated_at) || parseA2TDTimestamp(a.created_at));
+        const timeB = getA2TDNumber(b.last_event_at || parseA2TDTimestamp(b.updated_at) || parseA2TDTimestamp(b.created_at));
+        return timeB - timeA;
     });
 }
 
 function renderA2TDTaskStore() {
-    renderA2TDTasks(getA2TDTaskList());
+    queueA2TDTaskRender();
 }
 
 function setA2TDTasks(tasks) {
+    const previousStore = new Map(a2tdTaskStore);
     a2tdTaskStore.clear();
     if (Array.isArray(tasks)) {
         tasks.forEach(task => {
             if (!task) return;
             const taskId = normalizeA2TDTaskId(task.task_id, task.filename);
             if (isA2TDTaskRemoved(taskId) || task.status === 'cancelled') return;
-            a2tdTaskStore.set(taskId, { ...task, task_id: taskId });
+            const existing = previousStore.get(taskId) || {};
+            const eventTs = parseA2TDTimestamp(task.updated_at || task.created_at) || getA2TDNumber(existing.last_event_at) || Date.now();
+            a2tdTaskStore.set(taskId, {
+                ...existing,
+                ...task,
+                task_id: taskId,
+                last_event_at: eventTs,
+                last_progress_change_at: getA2TDNumber(existing.last_progress_change_at) || eventTs,
+            });
         });
     }
     renderA2TDTaskStore();
 }
+
 
 function upsertA2TDTask(task) {
     if (!task) return;
@@ -499,7 +586,13 @@ function upsertA2TDTask(task) {
     if (isA2TDTaskRemoved(taskId)) return;
 
     const existing = a2tdTaskStore.get(taskId) || {};
-    const nextTask = { ...existing, ...task, task_id: taskId };
+    const nowTs = Date.now();
+    const nextTask = {
+        ...existing,
+        ...task,
+        task_id: taskId,
+        last_event_at: getA2TDNumber(task.last_event_at) || nowTs,
+    };
     const existingStatus = existing.status || '';
     const nextStatus = nextTask.status || '';
     const existingDownload = getA2TDNumber(existing.download_progress);
@@ -514,6 +607,13 @@ function upsertA2TDTask(task) {
         nextTask.upload_progress = existingUpload;
     }
 
+    const progressed = getA2TDNumber(nextTask.download_progress) > existingDownload || getA2TDNumber(nextTask.upload_progress) > existingUpload;
+    if (progressed || hasA2TDSpeed(nextTask.download_speed) || hasA2TDSpeed(nextTask.upload_speed)) {
+        nextTask.last_progress_change_at = nowTs;
+    } else {
+        nextTask.last_progress_change_at = getA2TDNumber(existing.last_progress_change_at) || nowTs;
+    }
+
     a2tdTaskStore.set(taskId, nextTask);
     renderA2TDTaskStore();
 }
@@ -522,46 +622,78 @@ function removeA2TDTask(taskId) {
     if (!taskId) return;
     const normalizedTaskId = normalizeA2TDTaskId(taskId);
     rememberRemovedA2TDTask(normalizedTaskId);
+    a2tdPendingTaskActions.delete(normalizedTaskId);
     a2tdTaskStore.delete(normalizedTaskId);
     renderA2TDTaskStore();
 }
 
-function updateProgressBar(taskId, filename, mode, progress, speed, downloaded, total, eta, connections, status) {
+function updateProgressBar(taskId, filename, mode, progress, speed, transferredText, totalText, eta, connections, status, maxConnections = 0, transferredBytes = 0, totalBytes = 0) {
     const normalizedTaskId = normalizeA2TDTaskId(taskId, filename);
     if (isA2TDTaskRemoved(normalizedTaskId, filename)) return;
 
     const existing = a2tdTaskStore.get(normalizedTaskId) || {};
     const existingDownload = getA2TDNumber(existing.download_progress);
     const existingUpload = getA2TDNumber(existing.upload_progress);
-    const incomingDownload = getA2TDNumber(progress);
+    const incomingProgress = getA2TDNumber(progress);
+    const nowTs = Date.now();
     const nextTask = {
         ...existing,
         task_id: normalizedTaskId,
         filename: filename || existing.filename || normalizedTaskId,
         updated_at: existing.updated_at,
+        last_event_at: nowTs,
+        transferred_text: transferredText || existing.transferred_text || '',
+        total_text: totalText || existing.total_text || existing.file_size || '',
+        transferred_bytes: Math.max(getA2TDNumber(existing.transferred_bytes), getA2TDNumber(transferredBytes)),
+        total_bytes: Math.max(getA2TDNumber(existing.total_bytes), getA2TDNumber(totalBytes)),
     };
 
     if (mode === 'upload') {
+        const previousBytes = getA2TDNumber(existing.transferred_bytes);
+        const previousTs = getA2TDNumber(existing.last_transfer_sample_at);
+        let uploadSpeed = speed || existing.upload_speed || '';
+        if (!uploadSpeed && getA2TDNumber(transferredBytes) > previousBytes && previousTs > 0) {
+            const elapsed = (nowTs - previousTs) / 1000;
+            if (elapsed > 0) uploadSpeed = `${formatBytes((getA2TDNumber(transferredBytes) - previousBytes) / elapsed)}/s`;
+        }
         nextTask.status = status || 'uploading';
         nextTask.download_progress = Math.max(100, existingDownload);
-        nextTask.upload_progress = Math.max(existingUpload, getA2TDNumber(progress));
-        nextTask.upload_speed = speed || existing.upload_speed || '';
-        nextTask.file_size = total || existing.file_size || '';
+        nextTask.upload_progress = Math.max(existingUpload, incomingProgress);
+        nextTask.upload_speed = uploadSpeed;
+        nextTask.file_size = totalText || existing.file_size || '';
+        nextTask.eta_text = '';
+        nextTask.connections = 0;
+        nextTask.max_connections = 0;
+        nextTask.last_transfer_sample_at = nowTs;
+        nextTask.last_progress_change_at = nextTask.upload_progress > existingUpload || hasA2TDSpeed(uploadSpeed)
+            ? nowTs
+            : (getA2TDNumber(existing.last_progress_change_at) || nowTs);
     } else if (mode === 'done') {
         nextTask.status = 'completed';
         nextTask.download_progress = 100;
         nextTask.upload_progress = 100;
         nextTask.download_speed = '';
         nextTask.upload_speed = '';
+        nextTask.eta_text = '';
+        nextTask.connections = 0;
+        nextTask.max_connections = 0;
+        nextTask.last_progress_change_at = nowTs;
     } else {
         let nextStatus = status || existing.status || 'downloading';
-        if (existing.status === 'paused' && nextStatus === 'downloading' && incomingDownload <= existingDownload) {
+        if (existing.status === 'paused' && nextStatus === 'downloading' && incomingProgress <= existingDownload) {
             nextStatus = 'paused';
         }
         nextTask.status = nextStatus;
-        nextTask.download_progress = Math.max(existingDownload, incomingDownload);
+        nextTask.download_progress = Math.max(existingDownload, incomingProgress);
         nextTask.download_speed = speed || (nextStatus === 'paused' ? '' : existing.download_speed || '');
-        nextTask.file_size = total || existing.file_size || '';
+        nextTask.file_size = totalText || existing.file_size || '';
+        nextTask.downloaded_text = transferredText || existing.downloaded_text || '';
+        nextTask.eta_text = eta || existing.eta_text || '';
+        nextTask.connections = Math.max(0, getA2TDNumber(connections));
+        nextTask.max_connections = Math.max(getA2TDNumber(existing.max_connections), getA2TDNumber(maxConnections), getA2TDNumber(connections));
+        nextTask.last_progress_change_at = nextTask.download_progress > existingDownload || hasA2TDSpeed(nextTask.download_speed)
+            ? nowTs
+            : (getA2TDNumber(existing.last_progress_change_at) || nowTs);
     }
 
     upsertA2TDTask(nextTask);
@@ -571,6 +703,7 @@ function updateProgressBar(taskId, filename, mode, progress, speed, downloaded, 
         switchPage('aria2teldrive');
     }
 }
+
 
 
 
@@ -618,17 +751,29 @@ function renderA2TDStats(stats) {
         document.getElementById('sysCpuStat').textContent = `${stats.cpu.percent.toFixed(1)}%`;
     }
     if (stats.disk) {
-        const totalStr = formatBytes(stats.disk.total || 0, 0);
-        const freeStr = formatBytes(stats.disk.free || 0, 0);
+        const totalBytes = stats.disk.total !== undefined
+            ? stats.disk.total
+            : getA2TDNumber(stats.disk.total_gb) * 1024 * 1024 * 1024;
+        const freeBytes = stats.disk.free !== undefined
+            ? stats.disk.free
+            : getA2TDNumber(stats.disk.free_gb) * 1024 * 1024 * 1024;
+        const totalStr = formatBytes(totalBytes || 0, 0);
+        const freeStr = formatBytes(freeBytes || 0, 0);
         document.getElementById('sysDiskStat').textContent = `${freeStr} 可用 / ${totalStr}`;
     }
     if (stats.download_speed !== undefined) {
-        document.getElementById('sysDownloadStat').textContent = `${formatBytes(stats.download_speed)}/s`;
+        const detail = stats.download_speed_detail || {};
+        const aria2Speed = formatBytes(getA2TDNumber(detail.aria2));
+        const builtinSpeed = formatBytes(getA2TDNumber(detail.builtin));
+        const el = document.getElementById('sysDownloadStat');
+        el.textContent = `${formatBytes(stats.download_speed)}/s`;
+        el.title = `Aria2: ${aria2Speed}/s | 内置下载器: ${builtinSpeed}/s`;
     }
     if (stats.upload_speed !== undefined) {
         document.getElementById('sysUploadStat').textContent = `${formatBytes(stats.upload_speed)}/s`;
     }
 }
+
 
 function escapeA2TDHtml(value) {
     return String(value ?? '')
@@ -652,6 +797,16 @@ function getA2TDTaskStatusLabel(status) {
     return map[status] || (status || '未知状态');
 }
 
+function formatA2TDRelativeTime(timestamp) {
+    const ts = parseA2TDTimestamp(timestamp);
+    if (!ts) return '刚刚';
+    const diff = Math.max(0, Date.now() - ts);
+    if (diff < 5000) return '刚刚';
+    if (diff < 60000) return `${Math.floor(diff / 1000)} 秒前`;
+    if (diff < 3600000) return `${Math.floor(diff / 60000)} 分钟前`;
+    return `${Math.floor(diff / 3600000)} 小时前`;
+}
+
 function getA2TDTaskProgress(task) {
     if (task.status === 'completed') return 100;
     let progress = 0;
@@ -672,36 +827,58 @@ function getA2TDTaskMode(task) {
     return 'download';
 }
 
+function isA2TDUploadReadyTask(task) {
+    return !task.aria2_gid && (
+        getA2TDNumber(task.download_progress) >= 100 ||
+        getA2TDNumber(task.upload_progress) > 0
+    );
+}
+
+function isA2TDTaskStalled(task) {
+
+    if (task.status !== 'downloading') return false;
+    if (getA2TDNumber(task.download_progress) >= 100) return false;
+    const stalledFor = Date.now() - getA2TDNumber(task.last_progress_change_at);
+    return !hasA2TDSpeed(task.download_speed) && stalledFor >= 15000;
+}
+
+function getA2TDActionButton(taskId, action, label, icon, tone = 'neutral') {
+    const encodedTaskId = encodeURIComponent(taskId);
+    return `<button class="btn btn-ghost btn-sm btn-action btn-action-${tone}" data-task-id="${escapeA2TDHtml(taskId)}" data-task-action="${action}" onclick="a2tdAction('${encodedTaskId}', '${action}')"><i class="ph ${icon}"></i> ${label}</button>`;
+}
+
 function getA2TDTaskActions(task) {
-    const taskId = encodeURIComponent(task.task_id);
+    const pendingAction = a2tdPendingTaskActions.get(task.task_id);
+    if (pendingAction) {
+        return `<button class="btn btn-ghost btn-sm btn-action is-loading" disabled><span class="spinner"></span> ${escapeA2TDHtml(getA2TDTaskStatusLabel(task.status))}处理中</button>`;
+    }
+
     if (task.status === 'downloading') {
         return `
-            <button class="btn btn-ghost btn-sm" onclick="a2tdAction('${taskId}', 'pause')"><i class="ph ph-pause"></i> 暂停</button>
-            <button class="btn btn-ghost btn-sm" onclick="a2tdAction('${taskId}', 'cancel')" style="color:var(--error);"><i class="ph ph-x"></i> 取消</button>
+            ${getA2TDActionButton(task.task_id, 'pause', '暂停', 'ph-pause', 'warning')}
+            ${getA2TDActionButton(task.task_id, 'cancel', '取消', 'ph-x', 'danger')}
         `;
     }
     if (task.status === 'paused') {
         return `
-            <button class="btn btn-ghost btn-sm" onclick="a2tdAction('${taskId}', 'resume')" style="color:var(--success);"><i class="ph ph-play"></i> 恢复</button>
-            <button class="btn btn-ghost btn-sm" onclick="a2tdAction('${taskId}', 'cancel')" style="color:var(--error);"><i class="ph ph-x"></i> 取消</button>
+            ${getA2TDActionButton(task.task_id, 'resume', isA2TDUploadReadyTask(task) ? '继续上传' : '恢复', 'ph-play', 'success')}
+            ${getA2TDActionButton(task.task_id, 'cancel', '取消', 'ph-x', 'danger')}
         `;
     }
     if (task.status === 'uploading') {
-        return `
-            <button class="btn btn-ghost btn-sm" onclick="a2tdAction('${taskId}', 'retry')" style="color:var(--warning);"><i class="ph ph-arrow-clockwise"></i> 重传</button>
-            <button class="btn btn-ghost btn-sm" onclick="a2tdAction('${taskId}', 'cancel')" style="color:var(--error);"><i class="ph ph-x"></i> 取消</button>
-        `;
+        return getA2TDActionButton(task.task_id, 'retry', '重传', 'ph-arrow-clockwise', 'warning');
     }
+
     if (task.status === 'failed') {
         return `
-            <button class="btn btn-ghost btn-sm" onclick="a2tdAction('${taskId}', 'retry')" style="color:var(--warning);"><i class="ph ph-arrow-clockwise"></i> 重试</button>
-            <button class="btn btn-ghost btn-sm" onclick="a2tdAction('${taskId}', 'delete')" style="color:var(--error);"><i class="ph ph-trash"></i> 删除</button>
+            ${getA2TDActionButton(task.task_id, 'retry', '重试', 'ph-arrow-clockwise', 'warning')}
+            ${getA2TDActionButton(task.task_id, 'delete', '删除', 'ph-trash', 'danger')}
         `;
     }
     if (task.status === 'pending') {
-        return `<button class="btn btn-ghost btn-sm" onclick="a2tdAction('${taskId}', 'cancel')" style="color:var(--error);"><i class="ph ph-x"></i> 取消</button>`;
+        return getA2TDActionButton(task.task_id, 'cancel', '取消', 'ph-x', 'danger');
     }
-    return `<button class="btn btn-ghost btn-sm" onclick="a2tdAction('${taskId}', 'delete')"><i class="ph ph-trash"></i> 删除记录</button>`;
+    return getA2TDActionButton(task.task_id, 'delete', '删除记录', 'ph-trash', 'neutral');
 }
 
 function renderA2TDTasks(tasks) {
@@ -719,81 +896,142 @@ function renderA2TDTasks(tasks) {
 
     container.style.display = 'block';
     placeholder.style.display = 'none';
-    barsEl.innerHTML = '';
 
+    const fragment = document.createDocumentFragment();
     tasks.forEach(task => {
         const mode = getA2TDTaskMode(task);
+        const stalled = isA2TDTaskStalled(task);
         const progress = Math.max(0, Math.min(100, getA2TDTaskProgress(task)));
         const filename = escapeA2TDHtml(task.filename || task.task_id || '未命名任务');
         const statusLabel = escapeA2TDHtml(getA2TDTaskStatusLabel(task.status));
         const downloadProgress = Math.min(99.9, Number(task.download_progress || 0)).toFixed(1);
         const uploadProgress = Math.min(task.status === 'completed' ? 100 : 99.9, Number(task.upload_progress || 0)).toFixed(1);
-        const speedText = task.status === 'downloading' ? (task.download_speed || '') : (task.upload_speed || '');
-        const sizeText = task.file_size || '';
-        const extraParts = [`状态：${statusLabel}`];
-        if (task.status === 'uploading') extraParts.push(`上传 ${uploadProgress}%`);
-        else if (task.status !== 'completed') extraParts.push(`下载 ${downloadProgress}%`);
-        if (task.updated_at) extraParts.push(`更新于 ${escapeA2TDHtml(task.updated_at)}`);
+        const speedText = task.status === 'downloading'
+            ? (task.download_speed || '0 B/s')
+            : (task.status === 'uploading' ? (task.upload_speed || '计算中') : '--');
+        const transferredText = task.status === 'uploading'
+            ? `${task.transferred_text || '0 B'} / ${task.total_text || task.file_size || '--'}`
+            : `${task.downloaded_text || '--'} / ${task.total_text || task.file_size || '--'}`;
+        const etaText = stalled
+            ? '已无进度超过 15 秒'
+            : (task.status === 'downloading' ? (task.eta_text || '--') : '--');
+        const connectionText = task.status === 'downloading' || task.status === 'paused'
+            ? `${Math.max(0, getA2TDNumber(task.connections))}/${Math.max(1, getA2TDNumber(task.max_connections) || 1)}`
+            : '--';
+        const activityText = formatA2TDRelativeTime(task.last_event_at || task.updated_at || task.created_at);
+        const progressLabel = task.status === 'uploading' ? `上传 ${uploadProgress}%` : `下载 ${downloadProgress}%`;
 
         const card = document.createElement('div');
         card.id = 'pb-' + String(task.task_id || 'unknown').replace(/[^a-zA-Z0-9_-]/g, '_');
-        card.className = 'progress-card ' + (task.status === 'completed' ? 'completed' : mode === 'upload' ? 'uploading' : 'downloading');
+        card.className = `progress-card ${task.status || 'pending'} ${mode === 'done' ? 'completed' : mode === 'upload' ? 'uploading' : 'downloading'} ${stalled ? 'stalled' : ''}`;
         card.innerHTML = `
             <div class="progress-header">
                 <div class="progress-filename">
-                    <i class="ph ${mode === 'upload' ? 'ph-upload-simple ul-icon' : task.status === 'completed' ? 'ph-check-circle' : 'ph-download-simple dl-icon'}" data-icon></i>
+                    <i class="ph ${stalled ? 'ph-warning-circle' : mode === 'upload' ? 'ph-upload-simple ul-icon' : task.status === 'completed' ? 'ph-check-circle' : 'ph-download-simple dl-icon'}" data-icon></i>
                     <span data-name>${filename}</span>
                 </div>
                 <div class="progress-pct" data-pct>${Math.round(progress)}%</div>
             </div>
+            <div class="task-chip-row">
+                <span class="task-chip task-chip-status">${statusLabel}</span>
+                <span class="task-chip task-chip-phase">${escapeA2TDHtml(progressLabel)}</span>
+                ${stalled ? '<span class="task-chip task-chip-stalled"><i class="ph ph-warning"></i> 疑似卡住</span>' : ''}
+            </div>
             <div class="progress-bar-track">
                 <div class="progress-bar-fill ${mode === 'done' ? 'done' : mode}" data-bar style="width:${progress}%"></div>
             </div>
-            <div class="progress-meta">
-                <span data-size>${escapeA2TDHtml(sizeText)}</span>
-                <span class="speed" data-speed>${escapeA2TDHtml(speedText)}</span>
-                <span data-extra>${extraParts.join(' · ')}</span>
+            <div class="progress-meta-grid">
+                <div class="task-meta-cell">
+                    <span class="task-meta-label">已传输</span>
+                    <span class="task-meta-value">${escapeA2TDHtml(transferredText)}</span>
+                </div>
+                <div class="task-meta-cell accent">
+                    <span class="task-meta-label">实时速度</span>
+                    <span class="task-meta-value">${escapeA2TDHtml(speedText)}</span>
+                </div>
+                <div class="task-meta-cell">
+                    <span class="task-meta-label">连接数</span>
+                    <span class="task-meta-value">${escapeA2TDHtml(connectionText)}</span>
+                </div>
+                <div class="task-meta-cell">
+                    <span class="task-meta-label">预计剩余</span>
+                    <span class="task-meta-value">${escapeA2TDHtml(etaText)}</span>
+                </div>
+                <div class="task-meta-cell wide">
+                    <span class="task-meta-label">最近活动</span>
+                    <span class="task-meta-value">${escapeA2TDHtml(activityText)}</span>
+                </div>
             </div>
-            ${task.error ? `<div style="margin-top:10px; color:var(--error); font-size:12px; line-height:1.5;">${escapeA2TDHtml(task.error)}</div>` : ''}
-            <div class="page-actions" style="display:flex; flex-wrap:wrap; justify-content:flex-end; gap:8px; margin-top:12px;">
+            ${task.error ? `<div class="task-note error"><i class="ph ph-warning-circle"></i><span>${escapeA2TDHtml(task.error)}</span></div>` : ''}
+            ${!task.error && stalled ? '<div class="task-note warning"><i class="ph ph-warning"></i><span>连接长时间没有新数据，下载器会自动重试当前分块。</span></div>' : ''}
+            <div class="page-actions a2td-task-actions">
                 ${getA2TDTaskActions(task)}
             </div>
         `;
-        barsEl.appendChild(card);
+        fragment.appendChild(card);
     });
+    barsEl.replaceChildren(fragment);
 }
 
 async function a2tdAction(taskId, action) {
     const rawTaskId = decodeURIComponent(taskId);
+    a2tdPendingTaskActions.set(rawTaskId, action);
+    renderA2TDTaskStore();
     try {
         const url = action === 'delete' ? `/api/a2td/task/${taskId}` : `/api/a2td/task/${taskId}/${action}`;
         const method = action === 'delete' ? 'DELETE' : 'POST';
         const resp = await fetch(url, { method });
-        if (!resp.ok) {
-            const err = await resp.json().catch(() => ({}));
-            throw new Error(err.detail || '操作失败');
-        }
+        const data = await resp.json().catch(() => ({}));
+        if (!resp.ok) throw new Error(data.detail || data.message || '任务操作失败');
+
         if (action === 'cancel' || action === 'delete') {
             removeA2TDTask(rawTaskId);
+        } else if (action === 'pause') {
+            upsertA2TDTask({ task_id: rawTaskId, status: 'paused', download_speed: '', last_event_at: Date.now() });
+        } else if (action === 'resume') {
+            upsertA2TDTask({ task_id: rawTaskId, status: 'downloading', last_event_at: Date.now() });
+            await loadA2TDTasks();
+        } else {
+            await loadA2TDTasks();
         }
+        showA2TDToast(data.message || '操作已提交', 'success');
     } catch(e) {
-        alert(e.message || '任务操作失败');
+        showA2TDToast(e.message || '任务操作失败', 'error');
+    } finally {
+        a2tdPendingTaskActions.delete(rawTaskId);
+        renderA2TDTaskStore();
     }
 }
 
-
-
 async function a2tdBulkAction(action) {
+    const btn = document.querySelector(`[data-bulk-action="${action}"]`);
+    const oldHtml = btn ? btn.innerHTML : '';
     try {
-        await fetch(`/api/a2td/tasks/${action}`, { method: 'POST' });
-    } catch(e) {}
+        if (btn) {
+            btn.disabled = true;
+            btn.classList.add('is-loading');
+            btn.innerHTML = '<span class="spinner"></span> 执行中';
+        }
+        const resp = await fetch(`/api/a2td/tasks/${action}`, { method: 'POST' });
+        const data = await resp.json().catch(() => ({}));
+        if (!resp.ok) throw new Error(data.detail || data.message || '批量操作失败');
+        await loadA2TDTasks();
+        showA2TDToast(data.message || '批量操作已完成', 'success');
+    } catch(e) {
+        showA2TDToast(e.message || '批量操作失败', 'error');
+    } finally {
+        if (btn) {
+            btn.disabled = false;
+            btn.classList.remove('is-loading');
+            btn.innerHTML = oldHtml;
+        }
+    }
 }
 
 async function clearCompletedTasks() {
-    try {
-        await fetch('/api/a2td/tasks/clear-completed', { method: 'POST' });
-    } catch(e) {}
+    return a2tdBulkAction('clear-completed');
 }
+
 
 
 // ── Settings ──

@@ -130,10 +130,20 @@ async def pause_all_tasks():
     tasks = await task_manager.get_all_tasks()
     count = 0
     for t in tasks:
-        if t["status"] in ("downloading", "uploading"):
+        if t["status"] == "downloading":
             result = await task_manager.pause_task(t["task_id"])
             if result["success"]:
                 count += 1
+        elif t["status"] == "uploading":
+            task_id = t["task_id"]
+            task_manager._cancel_existing_upload(task_id)
+            task_manager.clear_upload_progress(task_id)
+            old_gid = t.get("aria2_gid", "")
+            if old_gid:
+                task_manager._uploading_gids.discard(old_gid)
+            await db.update_task(task_id, status="paused", download_speed="", upload_speed="", error=None)
+            await task_manager._broadcast_task_update(task_id)
+            count += 1
     return {"success": True, "message": f"已暂停 {count} 个任务"}
 
 
@@ -157,10 +167,11 @@ async def pause_all_uploads():
         if t["status"] == "uploading":
             task_id = t["task_id"]
             task_manager._cancel_existing_upload(task_id)
+            task_manager.clear_upload_progress(task_id)
             old_gid = t.get("aria2_gid", "")
             if old_gid:
                 task_manager._uploading_gids.discard(old_gid)
-            await db.update_task(task_id, status="failed", error="用户手动暂停上传")
+            await db.update_task(task_id, status="paused", download_speed="", upload_speed="", error=None)
             await task_manager._broadcast_task_update(task_id)
             count += 1
     return {"success": True, "message": f"已暂停 {count} 个上传任务"}

@@ -1,5 +1,6 @@
 """TelDriveManager — FastAPI 应用入口"""
 
+import os
 import sys
 from pathlib import Path
 
@@ -133,4 +134,23 @@ async def login_page():
 if __name__ == "__main__":
     import uvicorn
     # 为了保证相对路径和包引用的正确性，建议使用模块方式运行
-    uvicorn.run("app.main:app", host="0.0.0.0", port=8888, reload=True)
+    root_dir = Path(__file__).parent.parent
+    reload_enabled = os.getenv("TELDRIVE_RELOAD", "0").strip().lower() in {"1", "true", "yes", "on"}
+    if reload_enabled:
+        uvicorn.run(
+            "app.main:app",
+            host="0.0.0.0",
+            port=8888,
+            reload=True,
+            reload_dirs=[str(root_dir / "app")],
+            reload_excludes=[
+                "downloads/*",
+                "*.db",
+                "*.db-*",
+                "*.log",
+                "*.session",
+                "history_*.md",
+            ],
+        )
+    else:
+        uvicorn.run("app.main:app", host="0.0.0.0", port=8888, reload=False)

@@ -5,6 +5,7 @@ import os
 import posixpath
 import re
 import logging
+from pathlib import Path
 from typing import Dict, List, Optional, Set
 
 import feedparser
@@ -417,9 +418,11 @@ async def _builtin_download_and_upload(files: List[dict], index: int, delete_pik
         # === 注册到数据库 ===
         import uuid
         task_db_id = f"bd-{uuid.uuid4().hex[:10]}"
+        task_download_dir = DOWNLOAD_DIR / task_db_id
+        task_local_path = task_download_dir / name
         await db.add_task(task_db_id, url, name, target_path)
         await db.update_task(task_db_id, status="downloading",
-                             local_path=str(DOWNLOAD_DIR / name))
+                             local_path=str(task_local_path))
         await task_manager.broadcast({"type": "task_update",
                                        "data": await db.get_task(task_db_id)})
 
@@ -439,9 +442,12 @@ async def _builtin_download_and_upload(files: List[dict], index: int, delete_pik
                 "progress": progress,
                 "speed": task.to_dict()["speed_str"],
                 "downloaded": task.to_dict()["downloaded_str"],
+                "downloaded_bytes": task.downloaded,
                 "total": task.to_dict()["total_str"],
+                "total_bytes": task.total_size,
                 "eta": task.to_dict()["eta_str"],
                 "connections": task.connections,
+                "max_connections": task.max_connections,
                 "status": task.status.value,
             })
             # 更新数据库（节流：只在整数百分比变化时写库）
@@ -457,10 +463,12 @@ async def _builtin_download_and_upload(files: List[dict], index: int, delete_pik
         dl_task = await downloader.add_task(
             url=url, filename=name, task_id=task_db_id,
             on_progress=on_progress, on_complete=on_complete,
+            base_dir=str(task_download_dir),
         )
 
         # 等待下载完成
         await dl_done_event.wait()
+        downloader.forget_task(task_db_id)
 
         if dl_task.status == TaskStatus.FAILED:
             await db.update_task(task_db_id, status="failed",
@@ -483,7 +491,10 @@ async def _builtin_download_and_upload(files: List[dict], index: int, delete_pik
 
         # === 上传阶段 ===
         await db.update_task(task_db_id, status="uploading",
-                             download_progress=100.0)
+                             download_progress=100.0,
+                             download_speed="",
+                             upload_speed="",
+                             file_size=dl_task.to_dict()["total_str"])
         task_manager.track_upload_progress(task_db_id, 0)
         await task_manager.broadcast({"type": "task_update",
                                        "data": await db.get_task(task_db_id)})
@@ -502,8 +513,11 @@ async def _builtin_download_and_upload(files: List[dict], index: int, delete_pik
                     "index": file_index,
                     "filename": _name,
                     "progress": pct,
+                    "speed": "",
                     "uploaded": _format_size(uploaded),
+                    "uploaded_bytes": uploaded,
                     "total": _format_size(total),
+                    "total_bytes": total,
                 })
                 # 更新数据库
                 int_pct = int(pct)
@@ -547,6 +561,9 @@ async def _builtin_download_and_upload(files: List[dict], index: int, delete_pik
                         shutil.rmtree(local_path)
                     elif os.path.exists(local_path):
                         os.remove(local_path)
+                    task_dir = Path(local_path).parent
+                    if task_dir.exists() and task_dir != DOWNLOAD_DIR:
+                        task_dir.rmdir()
                     logger.info(f"已清理本地文件: {local_path}")
                 except Exception as e:
                     logger.warning(f"清理文件失败: {e}")

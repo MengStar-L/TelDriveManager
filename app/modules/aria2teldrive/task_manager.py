@@ -159,8 +159,19 @@ class TaskManager:
             if t.get("aria2_gid"):
                 self._known_gids.add(t["aria2_gid"])
 
+        # 内置下载器任务无法跨进程恢复，启动时统一标记失败，避免出现高进度 0 速的僵尸任务
+        for t in all_tasks:
+            if t.get("task_id", "").startswith("bd-") and t["status"] in ("downloading", "paused"):
+                await db.update_task(
+                    t["task_id"],
+                    status="failed",
+                    download_speed="",
+                    error="服务重启后内置下载任务已中断，请点击重试重新拉起"
+                )
+
         # 恢复僵死的 uploading 任务（应用重启后 uploading 状态不会自动恢复）
         for t in all_tasks:
+
             if t["status"] == "uploading":
                 task_id = t["task_id"]
                 local_path = self._get_upload_path(t.get("local_path", ""))
@@ -200,10 +211,12 @@ class TaskManager:
             await asyncio.gather(*self._upload_tasks.values(), return_exceptions=True)
             self._upload_tasks.clear()
 
-        # 关闭 aria2 HTTP 会话
+        # 关闭 aria2 / 内置下载器 HTTP 会话
         if self.aria2:
             await self.aria2.close()
+        await downloader.close()
         logger.info("任务管理器已停止")
+
 
     def register_ws(self, ws):
         """注册 WebSocket 客户端"""
@@ -248,10 +261,32 @@ class TaskManager:
     def clear_upload_progress(self, task_id: str):
         self._task_uploaded_bytes.pop(task_id, None)
 
+    @staticmethod
+    def _is_upload_stage_task(task: dict) -> bool:
+        return (
+            float(task.get("download_progress") or 0) >= 100
+            or float(task.get("upload_progress") or 0) > 0
+        )
+
+    @staticmethod
+    def _should_skip_auto_retry(task: dict) -> bool:
+        error = str(task.get("error") or "")
+        blocked_markers = (
+            "用户手动暂停上传",
+            "服务重启后内置下载任务已中断",
+            "本地文件不存在",
+        )
+        return any(marker in error for marker in blocked_markers)
+
     def get_global_stat(self) -> dict:
         """获取当前缓存的全局统计数据（供 WS init 立即推送）"""
+        builtin_download_speed = self._get_builtin_download_speed()
         data = {
-            "download_speed": self._last_download_speed + self._get_builtin_download_speed(),
+            "download_speed": self._last_download_speed + builtin_download_speed,
+            "download_speed_detail": {
+                "aria2": int(self._last_download_speed),
+                "builtin": int(builtin_download_speed),
+            },
             "upload_speed": int(self._upload_speed),
         }
         if self._disk_usage_info:
@@ -259,6 +294,7 @@ class TaskManager:
         if self._cpu_info:
             data["cpu"] = self._cpu_info
         return data
+
 
 
     # ===========================================
@@ -333,9 +369,10 @@ class TaskManager:
                     except Exception as e:
                         logger.debug(f"自动重试异常: {e}")
 
-                await asyncio.sleep(2)
+                await asyncio.sleep(1)
             except asyncio.CancelledError:
                 break
+
             except Exception as e:
                 logger.error(f"监控循环异常: {e}")
                 await asyncio.sleep(5)
@@ -555,20 +592,15 @@ class TaskManager:
             stopped = await self.aria2.tell_stopped_all() or []
         except Exception as e:
             # aria2 连接失败时静默跳过（仅每 30 秒打一次日志）
+            self._last_download_speed = 0
             logger.debug(f"aria2 轮询失败: {e}")
             return
 
         all_aria2_tasks = active + waiting + stopped
-
-        # 获取 aria2 下载速度（供 monitor_loop 广播使用）
-        try:
-            stat = await self.aria2.get_global_stat()
-            self._last_download_speed = int(stat.get("downloadSpeed", 0))
-        except Exception:
-            self._last_download_speed = 0
-
+        tracked_download_speed = 0
 
         for item in all_aria2_tasks:
+
             gid = item.get("gid", "")
             if not gid:
                 continue
@@ -602,6 +634,11 @@ class TaskManager:
                 if existing:
                     self._known_gids.add(gid)
                 else:
+                    if aria2_status in ("complete", "error", "removed"):
+                        self._terminal_gids.add(gid)
+                        logger.info(f"跳过历史 aria2 终态任务: {gid} ({parsed['filename']}) 状态={aria2_status}")
+                        continue
+
                     task_id = gid  # 直接用 GID 作为 task_id
                     url = ""
                     files = item.get("files", [])
@@ -636,8 +673,11 @@ class TaskManager:
                         local_path=parsed["file_path"]
                     )
                     self._known_gids.add(gid)
+                    if initial_status == "downloading":
+                        tracked_download_speed += int(parsed["download_speed"] or 0)
                     logger.info(f"发现 aria2 任务: {gid} ({parsed['filename']}) 状态={initial_status}")
                     await self._broadcast_task_update(task_id)
+
 
                     # 已入库时即标记终态
                     if initial_status in ("completed", "failed", "cancelled"):
@@ -649,6 +689,7 @@ class TaskManager:
                                              download_progress=100.0)
                         self._terminal_gids.add(gid)
                     continue
+
 
             # 已入库的任务，更新状态
             task = await db.get_task_by_gid(gid)
@@ -679,7 +720,9 @@ class TaskManager:
 
             if aria2_status == "active":
                 update_data["status"] = "downloading"
+                tracked_download_speed += int(parsed["download_speed"] or 0)
             elif aria2_status == "waiting":
+
                 update_data["status"] = "pending"
             elif aria2_status == "paused":
                 update_data["status"] = "paused"
@@ -707,7 +750,10 @@ class TaskManager:
                 self._terminal_gids.add(gid)
                 await self._broadcast_task_update(task_id)
 
+        self._last_download_speed = tracked_download_speed
+
     def _calc_teldrive_path(self, local_path: str) -> str:
+
         """计算文件在 TelDrive 上的目标目录，保留下载目录中的子目录结构。"""
         target_path = self.config["teldrive"].get("target_path", "/")
 
@@ -921,6 +967,10 @@ class TaskManager:
             for task in all_tasks:
                 if task["status"] != "failed":
                     continue
+                if not self._is_upload_stage_task(task):
+                    continue
+                if self._should_skip_auto_retry(task):
+                    continue
 
                 task_id = task["task_id"]
 
@@ -946,6 +996,7 @@ class TaskManager:
                 logger.info(f"自动重试上传任务 {task_id} ({retries+1}/{max_retries})")
                 t = asyncio.create_task(self._retry_upload(task_id))
                 self._upload_tasks[task_id] = t
+
 
         except Exception as e:
             logger.debug(f"自动重试扫描异常: {e}")
@@ -1165,16 +1216,31 @@ class TaskManager:
             update_data = {"status": "downloading"}
             if is_builtin_task:
                 resumed = await downloader.resume(task_id)
-                if not resumed:
-                    return {"success": False, "message": "内置下载任务当前不可恢复"}
-                update_data.update(self._get_builtin_task_snapshot(task_id))
-            else:
-                await self.aria2.unpause(task["aria2_gid"])
+                if resumed:
+                    update_data.update(self._get_builtin_task_snapshot(task_id))
+                    await db.update_task(task_id, **update_data)
+                    await self._broadcast_task_update(task_id)
+                    return {"success": True, "message": "已恢复下载"}
+
+                local_path = self._get_upload_path(task.get("local_path", ""))
+                if self._is_upload_stage_task(task) and local_path and os.path.exists(local_path):
+                    self._cancel_existing_upload(task_id)
+                    self.clear_upload_progress(task_id)
+                    self._upload_retry_counts.pop(task_id, None)
+                    await db.update_task(task_id, status="uploading", download_speed="", upload_speed="", error=None)
+                    await self._broadcast_task_update(task_id)
+                    self._upload_tasks[task_id] = asyncio.create_task(self._retry_upload(task_id))
+                    return {"success": True, "message": "已恢复上传"}
+
+                return {"success": False, "message": "内置任务当前不可恢复"}
+
+            await self.aria2.unpause(task["aria2_gid"])
             await db.update_task(task_id, **update_data)
             await self._broadcast_task_update(task_id)
             return {"success": True, "message": "已恢复"}
         except Exception as e:
             return {"success": False, "message": str(e)}
+
 
     async def cancel_task(self, task_id: str) -> dict:
         """取消任务"""
@@ -1355,8 +1421,9 @@ class TaskManager:
             return {"success": False, "message": "任务不存在"}
 
         # 如果任务还在进行中，先取消
-        if task["status"] in ("downloading", "uploading", "pending"):
+        if task["status"] in ("downloading", "uploading", "pending", "paused"):
             await self.cancel_task(task_id)
+
 
         gid = task.get("aria2_gid")
         if gid:
