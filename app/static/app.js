@@ -1028,50 +1028,36 @@ function getA2TDTaskActions(task) {
     return getA2TDActionButton(task.task_id, 'delete', '删除记录', 'ph-trash', 'neutral');
 }
 
-function renderA2TDTasks(tasks) {
-    const container = document.getElementById('progressBarsContainer');
-    const barsEl = document.getElementById('progressBars');
-    const placeholder = document.getElementById('a2tdEmptyPlaceholder');
-    if (!container || !barsEl || !placeholder) return;
+function getA2TDTaskCardId(task) {
+    return 'pb-' + String(task?.task_id || 'unknown').replace(/[^a-zA-Z0-9_-]/g, '_');
+}
 
-    if (!Array.isArray(tasks) || tasks.length === 0) {
-        barsEl.innerHTML = '';
-        container.style.display = 'none';
-        placeholder.style.display = 'block';
-        return;
-    }
+function buildA2TDTaskCardContent(task) {
+    const mode = getA2TDTaskMode(task);
+    const stalled = isA2TDTaskStalled(task);
+    const progress = Math.max(0, Math.min(100, getA2TDTaskProgress(task)));
+    const filename = escapeA2TDHtml(task.filename || task.task_id || '未命名任务');
+    const statusLabel = escapeA2TDHtml(getA2TDTaskStatusLabel(task.status));
+    const downloadProgress = Math.min(99.9, Number(task.download_progress || 0)).toFixed(1);
+    const uploadProgress = Math.min(task.status === 'completed' ? 100 : 99.9, Number(task.upload_progress || 0)).toFixed(1);
+    const speedText = task.status === 'downloading'
+        ? (task.download_speed || '0 B/s')
+        : (task.status === 'uploading' ? (task.upload_speed || '计算中') : '--');
+    const transferredText = task.status === 'uploading'
+        ? `${task.transferred_text || '0 B'} / ${task.total_text || task.file_size || '--'}`
+        : `${task.downloaded_text || '--'} / ${task.total_text || task.file_size || '--'}`;
+    const etaText = stalled
+        ? '已无进度超过 15 秒'
+        : (task.status === 'downloading' ? (task.eta_text || '--') : '--');
+    const connectionText = task.status === 'downloading' || task.status === 'paused'
+        ? `${Math.max(0, getA2TDNumber(task.connections))}/${Math.max(1, getA2TDNumber(task.max_connections) || 1)}`
+        : '--';
+    const activityText = formatA2TDRelativeTime(task.last_event_at || task.updated_at || task.created_at);
+    const progressLabel = task.status === 'uploading' ? `上传 ${uploadProgress}%` : `下载 ${downloadProgress}%`;
 
-    container.style.display = 'block';
-    placeholder.style.display = 'none';
-
-    const fragment = document.createDocumentFragment();
-    tasks.forEach(task => {
-        const mode = getA2TDTaskMode(task);
-        const stalled = isA2TDTaskStalled(task);
-        const progress = Math.max(0, Math.min(100, getA2TDTaskProgress(task)));
-        const filename = escapeA2TDHtml(task.filename || task.task_id || '未命名任务');
-        const statusLabel = escapeA2TDHtml(getA2TDTaskStatusLabel(task.status));
-        const downloadProgress = Math.min(99.9, Number(task.download_progress || 0)).toFixed(1);
-        const uploadProgress = Math.min(task.status === 'completed' ? 100 : 99.9, Number(task.upload_progress || 0)).toFixed(1);
-        const speedText = task.status === 'downloading'
-            ? (task.download_speed || '0 B/s')
-            : (task.status === 'uploading' ? (task.upload_speed || '计算中') : '--');
-        const transferredText = task.status === 'uploading'
-            ? `${task.transferred_text || '0 B'} / ${task.total_text || task.file_size || '--'}`
-            : `${task.downloaded_text || '--'} / ${task.total_text || task.file_size || '--'}`;
-        const etaText = stalled
-            ? '已无进度超过 15 秒'
-            : (task.status === 'downloading' ? (task.eta_text || '--') : '--');
-        const connectionText = task.status === 'downloading' || task.status === 'paused'
-            ? `${Math.max(0, getA2TDNumber(task.connections))}/${Math.max(1, getA2TDNumber(task.max_connections) || 1)}`
-            : '--';
-        const activityText = formatA2TDRelativeTime(task.last_event_at || task.updated_at || task.created_at);
-        const progressLabel = task.status === 'uploading' ? `上传 ${uploadProgress}%` : `下载 ${downloadProgress}%`;
-
-        const card = document.createElement('div');
-        card.id = 'pb-' + String(task.task_id || 'unknown').replace(/[^a-zA-Z0-9_-]/g, '_');
-        card.className = `progress-card ${task.status || 'pending'} ${mode === 'done' ? 'completed' : mode === 'upload' ? 'uploading' : 'downloading'} ${stalled ? 'stalled' : ''}`;
-        card.innerHTML = `
+    return {
+        className: `progress-card ${task.status || 'pending'} ${mode === 'done' ? 'completed' : mode === 'upload' ? 'uploading' : 'downloading'} ${stalled ? 'stalled' : ''}`.trim(),
+        html: `
             <div class="progress-header">
                 <div class="progress-filename">
                     <i class="ph ${stalled ? 'ph-warning-circle' : mode === 'upload' ? 'ph-upload-simple ul-icon' : task.status === 'completed' ? 'ph-check-circle' : 'ph-download-simple dl-icon'}" data-icon></i>
@@ -1114,11 +1100,46 @@ function renderA2TDTasks(tasks) {
             <div class="page-actions a2td-task-actions">
                 ${getA2TDTaskActions(task)}
             </div>
-        `;
-        fragment.appendChild(card);
-    });
-    barsEl.replaceChildren(fragment);
+        `
+    };
 }
+
+function renderA2TDTasks(tasks) {
+    const container = document.getElementById('progressBarsContainer');
+    const barsEl = document.getElementById('progressBars');
+    const placeholder = document.getElementById('a2tdEmptyPlaceholder');
+    if (!container || !barsEl || !placeholder) return;
+
+    if (!Array.isArray(tasks) || tasks.length === 0) {
+        barsEl.innerHTML = '';
+        container.style.display = 'none';
+        placeholder.style.display = 'block';
+        return;
+    }
+
+    container.style.display = 'block';
+    placeholder.style.display = 'none';
+
+    const activeIds = new Set();
+    tasks.forEach(task => {
+        const cardId = getA2TDTaskCardId(task);
+        const view = buildA2TDTaskCardContent(task);
+        let card = document.getElementById(cardId);
+        if (!card) {
+            card = document.createElement('div');
+            card.id = cardId;
+        }
+        if (card.className !== view.className) card.className = view.className;
+        card.innerHTML = view.html;
+        barsEl.appendChild(card);
+        activeIds.add(cardId);
+    });
+
+    Array.from(barsEl.children).forEach(card => {
+        if (!activeIds.has(card.id)) card.remove();
+    });
+}
+
 
 async function a2tdAction(taskId, action) {
     const rawTaskId = decodeURIComponent(taskId);

@@ -155,6 +155,8 @@
         
         /* ── Log Container ── */
         .log-container { max-height: 450px; overflow-y: auto; scrollbar-width: thin; scrollbar-color: #cbd5e1 transparent; background: #1e293b; color: #f8fafc; border-radius: var(--radius-md); padding: 16px 24px; font-family: 'Cascadia Code', monospace; box-shadow: inset 0 4px 12px rgba(0,0,0,0.1); }
+        .log-container.log-container-expanded { height: clamp(520px, 76vh, 960px); max-height: none; }
+
         .log-empty { text-align: center; padding: 60px; color: #64748b; font-size: 14px; display: flex; flex-direction: column; align-items: center; gap: 12px; }
         .log-empty i { font-size: 32px; opacity: 0.5; }
         .log-entry { padding: 10px 0; border-bottom: 1px dashed rgba(255,255,255,0.1); font-size: 13px; display: flex; align-items: flex-start; gap: 12px; animation: fadeIn 0.3s ease; }
@@ -400,9 +402,10 @@
             transition: transform 0.18s ease, box-shadow 0.18s ease, border-color 0.18s ease;
         }
         .progress-card:hover {
-            transform: translateY(-2px);
             box-shadow: 0 16px 28px rgba(15, 23, 42, 0.08);
+            border-color: rgba(148, 163, 184, 0.55);
         }
+
         .progress-card.paused { border-left: 3px solid #f59e0b; }
         .progress-card.failed { border-left: 3px solid var(--error); border-color: rgba(239, 68, 68, 0.22); }
         .progress-card.pending { border-left: 3px solid #94a3b8; }
@@ -684,7 +687,8 @@
                             <button class="btn btn-ghost btn-sm" onclick="clearLog()"><i class="ph ph-trash"></i> 清理终端</button>
                         </div>
                         <div class="card-body" style="padding: 12px">
-                            <div class="log-container" id="logContainer">
+                            <div class="log-container log-container-expanded" id="logContainer">
+
                                 <div class="log-empty" id="logEmpty"><i class="ph ph-ghost"></i> 系统处于空闲状态...</div>
                             </div>
                         </div>
@@ -1020,7 +1024,8 @@
 
     <div id="a2tdToastContainer" class="app-toast-container"></div>
 
-    <script src="/static/app.js?v=20260403d"></script>
+    <script src="/static/app.js?v=20260403e"></script>
+
 
 
 
