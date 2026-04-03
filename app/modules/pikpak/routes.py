@@ -403,22 +403,6 @@ def _get_engine() -> str:
     return cfg.get("pikpak", {}).get("download_engine", "builtin")
 
 
-def _get_teldrive_client():
-    """按需创建 TelDrive 客户端（内置引擎上传用）"""
-    from app.modules.aria2teldrive.teldrive_client import TelDriveClient
-    cfg = load_config()
-    td_cfg = cfg.get("teldrive", {})
-    return TelDriveClient(
-        api_host=td_cfg.get("api_host", ""),
-        access_token=td_cfg.get("access_token", ""),
-        channel_id=td_cfg.get("channel_id", 0),
-        chunk_size=td_cfg.get("chunk_size", "500M"),
-        upload_concurrency=td_cfg.get("upload_concurrency", 4),
-        random_chunk_name=td_cfg.get("random_chunk_name", True),
-        max_retries=cfg.get("upload", {}).get("max_retries", 3),
-    )
-
-
 def _maybe_rename_by_folder(url_info: dict, rename: bool, original_path: str = "") -> str:
     """根据上级目录名重命名分享文件，保持与 AutoPikDown 一致。"""
     name = url_info.get("name", "")
@@ -556,76 +540,21 @@ async def _builtin_download_and_upload(files: List[dict], index: int, delete_pik
                                        "data": await db.get_task(task_db_id)})
 
         try:
-            teldrive = _get_teldrive_client()
             local_path = dl_task.dest_path
-
-            async def upload_progress_cb(uploaded: int, total: int, _tid=task_db_id, _name=name):
-                raw_pct = round(uploaded / total * 100, 1) if total > 0 else 0
-                pct = min(raw_pct, 99.9) if total > 0 else 0
-                task_manager.track_upload_progress(_tid, uploaded)
-                await _broadcast({
-                    "type": "upload_progress",
-                    "task_id": _tid,
-                    "index": file_index,
-                    "filename": _name,
-                    "progress": pct,
-                    "speed": "",
-                    "uploaded": _format_size(uploaded),
-                    "uploaded_bytes": uploaded,
-                    "total": _format_size(total),
-                    "total_bytes": total,
-                })
-                # 更新数据库
-                int_pct = int(pct)
-                if int_pct % 5 == 0:
-                    await db.update_task(_tid, upload_progress=pct)
+            await db.update_task(task_db_id, local_path=str(local_path))
 
             if os.path.isdir(local_path):
-                for root, _dirs, fnames in os.walk(local_path):
-                    for fname in fnames:
-                        fpath = os.path.join(root, fname)
-                        rel = os.path.relpath(fpath, local_path)
-                        sub_dir = os.path.dirname(rel).replace("\\", "/")
-                        td_path = target_path.rstrip("/") + ("/" + sub_dir if sub_dir and sub_dir != "." else "")
-                        await teldrive.upload_file_chunked(
-                            file_path=fpath, teldrive_path=td_path,
-                            progress_callback=upload_progress_cb,
-                        )
+                await task_manager._upload_directory(task_db_id, local_path, target_path)
             else:
-                await teldrive.upload_file_chunked(
-                    file_path=local_path, teldrive_path=target_path,
-                    progress_callback=upload_progress_cb,
-                )
+                await task_manager._upload(task_db_id, local_path, target_path)
 
-            # 上传完成
-            task_manager.clear_upload_progress(task_db_id)
-            await db.update_task(task_db_id, status="completed",
-                                 download_progress=100.0,
-                                 upload_progress=100.0,
-                                 download_speed="",
-                                 upload_speed="")
-            await task_manager.broadcast({"type": "task_update",
-                                           "data": await db.get_task(task_db_id)})
+            if auto_delete:
+                await task_manager._auto_delete_local(task_db_id, local_path)
+
             await _broadcast({"type": "upload_done", "task_id": task_db_id, "index": file_index,
                               "filename": name})
 
-            # 清理本地文件
-            if auto_delete:
-                try:
-                    if os.path.isdir(local_path):
-                        import shutil
-                        shutil.rmtree(local_path)
-                    elif os.path.exists(local_path):
-                        os.remove(local_path)
-                    task_dir = Path(local_path).parent
-                    if task_dir.exists() and task_dir != DOWNLOAD_DIR:
-                        task_dir.rmdir()
-                    logger.info(f"已清理本地文件: {local_path}")
-                except Exception as e:
-                    logger.warning(f"清理文件失败: {e}")
-
         except Exception as e:
-            task_manager.clear_upload_progress(task_db_id)
             await db.update_task(task_db_id, status="failed",
                                  error=str(e))
             await task_manager.broadcast({"type": "task_update",

@@ -274,7 +274,40 @@ class TaskManager:
         )
         return any(marker in error for marker in blocked_markers)
 
+    @staticmethod
+    def _normalize_teldrive_path(path: str) -> str:
+        path = str(path or "/").strip().replace("\\", "/")
+        if not path:
+            return "/"
+        if not path.startswith("/"):
+            path = "/" + path
+        while "//" in path:
+            path = path.replace("//", "/")
+        return path.rstrip("/") or "/"
+
+    @staticmethod
+    def _is_builtin_task_record(task: dict) -> bool:
+        task_id = str(task.get("task_id") or "")
+        return task_id.startswith("bd-") and not task.get("aria2_gid")
+
+    def _get_task_teldrive_path(self, task: dict, local_path: str) -> str:
+        configured_target = self._normalize_teldrive_path(
+            self.config["teldrive"].get("target_path", "/")
+        )
+        task_target = self._normalize_teldrive_path(
+            task.get("teldrive_path") or configured_target
+        )
+
+        if self._is_builtin_task_record(task):
+            return task_target
+
+        if task_target != configured_target:
+            return task_target
+
+        return self._calc_teldrive_path(local_path)
+
     def get_global_stat(self) -> dict:
+
         """获取当前缓存的全局统计数据（供 WS init 立即推送）"""
         builtin_download_speed = self._get_builtin_download_speed()
         data = {
@@ -465,10 +498,11 @@ class TaskManager:
                 if existing:
                     self._known_gids.add(gid)
                 else:
-                    if aria2_status in ("complete", "error", "removed"):
+                    if aria2_status in ("error", "removed"):
                         self._terminal_gids.add(gid)
                         logger.info(f"跳过历史 aria2 终态任务: {gid} ({parsed['filename']}) 状态={aria2_status}")
                         continue
+
 
                     task_id = gid  # 直接用 GID 作为 task_id
                     url = ""
@@ -482,7 +516,7 @@ class TaskManager:
                         "active": "downloading",
                         "waiting": "pending",
                         "paused": "paused",
-                        "complete": "completed",
+                        "complete": "uploading",
                         "error": "failed",
                         "removed": "cancelled"
                     }
@@ -498,8 +532,8 @@ class TaskManager:
                         task_id,
                         status=initial_status,
                         aria2_gid=gid,
-                        download_progress=parsed["progress"],
-                        download_speed=parsed["speed_str"],
+                        download_progress=100.0 if aria2_status == "complete" else parsed["progress"],
+                        download_speed="" if aria2_status == "complete" else parsed["speed_str"],
                         file_size=parsed["file_size"],
                         local_path=parsed["file_path"]
                     )
@@ -509,17 +543,21 @@ class TaskManager:
                     logger.info(f"发现 aria2 任务: {gid} ({parsed['filename']}) 状态={initial_status}")
                     await self._broadcast_task_update(task_id)
 
-
-                    # 已入库时即标记终态
-                    if initial_status in ("completed", "failed", "cancelled"):
+                    if initial_status in ("failed", "cancelled"):
                         self._terminal_gids.add(gid)
 
-                    # 下载完成直接标记 completed（不再触发 TelDrive 上传，由内置引擎负责）
                     if aria2_status == "complete":
-                        await db.update_task(task_id, status="completed",
-                                             download_progress=100.0)
-                        self._terminal_gids.add(gid)
+                        if parsed["file_path"]:
+                            self._upload_tasks[task_id] = asyncio.create_task(
+                                self._handle_download_complete(task_id, gid)
+                            )
+                        else:
+                            await db.update_task(task_id, status="completed")
+                            self._terminal_gids.add(gid)
+                            await self._broadcast_task_update(task_id)
                     continue
+
+
 
 
             # 已入库的任务，更新状态
@@ -574,12 +612,18 @@ class TaskManager:
             task.update(update_data)
             await self._broadcast_task_update(task_id, task)
 
-            # 下载完成 → 直接标记 completed（不再触发 TelDrive 上传，由内置引擎负责）
-            if aria2_status == "complete" and current_status not in ("completed", "uploading"):
-                await db.update_task(task_id, status="completed",
-                                     download_progress=100.0)
-                self._terminal_gids.add(gid)
-                await self._broadcast_task_update(task_id)
+            # 下载完成 → 触发上传
+            if aria2_status == "complete" and current_status != "uploading":
+                local_path = parsed["file_path"]
+                if local_path:
+                    self._upload_tasks[task_id] = asyncio.create_task(
+                        self._handle_download_complete(task_id, gid)
+                    )
+                else:
+                    await db.update_task(task_id, status="completed")
+                    self._terminal_gids.add(gid)
+                    await self._broadcast_task_update(task_id)
+
 
         self._last_download_speed = tracked_download_speed
 
@@ -659,7 +703,8 @@ class TaskManager:
                 return
 
             local_path = self._get_upload_path(task["local_path"])
-            teldrive_path = self._calc_teldrive_path(local_path)
+            teldrive_path = self._get_task_teldrive_path(task, local_path)
+
 
             # 等待文件就绪（aria2 可能还在写入/移动文件）
             for attempt in range(5):
@@ -869,60 +914,61 @@ class TaskManager:
                     f"共 {len(all_files)} 个文件，总大小 {total_size} bytes，"
                     f"上传到 {base_teldrive_path}")
 
+        try:
+            for idx, (full_path, rel_path, file_size) in enumerate(all_files, 1):
+                # 计算该文件在 TelDrive 上的目标路径
+                rel_dir = os.path.dirname(rel_path).replace("\\", "/")
+                if rel_dir:
+                    file_teldrive_path = base_teldrive_path + "/" + rel_dir
+                else:
+                    file_teldrive_path = base_teldrive_path
 
-        for idx, (full_path, rel_path, file_size) in enumerate(all_files, 1):
-            # 计算该文件在 TelDrive 上的目标路径
-            rel_dir = os.path.dirname(rel_path).replace("\\", "/")
-            if rel_dir:
-                file_teldrive_path = base_teldrive_path + "/" + rel_dir
-            else:
-                file_teldrive_path = base_teldrive_path
+                logger.info(f"任务 {task_id} 上传文件 [{idx}/{len(all_files)}]: "
+                            f"{rel_path} -> {file_teldrive_path}")
 
-            logger.info(f"任务 {task_id} 上传文件 [{idx}/{len(all_files)}]: "
-                        f"{rel_path} -> {file_teldrive_path}")
+                # 为每个文件创建进度回调（汇总到整体进度）
+                file_uploaded_before = uploaded_total[0]
 
-            # 为每个文件创建进度回调（汇总到整体进度）
-            file_uploaded_before = uploaded_total[0]
+                async def make_progress_cb(base_uploaded):
+                    async def progress_callback(uploaded: int, total: int):
+                        if total_size > 0:
+                            current_total = base_uploaded + uploaded
+                            self._task_uploaded_bytes[task_id] = current_total
+                            progress = round(current_total / total_size * 100, 1)
+                            now = time.monotonic()
+                            if (progress - _last_progress[0] >= 1.0 or
+                                    now - _last_broadcast[0] >= 1.0 or
+                                    progress >= 100.0):
+                                _last_progress[0] = progress
+                                _last_broadcast[0] = now
+                                await db.update_task(task_id, upload_progress=progress)
+                                await self._broadcast_task_update(task_id)
+                    return progress_callback
 
-            async def make_progress_cb(base_uploaded):
-                async def progress_callback(uploaded: int, total: int):
-                    if total_size > 0:
-                        current_total = base_uploaded + uploaded
-                        self._task_uploaded_bytes[task_id] = current_total
-                        progress = round(current_total / total_size * 100, 1)
-                        now = time.monotonic()
-                        if (progress - _last_progress[0] >= 1.0 or
-                                now - _last_broadcast[0] >= 1.0 or
-                                progress >= 100.0):
-                            _last_progress[0] = progress
-                            _last_broadcast[0] = now
-                            await db.update_task(task_id, upload_progress=progress)
-                            await self._broadcast_task_update(task_id)
-                return progress_callback
+                cb = await make_progress_cb(file_uploaded_before)
 
-            cb = await make_progress_cb(file_uploaded_before)
+                try:
+                    result = await asyncio.wait_for(
+                        self.teldrive.upload_file_chunked(
+                            full_path, file_teldrive_path, cb
+                        ),
+                        timeout=self._calc_upload_timeout(file_size)
+                    )
+                except asyncio.TimeoutError:
+                    raise Exception(f"上传超时: {rel_path}")
 
-            try:
-                result = await asyncio.wait_for(
-                    self.teldrive.upload_file_chunked(
-                        full_path, file_teldrive_path, cb
-                    ),
-                    timeout=self._calc_upload_timeout(file_size)
-                )
-            except asyncio.TimeoutError:
-                raise Exception(f"上传超时: {rel_path}")
+                if not result.get("success"):
+                    raise Exception(f"上传失败: {rel_path} - {result.get('error', '未知错误')}")
 
-            if not result.get("success"):
-                raise Exception(f"上传失败: {rel_path} - {result.get('error', '未知错误')}")
+                uploaded_total[0] += file_size
+                logger.info(f"任务 {task_id} 文件上传成功: {rel_path}")
 
-            uploaded_total[0] += file_size
-            logger.info(f"任务 {task_id} 文件上传成功: {rel_path}")
+            await db.update_task(task_id, status="completed", upload_progress=100.0)
+            await self._broadcast_task_update(task_id)
+            logger.info(f"任务 {task_id} 文件夹上传完成: {dir_path}，共 {len(all_files)} 个文件")
+        finally:
+            self._task_uploaded_bytes.pop(task_id, None)
 
-        # 所有文件上传完成
-        self._task_uploaded_bytes.pop(task_id, None)
-        await db.update_task(task_id, status="completed", upload_progress=100.0)
-        await self._broadcast_task_update(task_id)
-        logger.info(f"任务 {task_id} 文件夹上传完成: {dir_path}，共 {len(all_files)} 个文件")
 
     async def _upload(self, task_id: str, local_path: str, teldrive_path: str = "/"):
         """上传单个文件到 TelDrive"""
@@ -952,25 +998,27 @@ class TaskManager:
         file_size_on_disk = os.path.getsize(local_path) if os.path.isfile(local_path) else 0
         upload_timeout = self._calc_upload_timeout(file_size_on_disk)
         try:
-            result = await asyncio.wait_for(
-                self.teldrive.upload_file_chunked(
-                    local_path, teldrive_path, progress_callback
-                ),
-                timeout=upload_timeout
-            )
-        except asyncio.TimeoutError:
-            raise Exception(f"上传超时（超过 {upload_timeout}s）")
+            try:
+                result = await asyncio.wait_for(
+                    self.teldrive.upload_file_chunked(
+                        local_path, teldrive_path, progress_callback
+                    ),
+                    timeout=upload_timeout
+                )
+            except asyncio.TimeoutError:
+                raise Exception(f"上传超时（超过 {upload_timeout}s）")
 
-        self._task_uploaded_bytes.pop(task_id, None)  # 上传完成，移除追踪
+            if result.get("success"):
+                await db.update_task(task_id, status="completed",
+                                     upload_progress=100.0)
+                await self._broadcast_task_update(task_id)
+                logger.info(f"任务 {task_id} 上传完成")
+            else:
+                error = result.get("error", "上传失败")
+                raise Exception(error)
+        finally:
+            self._task_uploaded_bytes.pop(task_id, None)
 
-        if result.get("success"):
-            await db.update_task(task_id, status="completed",
-                                 upload_progress=100.0)
-            await self._broadcast_task_update(task_id)
-            logger.info(f"任务 {task_id} 上传完成")
-        else:
-            error = result.get("error", "上传失败")
-            raise Exception(error)
 
     async def _broadcast_task_update(self, task_id: str, task_data: dict = None):
         """广播任务状态更新（优先使用传入的 task_data 避免查库）"""
@@ -1219,7 +1267,8 @@ class TaskManager:
                 await self._broadcast_task_update(task_id)
                 return
 
-            teldrive_path = self._calc_teldrive_path(local_path)
+            teldrive_path = self._get_task_teldrive_path(task, local_path)
+
 
             # 重置上传状态
             await db.update_task(task_id, status="uploading",
