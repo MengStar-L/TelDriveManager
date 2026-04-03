@@ -23,6 +23,12 @@ async def get_all_tasks():
     return {"tasks": tasks}
 
 
+@router.get("/snapshot")
+async def get_snapshot():
+    tasks = await task_manager.get_all_tasks()
+    return {"tasks": tasks, "global_stat": task_manager.get_global_stat()}
+
+
 @router.get("/task/{task_id}")
 async def get_task(task_id: str):
     task = await task_manager.get_task(task_id)

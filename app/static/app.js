@@ -289,7 +289,8 @@ function switchPage(name, options = {}) {
 
     const pageContent = document.querySelector('.page-content');
     const recentPageSwitch = Date.now() - lastPageSwitchAt < 900 && lastPageSwitchName !== name;
-    const animated = !!options.animated && !recentPageSwitch;
+    const animated = !!options.animated && options.source === 'user' && !recentPageSwitch;
+
     const activateTargetPage = () => {
         document.querySelectorAll('.page').forEach(p => {
             p.classList.remove('active', 'page-enter', 'page-enter-active', 'page-exit');
@@ -340,9 +341,10 @@ function scheduleGuidedPageSwitch(name, message = '', delay = 620) {
     guidedPageSwitchTimer = setTimeout(() => {
         guidedPageSwitchTimer = null;
         guidedPageSwitchTarget = '';
-        switchPage(name, { animated: true });
+        switchPage(name);
     }, delay);
 }
+
 
 
 async function logout() {
@@ -435,7 +437,9 @@ function connectWS() {
         console.log('[WS] Connected');
         const dot = document.getElementById('wsDot');
         if (dot) dot.classList.add('connected');
+        refreshA2TDMonitorIfNeeded(true);
     };
+
     ws.onclose = () => {
         console.log('[WS] Disconnected, reconnecting in 3s...');
         const dot = document.getElementById('wsDot');
@@ -536,6 +540,8 @@ const a2tdTaskStore = new Map();
 const a2tdRemovedTaskIds = new Set();
 const a2tdPendingTaskActions = new Map();
 let a2tdRenderScheduled = false;
+let a2tdSnapshotPending = false;
+
 
 function normalizeA2TDTaskId(taskId, fallback = '') {
     return String(taskId || fallback || 'unknown');
@@ -911,13 +917,25 @@ function formatBytes(bytes, decimals = 2) {
     return `${parseFloat((bytes / Math.pow(k, i)).toFixed(dm))} ${sizes[i]}`;
 }
 
-async function loadA2TDTasks() {
+async function loadA2TDTasks(force = false) {
+    if (a2tdSnapshotPending && !force) return;
     try {
-        const resp = await fetch('/api/a2td/tasks');
+        a2tdSnapshotPending = true;
+        const resp = await fetch('/api/a2td/snapshot');
         const data = await resp.json();
-        setA2TDTasks(data.tasks);
-    } catch (e) {}
+        if (Array.isArray(data.tasks)) setA2TDTasks(data.tasks);
+        if (data.global_stat) renderA2TDStats(data.global_stat);
+    } catch (e) {} finally {
+        a2tdSnapshotPending = false;
+    }
 }
+
+function refreshA2TDMonitorIfNeeded(force = false) {
+    const page = document.getElementById('page-aria2teldrive');
+    if (!page || !page.classList.contains('active')) return;
+    loadA2TDTasks(force);
+}
+
 
 function renderA2TDStats(stats) {
     if (!stats) return;
@@ -1488,6 +1506,10 @@ window.onload = () => {
     connectWS();
     checkServicesStatus();
     setInterval(checkServicesStatus, 30000);
+    setInterval(() => refreshA2TDMonitorIfNeeded(), 4000);
+    document.addEventListener('visibilitychange', () => {
+        if (!document.hidden) refreshA2TDMonitorIfNeeded(true);
+    });
     initAutoSave();
     // 监听 Tel2TelDrive SSE 事件
     const es = new EventSource('/api/t2td/stream');
@@ -1502,6 +1524,7 @@ window.onload = () => {
         }catch(e){}
     };
 };
+
 
 // ── Tel2TelDrive Integration ──
 let t2tdQrRefreshPending = false;
