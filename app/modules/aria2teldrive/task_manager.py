@@ -12,7 +12,7 @@ from pathlib import Path
 from app.config import load_config
 from app.aria2_client import Aria2Client
 from app.modules.aria2teldrive.teldrive_client import TelDriveClient
-from app.downloader import downloader
+from app.downloader import downloader, TaskStatus
 from app import database as db
 
 
@@ -39,6 +39,7 @@ class TaskManager:
 
     def __init__(self):
         self.config = load_config()
+
         self.aria2: Optional[Aria2Client] = None
         self.teldrive: Optional[TelDriveClient] = None
         self._ws_clients: Set = set()
