@@ -104,13 +104,44 @@ function normalizePikpakLoginMode(mode = 'password') {
     return normalized === 'session' || normalized === 'token' ? 'token' : 'password';
 }
 
+function syncPikpakLoginModeButtons(groupId, mode) {
+    const normalized = normalizePikpakLoginMode(mode);
+    const group = document.getElementById(groupId);
+    if (!group) return;
+    group.querySelectorAll('[data-mode]').forEach(btn => {
+        const active = normalizePikpakLoginMode(btn.dataset.mode) === normalized;
+        btn.classList.toggle('active', active);
+        btn.setAttribute('aria-pressed', active ? 'true' : 'false');
+    });
+}
+
+function updatePikpakLoginMode(inputId, groupId, mode, autoSave = false) {
+    const normalized = normalizePikpakLoginMode(mode);
+    const input = document.getElementById(inputId);
+    if (input) input.value = normalized;
+    syncPikpakLoginModeButtons(groupId, normalized);
+
+    if (inputId === 'wPikLoginMode') {
+        toggleWizardPikpakLoginMode();
+        return;
+    }
+
+    togglePikpakLoginMode();
+    if (autoSave && input) {
+        if (_autoSaveTimer) clearTimeout(_autoSaveTimer);
+        _autoSaveTimer = setTimeout(() => doAutoSave(input), 200);
+    }
+}
+
 function toggleWizardPikpakLoginMode() {
     const mode = normalizePikpakLoginMode(document.getElementById('wPikLoginMode')?.value || 'password');
     const passwordFields = document.getElementById('wPikPasswordFields');
     const tokenFields = document.getElementById('wPikTokenFields');
+    syncPikpakLoginModeButtons('wPikLoginModeSwitch', mode);
     if (passwordFields) passwordFields.style.display = mode === 'token' ? 'none' : 'grid';
     if (tokenFields) tokenFields.style.display = mode === 'token' ? 'grid' : 'none';
 }
+
 
 function fillWizardInputs(data = {}) {
     try {
@@ -128,8 +159,9 @@ function fillWizardInputs(data = {}) {
         document.getElementById('wDbPort').value = data.telegram_db?.port || 5432;
         document.getElementById('wDbName').value = data.telegram_db?.name || 'postgres';
         document.getElementById('wDbUser').value = data.telegram_db?.user || 'postgres';
-        document.getElementById('wAria2Os').value = data.aria2?.os_type || document.getElementById('wAria2Os').value || '';
+        updateWizardAria2Os(data.aria2?.os_type || document.getElementById('wAria2Os')?.value || '');
         document.getElementById('wAria2MaxConcurrent').value = data.aria2?.max_concurrent || 3;
+
         document.getElementById('wAria2Split').value = data.aria2?.split || 8;
         document.getElementById('wAria2MaxConnPerServer').value = data.aria2?.max_connection_per_server || 8;
         document.getElementById('wAria2MinSplitSize').value = data.aria2?.min_split_size_mb || 5;
@@ -241,8 +273,9 @@ async function refreshAria2RuntimeStatus(showToast = false) {
         if (!resp.ok) throw new Error(data.detail || data.message || '读取 aria2 状态失败');
         renderAria2RuntimeViews(data);
         const osInput = document.getElementById('wAria2Os');
-        if (osInput && !osInput.value && data.host_os) osInput.value = data.host_os;
+        if (osInput && !osInput.value && data.host_os) updateWizardAria2Os(data.host_os);
         if (data.installed && (!window.currentConfig?.aria2?.binary_path || window.currentConfig?.aria2?.installed !== true)) {
+
             await syncCurrentConfigFromServer();
         }
         if (['downloading', 'extracting', 'starting'].includes(data.status)) {
@@ -273,9 +306,33 @@ async function refreshAria2RuntimeStatus(showToast = false) {
     }
 }
 
-function getWizardSelectedOs() {
-    return String(document.getElementById('wAria2Os')?.value || '').trim().toLowerCase();
+function normalizeWizardAria2Os(osType = '') {
+    const normalized = String(osType || '').trim().toLowerCase();
+    return ['win', 'linux'].includes(normalized) ? normalized : '';
 }
+
+function syncWizardAria2OsButtons(osType) {
+    const normalized = normalizeWizardAria2Os(osType);
+    const group = document.getElementById('wAria2OsSwitch');
+    if (!group) return;
+    group.querySelectorAll('[data-os]').forEach(btn => {
+        const active = btn.dataset.os === normalized;
+        btn.classList.toggle('active', active);
+        btn.setAttribute('aria-pressed', active ? 'true' : 'false');
+    });
+}
+
+function updateWizardAria2Os(osType) {
+    const normalized = normalizeWizardAria2Os(osType);
+    const input = document.getElementById('wAria2Os');
+    if (input) input.value = normalized;
+    syncWizardAria2OsButtons(normalized);
+}
+
+function getWizardSelectedOs() {
+    return normalizeWizardAria2Os(document.getElementById('wAria2Os')?.value || '');
+}
+
 
 async function startWizardAria2AutoInstall() {
     const osType = getWizardSelectedOs();
@@ -1721,9 +1778,11 @@ function togglePikpakLoginMode() {
     const mode = normalizePikpakLoginMode(document.getElementById('cfgPikpakLoginMode')?.value || 'password');
     const passwordFields = document.getElementById('cfgPikpakPasswordFields');
     const tokenFields = document.getElementById('cfgPikpakTokenFields');
+    syncPikpakLoginModeButtons('cfgPikpakLoginModeSwitch', mode);
     if (passwordFields) passwordFields.style.display = mode === 'token' ? 'none' : 'grid';
     if (tokenFields) tokenFields.style.display = mode === 'token' ? 'grid' : 'none';
 }
+
 
 
 function collectSettingsConfig() {

@@ -88,9 +88,15 @@
         .wizard-meta-item { font-size: 12px; color: var(--text-secondary); display: flex; align-items: center; justify-content: space-between; gap: 12px; }
         .wizard-meta-item strong { color: var(--text-primary); font-weight: 600; }
 
-
+        .segmented-control { display: flex; align-items: center; gap: 8px; padding: 6px; background: linear-gradient(180deg, #f8fbff, #f1f5f9); border: 1px solid var(--border); border-radius: 16px; box-shadow: inset 0 1px 0 rgba(255,255,255,0.8); }
+        .segmented-btn { flex: 1; min-width: 0; border: none; background: transparent; color: var(--text-secondary); border-radius: 12px; padding: 12px 14px; display: inline-flex; align-items: center; justify-content: center; gap: 8px; font-family: inherit; font-size: 14px; font-weight: 600; cursor: pointer; transition: all 0.22s ease; }
+        .segmented-btn i { font-size: 16px; }
+        .segmented-btn:hover { color: var(--text-primary); background: rgba(255,255,255,0.62); }
+        .segmented-btn.active { background: #ffffff; color: var(--accent); box-shadow: 0 10px 24px rgba(15, 23, 42, 0.08), 0 2px 6px rgba(0, 102, 255, 0.08); }
+        .segmented-btn:focus-visible { outline: none; box-shadow: 0 0 0 3px rgba(0, 102, 255, 0.14); }
 
         /* ── Pages ── */
+
         .page-content { flex: 1; min-height: 0; overflow-y: auto; padding-bottom: 20px; scrollbar-width: none; position: relative; }
         .page-content::-webkit-scrollbar { display: none; }
         .page { display: none; transform-origin: top center; will-change: opacity, transform, filter; }
@@ -1044,12 +1050,20 @@
                                 <div class="field-grid cols-1">
                                     <div class="form-group">
                                         <label>登录方式</label>
-                                        <select class="form-input" id="cfgPikpakLoginMode" onchange="togglePikpakLoginMode()">
-                                            <option value="password">账号密码登录</option>
-                                            <option value="token">Encoded Token 登录</option>
-                                        </select>
+                                        <input type="hidden" id="cfgPikpakLoginMode" value="password">
+                                        <div class="segmented-control" id="cfgPikpakLoginModeSwitch">
+                                            <button type="button" class="segmented-btn active" data-mode="password" onclick="updatePikpakLoginMode('cfgPikpakLoginMode', 'cfgPikpakLoginModeSwitch', 'password', true)">
+                                                <i class="ph ph-user"></i>
+                                                <span>账号密码登录</span>
+                                            </button>
+                                            <button type="button" class="segmented-btn" data-mode="token" onclick="updatePikpakLoginMode('cfgPikpakLoginMode', 'cfgPikpakLoginModeSwitch', 'token', true)">
+                                                <i class="ph ph-key"></i>
+                                                <span>Encoded Token 登录</span>
+                                            </button>
+                                        </div>
                                     </div>
                                 </div>
+
                                 <div class="field-grid" id="cfgPikpakPasswordFields">
                                     <div class="form-group"><label>身份标识 (Email)</label><input class="form-input" type="text" id="cfgPikpakUsername" placeholder="email@example.com"></div>
                                     <div class="form-group"><label>访问密钥</label><input class="form-input" type="password" id="cfgPikpakPassword" placeholder="******"></div>
@@ -1207,12 +1221,20 @@
                 <div class="field-grid cols-1">
                     <div class="form-group">
                         <label>PikPak 登录方式</label>
-                        <select class="form-input" id="wPikLoginMode" onchange="toggleWizardPikpakLoginMode()">
-                            <option value="password">账号密码登录</option>
-                            <option value="token">Encoded Token 登录</option>
-                        </select>
+                        <input type="hidden" id="wPikLoginMode" value="password">
+                        <div class="segmented-control" id="wPikLoginModeSwitch">
+                            <button type="button" class="segmented-btn active" data-mode="password" onclick="updatePikpakLoginMode('wPikLoginMode', 'wPikLoginModeSwitch', 'password')">
+                                <i class="ph ph-user"></i>
+                                <span>账号密码登录</span>
+                            </button>
+                            <button type="button" class="segmented-btn" data-mode="token" onclick="updatePikpakLoginMode('wPikLoginMode', 'wPikLoginModeSwitch', 'token')">
+                                <i class="ph ph-key"></i>
+                                <span>Encoded Token 登录</span>
+                            </button>
+                        </div>
                     </div>
                 </div>
+
                 <div class="field-grid cols-1" id="wPikPasswordFields">
                     <div class="form-group">
                         <label>PikPak 账号 / 邮箱</label>
@@ -1241,13 +1263,21 @@
                 <div class="field-grid cols-1">
                     <div class="form-group">
                         <label>当前操作系统</label>
-                        <select class="form-input" id="wAria2Os">
-                            <option value="">请选择当前运行环境</option>
-                            <option value="win">Windows</option>
-                            <option value="linux">Linux</option>
-                        </select>
+                        <input type="hidden" id="wAria2Os" value="">
+                        <div class="segmented-control" id="wAria2OsSwitch">
+                            <button type="button" class="segmented-btn" data-os="win" onclick="updateWizardAria2Os('win')">
+                                <i class="ph ph-windows-logo"></i>
+                                <span>Windows</span>
+                            </button>
+                            <button type="button" class="segmented-btn" data-os="linux" onclick="updateWizardAria2Os('linux')">
+                                <i class="ph ph-linux-logo"></i>
+                                <span>Linux</span>
+                            </button>
+                        </div>
+                        <div class="wizard-note">请按当前运行本服务的宿主系统选择；状态刷新后会自动带出当前环境。</div>
                     </div>
                 </div>
+
                 <div class="wizard-choice-grid">
                     <button type="button" class="btn btn-primary" id="wAria2AutoBtn" style="width:100%; justify-content:center; min-height:48px;" onclick="startWizardAria2AutoInstall()"><i class="ph ph-download-simple"></i> 自动拉取并安装 aria2</button>
                     <div>
