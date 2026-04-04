@@ -764,6 +764,7 @@
         async function enterApp() {
             try {
                 sessionStorage.setItem('tdm-login-transition', '1');
+                sessionStorage.setItem('tdm-auth-boot-wait', '1');
             } catch (e) {}
             btn.classList.remove('loading');
             btn.classList.add('success');

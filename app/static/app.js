@@ -714,9 +714,48 @@ async function wizardFinish(btn = null) {
 
 // ── 全局 401 拦截 ──
 const _origFetch = window.fetch;
+
+function hasPendingAuthBootWait() {
+    try {
+        return sessionStorage.getItem('tdm-auth-boot-wait') === '1';
+    } catch (e) {
+        return false;
+    }
+}
+
+function clearPendingAuthBootWait() {
+    try {
+        sessionStorage.removeItem('tdm-auth-boot-wait');
+    } catch (e) {}
+}
+
+async function waitForFrontendAuthReady(maxAttempts = 18) {
+    if (!hasPendingAuthBootWait()) return true;
+
+    for (let i = 0; i < maxAttempts; i += 1) {
+        try {
+            const resp = await _origFetch('/api/auth/check', {
+                method: 'GET',
+                credentials: 'same-origin',
+                cache: 'no-store',
+                headers: { 'Cache-Control': 'no-cache' }
+            });
+            const data = await readJsonSafe(resp);
+            if (resp.ok && data.authenticated) {
+                clearPendingAuthBootWait();
+                return true;
+            }
+        } catch (e) {}
+        await new Promise(resolve => setTimeout(resolve, 120 + i * 40));
+    }
+
+    clearPendingAuthBootWait();
+    return false;
+}
+
 window.fetch = async function (...args) {
     const resp = await _origFetch.apply(this, args);
-    if (resp.status === 401) { window.location.href = '/login'; }
+    if (resp.status === 401 && !hasPendingAuthBootWait()) { window.location.href = '/login'; }
     return resp;
 };
 
@@ -2192,7 +2231,13 @@ function showFieldCheck(input) {
 }
 
 // ── Startup ──
-window.onload = () => {
+window.onload = async () => {
+    const authReady = await waitForFrontendAuthReady();
+    if (!authReady) {
+        window.location.replace('/login');
+        return;
+    }
+
     checkSetupRequired();
     connectWS();
     checkServicesStatus();

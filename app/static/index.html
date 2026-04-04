@@ -129,8 +129,8 @@
         .page-content::-webkit-scrollbar { display: none; }
         .page { display: none; transform-origin: top center; will-change: opacity, transform, filter; }
         .page.active { display: block; }
-        .page.page-fill { height: 100%; }
-        .page.page-fill.active { display: flex; }
+        .page.page-fill { width: 100%; height: calc(100% - 20px); }
+        .page.page-fill.active { display: flex; width: 100%; }
 
         .page.page-exit { animation: pageExit 0.28s cubic-bezier(0.4, 0, 0.2, 1) forwards; }
         .page.page-enter.page-enter-active { animation: pageEnterSmooth 0.48s cubic-bezier(0.16, 1, 0.3, 1) forwards; }
@@ -173,7 +173,7 @@
         .card-header h3 { font-size: 15px; font-weight: 600; display: flex; align-items: center; gap: 8px; }
         .card-header h3 i { font-size: 20px; color: var(--accent); }
         .card-body { padding: 24px; }
-        .page-fill-card { height: 100%; display: flex; flex-direction: column; margin-bottom: 0; }
+        .page-fill-card { width: 100%; height: 100%; display: flex; flex-direction: column; margin-bottom: 0; }
         .page-fill-card > .card-body { flex: 1; min-height: 0; display: flex; flex-direction: column; }
         .share-toolbar { display: flex; gap: 12px; margin-bottom: 24px; flex-shrink: 0; }
         .share-file-panel { display: none; flex: 1; min-height: 0; border: 1px solid var(--border); border-radius: var(--radius-lg); background: linear-gradient(180deg, rgba(248,250,252,0.82), rgba(255,255,255,0.98)); overflow: hidden; }

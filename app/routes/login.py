@@ -27,7 +27,7 @@ async def login(req: LoginRequest):
     response = JSONResponse({"success": True, "token": token})
     response.set_cookie(
         key="auth_token", value=token,
-        httponly=True, samesite="lax", max_age=86400 * 7,
+        httponly=True, samesite="lax", max_age=86400 * 7, path="/",
     )
     return response
 
@@ -37,7 +37,7 @@ async def logout(auth_token: Optional[str] = Cookie(None)):
     if auth_token:
         revoke_token(auth_token)
     response = JSONResponse({"success": True})
-    response.delete_cookie("auth_token")
+    response.delete_cookie("auth_token", path="/")
     return response
 
 
