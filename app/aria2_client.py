@@ -198,13 +198,17 @@ class Aria2Client:
     @staticmethod
     def parse_status(status: dict) -> dict:
         """解析 aria2 下载状态为可读格式"""
-        total_length = int(status.get("totalLength", 0))
-        completed_length = int(status.get("completedLength", 0))
-        download_speed = int(status.get("downloadSpeed", 0))
+        total_length = _safe_int(status.get("totalLength", 0))
+        completed_length = _safe_int(status.get("completedLength", 0))
+        download_speed = _safe_int(status.get("downloadSpeed", 0))
+        connections = _safe_int(status.get("connections", 0))
 
         progress = 0.0
         if total_length > 0:
             progress = round(completed_length / total_length * 100, 1)
+
+        remaining_length = max(0, total_length - completed_length)
+        eta_text = _format_eta(remaining_length, download_speed)
 
         filename = None
         file_path = ""
@@ -242,6 +246,10 @@ class Aria2Client:
             "completed_length": completed_length,
             "download_speed": download_speed,
             "speed_str": _format_speed(download_speed),
+            "downloaded_text": _format_size(completed_length),
+            "total_text": _format_size(total_length),
+            "eta_text": eta_text,
+            "connections": connections,
             "file_size": _format_size(total_length),
             "filename": filename,
             "file_path": file_path,
@@ -249,6 +257,13 @@ class Aria2Client:
             "dir_path": dir_path,
             "gid": status.get("gid", "")
         }
+
+
+def _safe_int(value) -> int:
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
 
 
 def _format_speed(speed: int) -> str:
@@ -273,3 +288,16 @@ def _format_size(size: int) -> str:
         return f"{size / (1024 * 1024):.1f} MB"
     else:
         return f"{size / (1024 * 1024 * 1024):.2f} GB"
+
+
+def _format_eta(remaining_bytes: int, speed: int) -> str:
+    if remaining_bytes <= 0 or speed <= 0:
+        return ""
+    seconds = max(1, int(remaining_bytes / speed))
+    hours, remainder = divmod(seconds, 3600)
+    minutes, secs = divmod(remainder, 60)
+    if hours > 0:
+        return f"{hours} 小时 {minutes} 分"
+    if minutes > 0:
+        return f"{minutes} 分 {secs} 秒"
+    return f"{secs} 秒"

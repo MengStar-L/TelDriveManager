@@ -1622,6 +1622,32 @@ function getA2TDTaskCardId(task) {
     return 'pb-' + String(task?.task_id || 'unknown').replace(/[^a-zA-Z0-9_-]/g, '_');
 }
 
+function getA2TDTaskTotalText(task) {
+    if (task.total_text) return task.total_text;
+    const totalBytes = getA2TDNumber(task.total_bytes);
+    if (totalBytes > 0) return formatBytes(totalBytes);
+    return task.file_size || '--';
+}
+
+function getA2TDTaskDownloadedText(task) {
+    if (task.downloaded_text) return task.downloaded_text;
+    const downloadedBytes = getA2TDNumber(task.downloaded_bytes);
+    if (downloadedBytes > 0) return formatBytes(downloadedBytes);
+    const totalBytes = getA2TDNumber(task.total_bytes);
+    const progress = Math.max(0, Math.min(100, getA2TDNumber(task.download_progress)));
+    if (totalBytes > 0 && progress > 0) return formatBytes(Math.round(totalBytes * progress / 100));
+    return '--';
+}
+
+function getA2TDTaskConnectionText(task) {
+    if (!(task.status === 'downloading' || task.status === 'paused')) return '--';
+    const current = Math.max(0, getA2TDNumber(task.connections));
+    const max = Math.max(0, getA2TDNumber(task.max_connections));
+    if (max > 0) return `${current}/${Math.max(current, max)}`;
+    if (current > 0) return String(current);
+    return task.status === 'paused' ? '0' : '--';
+}
+
 function buildA2TDTaskCardContent(task) {
     const mode = getA2TDTaskMode(task);
     const stalled = isA2TDTaskStalled(task);
@@ -1629,21 +1655,21 @@ function buildA2TDTaskCardContent(task) {
     const filenameText = task.filename || task.task_id || '未命名任务';
     const statusLabel = escapeA2TDHtml(getA2TDTaskStatusLabel(task.status));
     const downloadProgress = Math.min(task.status === 'completed' ? 100 : 99.9, Number(task.download_progress || 0)).toFixed(1);
+    const totalText = getA2TDTaskTotalText(task);
     const transferredText = mode === 'upload'
-        ? `${task.transferred_text || '0 B'} / ${task.total_text || task.file_size || '--'}`
-        : `${task.downloaded_text || '--'} / ${task.total_text || task.file_size || '--'}`;
+        ? `${task.transferred_text || '0 B'} / ${totalText}`
+        : `${getA2TDTaskDownloadedText(task)} / ${totalText}`;
     const speedText = task.download_speed || '0 B/s';
     const etaText = stalled
         ? '已无进度超过 15 秒'
         : (task.status === 'downloading' ? (task.eta_text || '--') : '--');
-    const connectionText = task.status === 'downloading' || task.status === 'paused'
-        ? `${Math.max(0, getA2TDNumber(task.connections))}/${Math.max(1, getA2TDNumber(task.max_connections) || 1)}`
-        : '--';
+    const connectionText = getA2TDTaskConnectionText(task);
     const activityText = formatA2TDRelativeTime(task.last_event_at || task.updated_at || task.created_at);
     const { done: uploadChunkDone, total: uploadChunkTotal } = getA2TDUploadChunkStats(task);
     const isUploadStage = mode === 'upload' || (task.status !== 'completed' && Number(task.upload_progress || 0) > 0 && Number(task.download_progress || 0) >= 100);
     const actionsHtml = getA2TDTaskActions(task);
     const inlineItems = [];
+
 
     const pushMetaItem = (text, className = 'muted') => {
         if (!text) return;

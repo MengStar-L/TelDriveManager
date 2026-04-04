@@ -348,7 +348,31 @@ class TaskManager:
             return task_target
         return self._calc_teldrive_path(local_path)
 
+    def _get_configured_connection_limit(self) -> int:
+        aria2_cfg = self.config.get("aria2", {})
+        split = max(0, int(aria2_cfg.get("split") or 0))
+        per_server = max(0, int(aria2_cfg.get("max_connection_per_server") or 0))
+        return max(split, per_server)
+
+    def _build_download_runtime_fields(self, parsed: dict, task_status: str) -> dict:
+        total_bytes = max(0, int(parsed.get("total_length") or 0))
+        downloaded_bytes = max(0, int(parsed.get("completed_length") or 0))
+        if total_bytes > 0:
+            downloaded_bytes = min(downloaded_bytes, total_bytes)
+        current_connections = max(0, int(parsed.get("connections") or 0))
+        max_connections = max(current_connections, self._get_configured_connection_limit())
+        return {
+            "downloaded_text": parsed.get("downloaded_text") or "0 B",
+            "downloaded_bytes": downloaded_bytes,
+            "total_text": parsed.get("total_text") or parsed.get("file_size") or "0 B",
+            "total_bytes": total_bytes,
+            "eta_text": parsed.get("eta_text") or "" if task_status == "downloading" else "",
+            "connections": current_connections if task_status in ("downloading", "paused") else 0,
+            "max_connections": max_connections if task_status in ("downloading", "paused") else 0,
+        }
+
     def get_global_stat(self) -> dict:
+
 
         """获取当前缓存的全局统计数据（供 WS init 立即推送）"""
         data = {
@@ -578,7 +602,12 @@ class TaskManager:
                         file_size=parsed["file_size"],
                         local_path=parsed["file_path"]
                     )
+                    self._set_runtime_task_fields(
+                        task_id,
+                        **self._build_download_runtime_fields(parsed, initial_status)
+                    )
                     self._known_gids.add(gid)
+
                     if initial_status == "downloading":
                         tracked_download_speed += int(parsed["download_speed"] or 0)
                     logger.info(f"发现 aria2 任务: {gid} ({parsed['filename']}) 状态={initial_status}")
@@ -649,9 +678,14 @@ class TaskManager:
                 update_data["status"] = "cancelled"
 
             await db.update_task(task_id, **update_data)
+            self._set_runtime_task_fields(
+                task_id,
+                **self._build_download_runtime_fields(parsed, update_data.get("status") or current_status)
+            )
             # 合并更新数据到已有 task 记录用于广播，避免再次查库
             task.update(update_data)
             await self._broadcast_task_update(task_id, task)
+
 
             # 下载完成 → 触发上传
             if aria2_status == "complete" and current_status != "uploading":
