@@ -391,8 +391,10 @@ class TelDriveClient:
         offset = 0
         part_no = 1
         confirmed_bytes = 0
+        confirmed_parts = 0
 
         while offset < file_size:
+
             cur_chunk_size = min(self.chunk_size, file_size - offset)
             logger.info(f"  上传块 {part_no}/{total_parts} ({cur_chunk_size} bytes)")
 
@@ -432,8 +434,10 @@ class TelDriveClient:
         results: Dict[int, Dict] = {}
         lock = asyncio.Lock()
         confirmed_bytes = 0
+        confirmed_parts = 0
 
         # 构建 chunk 描述表（仅偏移量+大小，不读文件）
+
         chunks_info = []
         offset = 0
         part_no = 1
@@ -457,8 +461,10 @@ class TelDriveClient:
                 async with lock:
                     results[p_no] = part_result
                     confirmed_bytes += p_size
+                    confirmed_parts += 1
                     if progress_callback:
-                        await progress_callback(min(confirmed_bytes, file_size), file_size)
+                        await progress_callback(min(confirmed_bytes, file_size), file_size, confirmed_parts, total_parts)
+
 
         # 创建所有上传任务
         tasks = [
