@@ -2496,6 +2496,29 @@ async function downloadMagnetFiles() {
 let shareCurrentData = null;
 let shareFileData = [];
 let shareDownloadSubmitting = false;
+const shareNameCollator = new Intl.Collator('zh-CN', { numeric: true, sensitivity: 'base' });
+
+function getShareFileName(item = {}) {
+    return String(item.name || item.title || '').trim();
+}
+
+function getShareFilePath(item = {}) {
+    return String(item.path || getShareFileName(item)).trim();
+}
+
+function compareShareFilesByName(a = {}, b = {}) {
+    const nameDiff = shareNameCollator.compare(getShareFileName(a), getShareFileName(b));
+    if (nameDiff !== 0) return nameDiff;
+
+    const pathDiff = shareNameCollator.compare(getShareFilePath(a), getShareFilePath(b));
+    if (pathDiff !== 0) return pathDiff;
+
+    return String(a.id || a.file_id || '').localeCompare(String(b.id || b.file_id || ''));
+}
+
+function sortShareFilesByName(files = []) {
+    return Array.isArray(files) ? [...files].sort(compareShareFilesByName) : [];
+}
 
 async function parseShareLink() {
 
@@ -2504,9 +2527,10 @@ async function parseShareLink() {
     if (!shareLink) return alert('请输入 分享链接');
 
     const parseBtn = document.getElementById('shareParseBtn');
+    const shareFileArea = document.getElementById('shareFileArea');
     parseBtn.disabled = true;
     parseBtn.innerHTML = '<span class="spinner"></span> 解析中...';
-    document.getElementById('shareFileArea').style.display = 'none';
+    shareFileArea?.classList.remove('visible');
 
     try {
         const resp = await fetch('/api/pikpak/share/list', {
@@ -2518,10 +2542,10 @@ async function parseShareLink() {
         if (!resp.ok) throw new Error(data.error || '解析失败');
 
         shareCurrentData = data;
-        shareFileData = data.files || [];
+        shareFileData = sortShareFilesByName(data.files || []);
         renderPickerTree('fileList', shareFileData, 'share');
         
-        document.getElementById('shareFileArea').style.display = 'block';
+        shareFileArea?.classList.add('visible');
         updatePickerSelection('share');
     } catch(e) {
         alert(e.message);
@@ -2539,22 +2563,23 @@ function toggleSelectAll() {
 }
 
 function reRenderShareFileList() {
+    shareFileData = sortShareFilesByName(shareFileData);
     renderPickerTree('fileList', shareFileData, 'share');
 }
 
 async function downloadShareFiles() {
     if (!shareCurrentData || shareDownloadSubmitting) return;
     const checkboxes = document.querySelectorAll('#fileList input[type="checkbox"]:checked');
-    const selectedIds = Array.from(checkboxes).map(cb => cb.value);
+    const selectedSet = new Set(Array.from(checkboxes).map(cb => String(cb.value || '')));
+    const orderedSelectedItems = shareFileData.filter(item => selectedSet.has(String(item.id || '')));
+    const selectedIds = orderedSelectedItems.map(item => item.id);
     
     if (!selectedIds.length) return alert('请先选择需要下载的分享节点');
 
     const keepStructure = document.getElementById('shareKeepStructure').checked;
     const renameByFolder = document.getElementById('shareRenameByFolder').checked;
     const filePaths = Object.fromEntries(
-        shareFileData
-            .filter(item => selectedIds.includes(item.id))
-            .map(item => [item.id, item.path || item.name || ''])
+        orderedSelectedItems.map(item => [item.id, item.path || item.name || ''])
     );
     
     const btn = document.getElementById('downloadShareBtn');

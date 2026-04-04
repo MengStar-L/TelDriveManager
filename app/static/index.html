@@ -129,6 +129,8 @@
         .page-content::-webkit-scrollbar { display: none; }
         .page { display: none; transform-origin: top center; will-change: opacity, transform, filter; }
         .page.active { display: block; }
+        .page.page-fill { height: 100%; }
+        .page.page-fill.active { display: flex; }
 
         .page.page-exit { animation: pageExit 0.28s cubic-bezier(0.4, 0, 0.2, 1) forwards; }
         .page.page-enter.page-enter-active { animation: pageEnterSmooth 0.48s cubic-bezier(0.16, 1, 0.3, 1) forwards; }
@@ -171,6 +173,11 @@
         .card-header h3 { font-size: 15px; font-weight: 600; display: flex; align-items: center; gap: 8px; }
         .card-header h3 i { font-size: 20px; color: var(--accent); }
         .card-body { padding: 24px; }
+        .page-fill-card { height: 100%; display: flex; flex-direction: column; margin-bottom: 0; }
+        .page-fill-card > .card-body { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+        .share-toolbar { display: flex; gap: 12px; margin-bottom: 24px; flex-shrink: 0; }
+        .share-file-panel { display: none; flex: 1; min-height: 0; border: 1px solid var(--border); border-radius: var(--radius-lg); background: linear-gradient(180deg, rgba(248,250,252,0.82), rgba(255,255,255,0.98)); overflow: hidden; }
+        .share-file-panel.visible { display: flex; flex-direction: column; }
 
         /* ── Buttons ── */
         .btn { padding: 10px 20px; border: none; border-radius: 100px; font-family: inherit; font-size: 14px; font-weight: 600; cursor: pointer; transition: all 0.2s; display: inline-flex; align-items: center; justify-content: center; gap: 8px; line-height: 1; white-space: nowrap; flex-shrink: 0; }
@@ -203,7 +210,7 @@
         .file-list-header label { font-size: 14px; cursor: pointer; display: flex; align-items: center; gap: 8px; font-weight: 500; }
         .file-count { font-size: 13px; color: var(--text-secondary); font-weight: 500; }
 
-        .file-list { max-height: 400px; overflow-y: auto; scrollbar-width: thin; scrollbar-color: #cbd5e1 transparent; }
+        .file-list { flex: 1; min-height: 0; max-height: 400px; overflow-y: auto; scrollbar-width: thin; scrollbar-color: #cbd5e1 transparent; }
         .file-row { display: flex; align-items: center; gap: 12px; padding: 14px 24px; border-bottom: 1px solid rgba(226, 232, 240, 0.8); font-size: 14px; transition: background 0.2s; cursor: pointer; }
         .file-row:hover { background: var(--bg-hover); }
         .file-row:last-child { border-bottom: none; }
@@ -217,7 +224,7 @@
         .folder-row:hover { background: #e0f2fe; }
         .folder-row .file-icon { color: var(--accent); }
 
-        .share-actions { display: flex; align-items: center; justify-content: space-between; padding: 16px 24px;}
+        .share-actions { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 16px 24px; flex-shrink: 0;}
         .selected-info { font-size: 13px; color: var(--text-secondary); font-weight: 500; }
         
         /* ── Log Container ── */
@@ -827,16 +834,16 @@
                 </div>
 
                 <!-- Share -->
-                <div class="page" id="page-share">
-                    <div class="card">
+                <div class="page page-fill" id="page-share">
+                    <div class="card page-fill-card">
                         <div class="card-body">
-                            <div style="display:flex; gap:12px; margin-bottom: 24px;">
+                            <div class="share-toolbar">
                                 <input class="form-input" type="text" id="shareLink" placeholder="输入 PikPak 分享链接...">
                                 <input class="form-input" style="width:180px" type="text" id="sharePassCode" placeholder="提取码">
                                 <button class="btn btn-primary" id="shareParseBtn" onclick="parseShareLink()"><i class="ph ph-magnifying-glass"></i> 解析</button>
                             </div>
                             
-                            <div id="shareFileArea" style="display:none; border:1px solid var(--border); border-radius:var(--radius-lg);">
+                            <div id="shareFileArea" class="share-file-panel">
                                 <div class="file-list-header">
                                     <label><input type="checkbox" id="selectAll" onchange="toggleSelectAll()"> 全选节点</label>
                                     <span class="file-count" id="fileCount"></span>

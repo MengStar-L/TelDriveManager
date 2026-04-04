@@ -38,6 +38,25 @@ def _format_size(size: int) -> str:
     return f"{size} B"
 
 
+_NATURAL_SPLIT_RE = re.compile(r"(\d+)")
+
+
+def _natural_sort_key(value: str):
+    parts = _NATURAL_SPLIT_RE.split(str(value or "").strip().lower())
+    return tuple((0, int(part)) if part.isdigit() else (1, part) for part in parts if part != "")
+
+
+def _sort_file_entries_by_name(files: List[Dict]) -> List[Dict]:
+    return sorted(
+        files or [],
+        key=lambda item: (
+            _natural_sort_key(item.get("name") or item.get("title") or ""),
+            _natural_sort_key(item.get("path") or item.get("name") or ""),
+            str(item.get("id") or item.get("file_id") or item.get("url") or ""),
+        ),
+    )
+
+
 def _create_clients():
     cfg = load_config()
     pikpak_cfg = cfg.get("pikpak", {})
@@ -443,6 +462,7 @@ async def api_share_list(request: Request):
         result = await _pikpak.get_share_file_list(share_link, pass_code)
         for f in result.get("files", []):
             f["size_str"] = _format_size(f.get("size", 0))
+        result["files"] = _sort_file_entries_by_name(result.get("files", []))
         return result
     except ValueError as e:
         return JSONResponse({"error": str(e)}, status_code=400)
@@ -695,6 +715,8 @@ async def _process_share_download(share_id: str, file_ids: List[str], pass_code_
             for _, path in file_paths.items():
                 name = path.rsplit("/", 1)[-1]
                 orig_paths_by_name.setdefault(name, []).append(path)
+            for paths in orig_paths_by_name.values():
+                paths.sort(key=_natural_sort_key)
 
         all_urls: List[dict] = []
         for i, fid in enumerate(saved_ids, 1):
@@ -720,7 +742,7 @@ async def _process_share_download(share_id: str, file_ids: List[str], pass_code_
             await _broadcast_resolved_files(i, urls)
             all_urls.extend(urls)
 
-        all_urls = _dedupe_file_entries(all_urls)
+        all_urls = _sort_file_entries_by_name(_dedupe_file_entries(all_urls))
         if not all_urls:
             await _broadcast({"type": "error", "message": "所有文件链接获取失败"})
             return
