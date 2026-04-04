@@ -1006,11 +1006,21 @@ function formatA2TDRelativeTime(timestamp) {
     return `${Math.floor(diff / 3600000)} 小时前`;
 }
 
+function getA2TDUploadChunkStats(task) {
+    const total = Math.max(0, getA2TDNumber(task.upload_chunk_total));
+    const doneRaw = Math.max(0, getA2TDNumber(task.upload_chunk_done));
+    const done = total > 0 ? Math.min(doneRaw, total) : doneRaw;
+    return { done, total };
+}
+
 function getA2TDTaskProgress(task) {
     if (task.status === 'completed') return 100;
+    const { done: uploadChunkDone, total: uploadChunkTotal } = getA2TDUploadChunkStats(task);
     let progress = 0;
-    if (task.status === 'uploading') {
-        progress = Number(task.upload_progress || 0);
+    if (task.status === 'uploading' || uploadChunkTotal > 0) {
+        progress = uploadChunkTotal > 0
+            ? (uploadChunkDone / uploadChunkTotal) * 100
+            : Number(task.upload_progress || 0);
     } else if (Number(task.upload_progress || 0) > 0 && Number(task.download_progress || 0) >= 100) {
         progress = Number(task.upload_progress || 0);
     } else {
@@ -1020,11 +1030,17 @@ function getA2TDTaskProgress(task) {
     return progress;
 }
 
+
+
 function getA2TDTaskMode(task) {
     if (task.status === 'completed') return 'done';
-    if (task.status === 'uploading') return 'upload';
+    const { total: uploadChunkTotal } = getA2TDUploadChunkStats(task);
+    if (task.status === 'uploading' || uploadChunkTotal > 0 || (Number(task.upload_progress || 0) > 0 && Number(task.download_progress || 0) >= 100)) {
+        return 'upload';
+    }
     return 'download';
 }
+
 
 function isA2TDUploadReadyTask(task) {
     return !task.aria2_gid && (
@@ -1091,13 +1107,11 @@ function buildA2TDTaskCardContent(task) {
     const filename = escapeA2TDHtml(task.filename || task.task_id || '未命名任务');
     const statusLabel = escapeA2TDHtml(getA2TDTaskStatusLabel(task.status));
     const downloadProgress = Math.min(task.status === 'completed' ? 100 : 99.9, Number(task.download_progress || 0)).toFixed(1);
-    const uploadProgress = Math.min(task.status === 'completed' ? 100 : 99.9, Number(task.upload_progress || 0)).toFixed(1);
-    const speedText = task.status === 'downloading'
-        ? (task.download_speed || '0 B/s')
-        : (task.status === 'uploading' ? (task.upload_speed || '计算中') : '--');
-    const transferredText = task.status === 'uploading'
+    const transferredText = mode === 'upload'
         ? `${task.transferred_text || '0 B'} / ${task.total_text || task.file_size || '--'}`
         : `${task.downloaded_text || '--'} / ${task.total_text || task.file_size || '--'}`;
+
+    const speedText = task.download_speed || '0 B/s';
     const etaText = stalled
         ? '已无进度超过 15 秒'
         : (task.status === 'downloading' ? (task.eta_text || '--') : '--');
@@ -1105,9 +1119,66 @@ function buildA2TDTaskCardContent(task) {
         ? `${Math.max(0, getA2TDNumber(task.connections))}/${Math.max(1, getA2TDNumber(task.max_connections) || 1)}`
         : '--';
     const activityText = formatA2TDRelativeTime(task.last_event_at || task.updated_at || task.created_at);
-    const isUploadStage = task.status === 'uploading' || (task.status !== 'completed' && Number(task.upload_progress || 0) > 0 && Number(task.download_progress || 0) >= 100);
-    const progressLabel = task.status === 'completed' ? '' : (isUploadStage ? `上传 ${uploadProgress}%` : `下载 ${downloadProgress}%`);
+    const { done: uploadChunkDone, total: uploadChunkTotal } = getA2TDUploadChunkStats(task);
+    const isUploadStage = mode === 'upload' || (task.status !== 'completed' && Number(task.upload_progress || 0) > 0 && Number(task.download_progress || 0) >= 100);
+
     const actionsHtml = getA2TDTaskActions(task);
+    const inlineItems = [];
+
+    const pushInlineItem = (text, className = 'muted') => {
+        if (!text) return;
+        inlineItems.push(`<span class="task-inline-item ${className}">${text}</span>`);
+    };
+
+    if (!['downloading', 'uploading', 'completed'].includes(task.status)) {
+        pushInlineItem(statusLabel, 'status');
+    }
+
+
+    if (task.status === 'completed') {
+        pushInlineItem('已完成', 'primary');
+    } else if (isUploadStage) {
+        pushInlineItem(
+            uploadChunkTotal > 0 ? `${uploadChunkDone}/${uploadChunkTotal} 块` : '等待上传',
+            'primary upload'
+        );
+    } else {
+        pushInlineItem(`${downloadProgress}%`, 'primary');
+    }
+
+    if (stalled) {
+        pushInlineItem('<i class="ph ph-warning"></i> 疑似卡住', 'warning');
+    }
+
+    if (task.status === 'completed') {
+        pushInlineItem(`大小 ${escapeA2TDHtml(task.file_size || task.total_text || '--')}`);
+    } else if (isUploadStage) {
+        pushInlineItem(`已确认 ${escapeA2TDHtml(transferredText)}`);
+    } else {
+        pushInlineItem(escapeA2TDHtml(transferredText));
+        if (task.status === 'downloading' && speedText && speedText !== '--') {
+            pushInlineItem(`速度 ${escapeA2TDHtml(speedText)}`);
+        }
+        if ((task.status === 'downloading' || task.status === 'paused') && connectionText !== '--') {
+            pushInlineItem(`连接 ${escapeA2TDHtml(connectionText)}`);
+        }
+        if (task.status === 'downloading' && etaText && etaText !== '--') {
+            pushInlineItem(`剩余 ${escapeA2TDHtml(etaText)}`);
+        }
+    }
+
+
+    pushInlineItem(`最近活动 ${escapeA2TDHtml(activityText)}`);
+
+    const uploadNote = task.upload_note
+        ? `<div class="task-note ${task.upload_note_level === 'error' ? 'error' : 'warning'}"><i class="ph ${task.upload_note_level === 'error' ? 'ph-warning-circle' : 'ph-arrow-clockwise'}"></i><span>${escapeA2TDHtml(task.upload_note)}</span></div>`
+        : '';
+    const errorNote = task.error
+        ? `<div class="task-note error"><i class="ph ph-warning-circle"></i><span>${escapeA2TDHtml(task.error)}</span></div>`
+        : '';
+    const stalledNote = !task.error && !task.upload_note && stalled
+        ? '<div class="task-note warning"><i class="ph ph-warning"></i><span>连接长时间没有新数据，下载器会自动重试当前分块。</span></div>'
+        : '';
 
     return {
         className: `progress-card ${task.status || 'pending'} ${mode === 'done' ? 'completed' : mode === 'upload' ? 'uploading' : 'downloading'} ${stalled ? 'stalled' : ''}`.trim(),
@@ -1121,41 +1192,19 @@ function buildA2TDTaskCardContent(task) {
                     ${actionsHtml}
                 </div>
             </div>
-            <div class="task-chip-row">
-                <span class="task-chip task-chip-status">${statusLabel}</span>
-                ${progressLabel ? `<span class="task-chip task-chip-phase">${escapeA2TDHtml(progressLabel)}</span>` : ''}
-                ${stalled ? '<span class="task-chip task-chip-stalled"><i class="ph ph-warning"></i> 疑似卡住</span>' : ''}
+            <div class="task-inline-row">
+                ${inlineItems.join('')}
             </div>
             <div class="progress-bar-track">
                 <div class="progress-bar-fill ${mode === 'done' ? 'done' : mode}" data-bar style="width:${progress}%"></div>
             </div>
-            <div class="progress-meta-grid">
-                <div class="task-meta-cell">
-                    <span class="task-meta-label">已传输</span>
-                    <span class="task-meta-value">${escapeA2TDHtml(transferredText)}</span>
-                </div>
-                <div class="task-meta-cell accent">
-                    <span class="task-meta-label">实时速度</span>
-                    <span class="task-meta-value">${escapeA2TDHtml(speedText)}</span>
-                </div>
-                <div class="task-meta-cell">
-                    <span class="task-meta-label">连接数</span>
-                    <span class="task-meta-value">${escapeA2TDHtml(connectionText)}</span>
-                </div>
-                <div class="task-meta-cell">
-                    <span class="task-meta-label">预计剩余</span>
-                    <span class="task-meta-value">${escapeA2TDHtml(etaText)}</span>
-                </div>
-                <div class="task-meta-cell wide">
-                    <span class="task-meta-label">最近活动</span>
-                    <span class="task-meta-value">${escapeA2TDHtml(activityText)}</span>
-                </div>
-            </div>
-            ${task.error ? `<div class="task-note error"><i class="ph ph-warning-circle"></i><span>${escapeA2TDHtml(task.error)}</span></div>` : ''}
-            ${!task.error && stalled ? '<div class="task-note warning"><i class="ph ph-warning"></i><span>连接长时间没有新数据，下载器会自动重试当前分块。</span></div>' : ''}
+            ${uploadNote}
+            ${errorNote}
+            ${stalledNote}
         `
     };
 }
+
 
 
 function renderA2TDTasks(tasks) {

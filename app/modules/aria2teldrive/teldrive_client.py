@@ -404,10 +404,12 @@ class TelDriveClient:
             )
             parts.append(part_result)
             confirmed_bytes += cur_chunk_size
+            confirmed_parts += 1
             if progress_callback:
-                await progress_callback(min(confirmed_bytes, file_size), file_size)
+                await progress_callback(min(confirmed_bytes, file_size), file_size, confirmed_parts, total_parts)
 
             offset += cur_chunk_size
+
             part_no += 1
 
         return parts
@@ -442,8 +444,9 @@ class TelDriveClient:
             part_no += 1
 
         async def upload_chunk(p_no: int, p_offset: int, p_size: int):
-            nonlocal confirmed_bytes
+            nonlocal confirmed_bytes, confirmed_parts
             async with sem:
+
                 logger.info(f"  并发上传块 {p_no}/{total_parts} ({p_size} bytes)")
                 part_result = await self._upload_single_chunk(
                     session, upload_id, file_path,
@@ -500,7 +503,8 @@ class TelDriveClient:
         Args:
             file_path: 本地文件路径
             teldrive_path: TelDrive 目标路径
-            progress_callback: 进度回调函数 (confirmed_uploaded_bytes, total_bytes)
+            progress_callback: 进度回调函数 (confirmed_uploaded_bytes, total_bytes, confirmed_parts, total_parts)
+
 
 
         Returns:

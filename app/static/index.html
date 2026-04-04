@@ -457,60 +457,49 @@
         .progress-bar-fill::after { animation: progressShine 1.4s ease-in-out infinite; }
         .progress-bar-fill.done::after { display: none; }
 
-        .task-chip-row {
+        .task-inline-row {
             display: flex;
             flex-wrap: wrap;
             gap: 8px;
+            align-items: center;
             margin-bottom: 12px;
         }
-        .task-chip {
+        .task-inline-item {
             display: inline-flex;
             align-items: center;
             gap: 6px;
             padding: 5px 10px;
             border-radius: 999px;
             font-size: 12px;
+            line-height: 1.2;
             font-weight: 600;
             background: #f8fafc;
-            border: 1px solid #e2e8f0;
+            border: 1px solid rgba(226, 232, 240, 0.9);
             color: #475569;
-        }
-        .task-chip-phase { color: var(--accent); background: rgba(59,130,246,0.08); border-color: rgba(59,130,246,0.16); }
-        .task-chip-stalled { color: #b45309; background: rgba(245,158,11,0.12); border-color: rgba(245,158,11,0.2); }
-
-        .progress-meta-grid {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
-            gap: 10px;
-        }
-        .task-meta-cell {
-            background: #f8fafc;
-            border: 1px solid rgba(226, 232, 240, 0.8);
-            border-radius: 12px;
-            padding: 10px 12px;
-            display: flex;
-            flex-direction: column;
-            gap: 4px;
             min-width: 0;
+            max-width: 100%;
         }
-        .task-meta-cell.accent {
+        .task-inline-item.primary {
+            color: var(--accent);
             background: rgba(59,130,246,0.08);
-            border-color: rgba(59,130,246,0.14);
+            border-color: rgba(59,130,246,0.16);
         }
-        .task-meta-cell.wide { grid-column: span 2; }
-        .task-meta-label {
-            font-size: 11px;
-            color: var(--text-dim);
-            letter-spacing: 0.04em;
+        .task-inline-item.primary.upload {
+            color: #7c3aed;
+            background: rgba(139,92,246,0.1);
+            border-color: rgba(139,92,246,0.18);
         }
-        .task-meta-value {
-            font-size: 13px;
-            color: var(--text-primary);
-            font-weight: 600;
-            overflow: hidden;
-            text-overflow: ellipsis;
-            white-space: nowrap;
+        .task-inline-item.status { color: #475569; }
+        .task-inline-item.muted {
+            font-weight: 500;
+            color: var(--text-secondary);
         }
+        .task-inline-item.warning {
+            color: #b45309;
+            background: rgba(245,158,11,0.12);
+            border-color: rgba(245,158,11,0.2);
+        }
+
         .task-note {
             margin-top: 12px;
             padding: 10px 12px;
