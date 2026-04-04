@@ -1062,6 +1062,13 @@ function getA2TDActionButton(taskId, action, label, icon, tone = 'neutral') {
     return `<button class="btn btn-ghost btn-sm btn-action btn-action-${tone}" data-task-id="${escapeA2TDHtml(taskId)}" data-task-action="${action}" onclick="a2tdAction('${encodedTaskId}', '${action}')"><i class="ph ${icon}"></i> ${label}</button>`;
 }
 
+function getA2TDUploadActionLabel(task) {
+    const { done, total } = getA2TDUploadChunkStats(task);
+    if (total > 0) return `上传中 ${done}/${total}`;
+    const progress = getA2TDNumber(task.upload_progress);
+    return progress > 0 ? `上传中 ${progress.toFixed(1)}%` : '上传中';
+}
+
 function getA2TDTaskActions(task) {
     const pendingAction = a2tdPendingTaskActions.get(task.task_id);
     if (pendingAction) {
@@ -1081,7 +1088,7 @@ function getA2TDTaskActions(task) {
         `;
     }
     if (task.status === 'uploading') {
-        return getA2TDActionButton(task.task_id, 'retry', '重传', 'ph-arrow-clockwise', 'warning');
+        return `<button class="btn btn-ghost btn-sm btn-action is-loading" disabled><span class="spinner"></span> ${escapeA2TDHtml(getA2TDUploadActionLabel(task))}</button>`;
     }
 
     if (task.status === 'failed') {
@@ -1096,6 +1103,7 @@ function getA2TDTaskActions(task) {
     return getA2TDActionButton(task.task_id, 'delete', '删除记录', 'ph-trash', 'neutral');
 }
 
+
 function getA2TDTaskCardId(task) {
     return 'pb-' + String(task?.task_id || 'unknown').replace(/[^a-zA-Z0-9_-]/g, '_');
 }
@@ -1104,7 +1112,7 @@ function buildA2TDTaskCardContent(task) {
     const mode = getA2TDTaskMode(task);
     const stalled = isA2TDTaskStalled(task);
     const progress = Math.max(0, Math.min(100, getA2TDTaskProgress(task)));
-    const filename = escapeA2TDHtml(task.filename || task.task_id || '未命名任务');
+    const filenameText = task.filename || task.task_id || '未命名任务';
     const statusLabel = escapeA2TDHtml(getA2TDTaskStatusLabel(task.status));
     const downloadProgress = Math.min(task.status === 'completed' ? 100 : 99.9, Number(task.download_progress || 0)).toFixed(1);
     const transferredText = mode === 'upload'
@@ -1133,7 +1141,6 @@ function buildA2TDTaskCardContent(task) {
     if (!['downloading', 'uploading', 'completed'].includes(task.status)) {
         pushInlineItem(statusLabel, 'status');
     }
-
 
     if (task.status === 'completed') {
         pushInlineItem('已完成', 'primary');
@@ -1167,7 +1174,6 @@ function buildA2TDTaskCardContent(task) {
         }
     }
 
-
     pushInlineItem(`最近活动 ${escapeA2TDHtml(activityText)}`);
 
     const uploadNote = task.upload_note
@@ -1179,33 +1185,76 @@ function buildA2TDTaskCardContent(task) {
     const stalledNote = !task.error && !task.upload_note && stalled
         ? '<div class="task-note warning"><i class="ph ph-warning"></i><span>连接长时间没有新数据，下载器会自动重试当前分块。</span></div>'
         : '';
+    const barClass = `progress-bar-fill ${mode === 'done' ? 'done' : mode}`;
+    const iconClass = stalled
+        ? 'ph-warning-circle'
+        : mode === 'upload'
+            ? 'ph-upload-simple ul-icon'
+            : task.status === 'completed'
+                ? 'ph-check-circle'
+                : 'ph-download-simple dl-icon';
 
     return {
         className: `progress-card ${task.status || 'pending'} ${mode === 'done' ? 'completed' : mode === 'upload' ? 'uploading' : 'downloading'} ${stalled ? 'stalled' : ''}`.trim(),
-        html: `
-            <div class="progress-header">
-                <div class="progress-filename">
-                    <i class="ph ${stalled ? 'ph-warning-circle' : mode === 'upload' ? 'ph-upload-simple ul-icon' : task.status === 'completed' ? 'ph-check-circle' : 'ph-download-simple dl-icon'}" data-icon></i>
-                    <span data-name>${filename}</span>
-                </div>
-                <div class="progress-header-actions">
-                    ${actionsHtml}
-                </div>
-            </div>
-            <div class="task-inline-row">
-                ${inlineItems.join('')}
-            </div>
-            <div class="progress-bar-track">
-                <div class="progress-bar-fill ${mode === 'done' ? 'done' : mode}" data-bar style="width:${progress}%"></div>
-            </div>
-            ${uploadNote}
-            ${errorNote}
-            ${stalledNote}
-        `
+        filenameText,
+        iconClass,
+        actionsHtml,
+        inlineHtml: inlineItems.join(''),
+        barClass,
+        progressWidth: `${progress}%`,
+        notesHtml: `${uploadNote}${errorNote}${stalledNote}`
     };
 }
 
+function setA2TDHtmlIfChanged(element, html) {
+    if (!element) return;
+    const nextHtml = html || '';
+    if ((element.dataset.renderHtml || '') === nextHtml) return;
+    element.innerHTML = nextHtml;
+    element.dataset.renderHtml = nextHtml;
+}
 
+function createA2TDTaskCardElement(task, view) {
+    const card = document.createElement('div');
+    card.id = getA2TDTaskCardId(task);
+    card.innerHTML = `
+        <div class="progress-header">
+            <div class="progress-filename">
+                <i class="ph" data-role="icon"></i>
+                <span data-role="name"></span>
+            </div>
+            <div class="progress-header-actions" data-role="actions"></div>
+        </div>
+        <div class="task-inline-row" data-role="inline"></div>
+        <div class="progress-bar-track">
+            <div class="progress-bar-fill" data-role="bar"></div>
+        </div>
+        <div data-role="notes"></div>
+    `;
+    patchA2TDTaskCardElement(card, view);
+    return card;
+}
+
+function patchA2TDTaskCardElement(card, view) {
+    if (!card || !view) return;
+    if (card.className !== view.className) card.className = view.className;
+
+    const iconEl = card.querySelector('[data-role="icon"]');
+    const nameEl = card.querySelector('[data-role="name"]');
+    const actionsEl = card.querySelector('[data-role="actions"]');
+    const inlineEl = card.querySelector('[data-role="inline"]');
+    const barEl = card.querySelector('[data-role="bar"]');
+    const notesEl = card.querySelector('[data-role="notes"]');
+
+    const nextIconClass = `ph ${view.iconClass}`;
+    if (iconEl && iconEl.className !== nextIconClass) iconEl.className = nextIconClass;
+    if (nameEl && nameEl.textContent !== view.filenameText) nameEl.textContent = view.filenameText;
+    setA2TDHtmlIfChanged(actionsEl, view.actionsHtml);
+    setA2TDHtmlIfChanged(inlineEl, view.inlineHtml);
+    if (barEl && barEl.className !== view.barClass) barEl.className = view.barClass;
+    if (barEl && barEl.style.width !== view.progressWidth) barEl.style.width = view.progressWidth;
+    setA2TDHtmlIfChanged(notesEl, view.notesHtml);
+}
 
 function renderA2TDTasks(tasks) {
     const container = document.getElementById('progressBarsContainer');
@@ -1223,18 +1272,22 @@ function renderA2TDTasks(tasks) {
     container.style.display = 'block';
     placeholder.style.display = 'none';
 
+
     const activeIds = new Set();
-    tasks.forEach(task => {
+    tasks.forEach((task, index) => {
         const cardId = getA2TDTaskCardId(task);
         const view = buildA2TDTaskCardContent(task);
         let card = document.getElementById(cardId);
         if (!card) {
-            card = document.createElement('div');
-            card.id = cardId;
+            card = createA2TDTaskCardElement(task, view);
+        } else {
+            patchA2TDTaskCardElement(card, view);
         }
-        if (card.className !== view.className) card.className = view.className;
-        card.innerHTML = view.html;
-        barsEl.appendChild(card);
+
+        const anchor = barsEl.children[index] || null;
+        if (card !== anchor) {
+            barsEl.insertBefore(card, anchor);
+        }
         activeIds.add(cardId);
     });
 
@@ -1242,6 +1295,7 @@ function renderA2TDTasks(tasks) {
         if (!activeIds.has(card.id)) card.remove();
     });
 }
+
 
 
 async function a2tdAction(taskId, action) {

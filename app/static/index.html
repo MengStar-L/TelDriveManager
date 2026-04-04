@@ -261,7 +261,18 @@
         .storage-text { font-size: 11px; color: var(--text-dim); margin-top: 6px; width: 100%; text-align: left; }
 
         /* ── 下载/上传进度条 ── */
-        #progressBarsContainer { margin-bottom: 16px; }
+        #progressBarsContainer {
+            margin: 0 auto 16px;
+            width: 100%;
+            max-width: 920px;
+        }
+        #progressBars,
+        #a2tdEmptyPlaceholder {
+            max-width: 920px;
+            margin: 0 auto;
+        }
+
+
         .progress-card {
             background: var(--bg-card);
             border: 1px solid var(--border);
@@ -421,11 +432,13 @@
         .progress-card {
             position: relative;
             overflow: hidden;
-            margin-bottom: 14px;
-            border-radius: 16px;
-            box-shadow: 0 10px 24px rgba(15, 23, 42, 0.04);
+            margin-bottom: 12px;
+            border-radius: 14px;
+            padding: 14px 16px;
+            box-shadow: 0 8px 20px rgba(15, 23, 42, 0.04);
             transition: transform 0.18s ease, box-shadow 0.18s ease, border-color 0.18s ease;
         }
+
         .progress-card:hover {
             box-shadow: 0 16px 28px rgba(15, 23, 42, 0.08);
             border-color: rgba(148, 163, 184, 0.55);
