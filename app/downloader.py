@@ -114,10 +114,11 @@ class BuiltinDownloader:
     """内置多连接 HTTP 下载器"""
 
     def __init__(self, max_concurrent: int = 3, connections_per_task: int = 8):
-        self.max_concurrent = max_concurrent
-        self.connections_per_task = connections_per_task
+        self.max_concurrent = max(1, int(max_concurrent or 1))
+        self.connections_per_task = max(1, int(connections_per_task or 1))
         self._tasks: Dict[str, DownloadTask] = {}
-        self._semaphore = asyncio.Semaphore(max_concurrent)
+        self._active_downloads = 0
+        self._slot_condition = asyncio.Condition()
         self._session: Optional[aiohttp.ClientSession] = None
 
     async def _get_session(self) -> aiohttp.ClientSession:
@@ -133,10 +134,18 @@ class BuiltinDownloader:
 
     def update_config(self, max_concurrent: int = 3, connections_per_task: int = 8):
         """热更新配置"""
-        self.max_concurrent = max_concurrent
-        self.connections_per_task = connections_per_task
-        # 重建信号量（仅影响新任务）
-        self._semaphore = asyncio.Semaphore(max_concurrent)
+        self.max_concurrent = max(1, int(max_concurrent or 1))
+        self.connections_per_task = max(1, int(connections_per_task or 1))
+
+        for task in self._tasks.values():
+            if task.status == TaskStatus.PENDING:
+                task.max_connections = self.connections_per_task
+
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        loop.create_task(self._notify_slot_change())
 
     # ─── 公开 API ───
 
@@ -240,30 +249,56 @@ class BuiltinDownloader:
             except Exception as e:
                 logger.error(f"[下载器] 完成回调异常: {e}")
 
+    async def _notify_slot_change(self):
+        async with self._slot_condition:
+            self._slot_condition.notify_all()
+
+    async def _acquire_download_slot(self, task: DownloadTask) -> bool:
+        async with self._slot_condition:
+            while self._active_downloads >= self.max_concurrent:
+                if task._cancel_event.is_set() or task.status == TaskStatus.CANCELLED:
+                    return False
+                await self._slot_condition.wait()
+            self._active_downloads += 1
+            return True
+
+    async def _release_download_slot(self):
+        async with self._slot_condition:
+            self._active_downloads = max(0, self._active_downloads - 1)
+            self._slot_condition.notify_all()
+
     # ─── 内部实现 ───
 
     async def _run_task(self, task: DownloadTask):
-        """受并发信号量控制的任务入口"""
-        async with self._semaphore:
-            try:
-                await self._download_file(task)
-            except asyncio.CancelledError:
-                if task.status not in (TaskStatus.CANCELLED, TaskStatus.COMPLETED):
-                    task.status = TaskStatus.CANCELLED
-                    self._cleanup_file(task)
+        """受动态并发控制的任务入口"""
+        slot_acquired = False
+        try:
+            slot_acquired = await self._acquire_download_slot(task)
+            if not slot_acquired:
                 await self._notify_complete(task)
-            except Exception as e:
-                logger.error(f"[下载器] 任务 {task.task_id} 失败: {e}")
-                task.status = TaskStatus.FAILED
-                task.error = str(e)
-                task.speed = 0
+                return
+
+            await self._download_file(task)
+        except asyncio.CancelledError:
+            if task.status not in (TaskStatus.CANCELLED, TaskStatus.COMPLETED):
+                task.status = TaskStatus.CANCELLED
                 self._cleanup_file(task)
-                if task._on_progress:
-                    try:
-                        await task._on_progress(task)
-                    except Exception:
-                        pass
-                await self._notify_complete(task)
+            await self._notify_complete(task)
+        except Exception as e:
+            logger.error(f"[下载器] 任务 {task.task_id} 失败: {e}")
+            task.status = TaskStatus.FAILED
+            task.error = str(e)
+            task.speed = 0
+            self._cleanup_file(task)
+            if task._on_progress:
+                try:
+                    await task._on_progress(task)
+                except Exception:
+                    pass
+            await self._notify_complete(task)
+        finally:
+            if slot_acquired:
+                await self._release_download_slot()
 
     async def _download_file(self, task: DownloadTask):
         """主下载逻辑"""

@@ -418,10 +418,7 @@ def _maybe_rename_by_folder(url_info: dict, rename: bool, original_path: str = "
 
 
 async def _builtin_download_and_upload(files: List[dict], index: int, delete_pikpak_ids: List[str] = None):
-    """内置引擎：下载文件列表 → 逐个上传 TelDrive → 清理
-    
-    每个文件会注册到 tasks 数据库，并通过 WS 广播更新到任务页面。
-    """
+    """内置引擎：先批量入下载队列，再按完成顺序上传到 TelDrive。"""
     from app import database as db
     from app.modules.aria2teldrive.task_manager import task_manager
 
@@ -430,7 +427,6 @@ async def _builtin_download_and_upload(files: List[dict], index: int, delete_pik
     target_path = td_cfg.get("target_path", "/")
     auto_delete = cfg.get("upload", {}).get("auto_delete", True)
 
-    # 更新下载器配置
     pikpak_cfg = cfg.get("pikpak", {})
     downloader.update_config(
         max_concurrent=pikpak_cfg.get("max_concurrent_downloads", 3),
@@ -444,125 +440,159 @@ async def _builtin_download_and_upload(files: List[dict], index: int, delete_pik
         "index": index,
         "status": f"共解析出 {total_files} 个文件，开始推送下载链接到{push_target}...",
     })
-    for fi, f in enumerate(files, 1):
-        url = f["url"]
-        name = f["name"]
-        file_index = index
-        await _broadcast_link_pushed(file_index, f, fi, total_files, push_target)
 
-        # === 注册到数据库 ===
-        import uuid
-        task_db_id = f"bd-{uuid.uuid4().hex[:10]}"
-        task_download_dir = DOWNLOAD_DIR / task_db_id
-        task_local_path = task_download_dir / name
-        await db.add_task(task_db_id, url, name, target_path)
-        await db.update_task(task_db_id, status="downloading",
-                             local_path=str(task_local_path))
-        await task_manager.broadcast({"type": "task_update",
-                                       "data": await db.get_task(task_db_id)})
-
-        # === 下载阶段 ===
-        dl_done_event = asyncio.Event()
-
-        async def on_progress(task: DownloadTask, _tid=task_db_id):
-            progress = round(task.downloaded / task.total_size * 100, 1) if task.total_size > 0 else 0
-            # 更新进度条
-            await _broadcast({
-                "type": "download_progress",
-                "task_id": _tid,
-                "index": file_index,
-                "file_index": fi,
-                "total_files": total_files,
-                "filename": task.filename,
-                "progress": progress,
-                "speed": task.to_dict()["speed_str"],
-                "downloaded": task.to_dict()["downloaded_str"],
-                "downloaded_bytes": task.downloaded,
-                "total": task.to_dict()["total_str"],
-                "total_bytes": task.total_size,
-                "eta": task.to_dict()["eta_str"],
-                "connections": task.connections,
-                "max_connections": task.max_connections,
-                "status": task.status.value,
-            })
-            # 更新数据库（节流：只在整数百分比变化时写库）
-            int_pct = int(progress)
-            if int_pct % 5 == 0:
-                await db.update_task(_tid, download_progress=progress,
-                                     download_speed=task.to_dict()["speed_str"],
-                                     file_size=task.to_dict()["total_str"])
-
-        async def on_complete(task: DownloadTask):
-            dl_done_event.set()
-
-        dl_task = await downloader.add_task(
-            url=url, filename=name, task_id=task_db_id,
-            on_progress=on_progress, on_complete=on_complete,
-            base_dir=str(task_download_dir),
-        )
-
-        # 等待下载完成
-        await dl_done_event.wait()
-        downloader.forget_task(task_db_id)
-
-        if dl_task.status == TaskStatus.FAILED:
-            await db.update_task(task_db_id, status="failed",
-                                 error=dl_task.error)
-            await task_manager.broadcast({"type": "task_update",
-                                           "data": await db.get_task(task_db_id)})
-            await _broadcast({"type": "task_error", "index": file_index,
-                              "message": f"下载失败: {name} - {dl_task.error}"})
-            continue
-        if dl_task.status == TaskStatus.CANCELLED:
-            task_manager.clear_upload_progress(task_db_id)
-            if await db.get_task(task_db_id):
-                await db.delete_task(task_db_id)
-                await task_manager.broadcast({"type": "task_deleted",
-                                               "data": {"task_id": task_db_id}})
-            continue
-        if not await db.get_task(task_db_id):
-            task_manager.clear_upload_progress(task_db_id)
-            continue
-
-        # === 上传阶段 ===
-        await _broadcast({
-            "type": "task_status",
-            "index": file_index,
-            "status": f"下载完成，开始上传到 TelDrive: {name}",
-        })
-        await db.update_task(task_db_id, status="uploading",
-                             download_progress=100.0,
-                             download_speed="",
-                             upload_speed="",
-                             file_size=dl_task.to_dict()["total_str"])
-        task_manager.track_upload_progress(task_db_id, 0)
-        await task_manager.broadcast({"type": "task_update",
-                                       "data": await db.get_task(task_db_id)})
-
+    async def process_queued_file(task_db_id: str, task_name: str, dl_task: DownloadTask,
+                                  dl_done_event: asyncio.Event, file_index: int):
         try:
+            await dl_done_event.wait()
+            downloader.forget_task(task_db_id)
+
+            if dl_task.status == TaskStatus.FAILED:
+                await db.update_task(task_db_id, status="failed", error=dl_task.error)
+                await task_manager.broadcast({"type": "task_update",
+                                              "data": await db.get_task(task_db_id)})
+                await _broadcast({"type": "task_error", "index": file_index,
+                                  "message": f"下载失败: {task_name} - {dl_task.error}"})
+                return
+
+            if dl_task.status == TaskStatus.CANCELLED:
+                task_manager.clear_upload_progress(task_db_id)
+                if await db.get_task(task_db_id):
+                    await db.delete_task(task_db_id)
+                    await task_manager.broadcast({"type": "task_deleted",
+                                                  "data": {"task_id": task_db_id}})
+                return
+
+            if not await db.get_task(task_db_id):
+                task_manager.clear_upload_progress(task_db_id)
+                return
+
+            await _broadcast({
+                "type": "task_status",
+                "index": file_index,
+                "status": f"下载完成，开始上传到 TelDrive: {task_name}",
+            })
+            await db.update_task(task_db_id, status="uploading",
+                                 download_progress=100.0,
+                                 download_speed="",
+                                 upload_speed="",
+                                 file_size=dl_task.to_dict()["total_str"])
+            task_manager.track_upload_progress(task_db_id, 0)
+            await task_manager.broadcast({"type": "task_update",
+                                          "data": await db.get_task(task_db_id)})
+
             local_path = dl_task.dest_path
             await db.update_task(task_db_id, local_path=str(local_path))
-
             await task_manager.upload_local_with_slot(
                 task_db_id,
                 str(local_path),
                 target_path,
                 auto_delete_local=auto_delete,
             )
-
             await _broadcast({"type": "upload_done", "task_id": task_db_id, "index": file_index,
-                              "filename": name})
-
+                              "filename": task_name})
         except Exception as e:
-            await db.update_task(task_db_id, status="failed",
-                                 error=str(e))
-            await task_manager.broadcast({"type": "task_update",
-                                           "data": await db.get_task(task_db_id)})
+            logger.exception(f"内置下载队列任务处理失败: task_id={task_db_id}, name={task_name}")
+            if await db.get_task(task_db_id):
+                await db.update_task(task_db_id, status="failed", error=str(e))
+                await task_manager.broadcast({"type": "task_update",
+                                              "data": await db.get_task(task_db_id)})
             await _broadcast({"type": "task_error", "index": file_index,
-                              "message": f"上传 TelDrive 失败: {name} - {e}"})
+                              "message": f"上传 TelDrive 失败: {task_name} - {e}"})
+
+    file_workers = []
+    queued_count = 0
+
+    for fi, f in enumerate(files, 1):
+        url = f["url"]
+        name = f["name"]
+        file_index = index
+        await _broadcast_link_pushed(file_index, f, fi, total_files, push_target)
+
+        import uuid
+        task_db_id = f"bd-{uuid.uuid4().hex[:10]}"
+        task_download_dir = DOWNLOAD_DIR / task_db_id
+        task_local_path = task_download_dir / name
+        await db.add_task(task_db_id, url, name, target_path)
+        await db.update_task(task_db_id, status="pending", local_path=str(task_local_path))
+        await task_manager.broadcast({"type": "task_update",
+                                      "data": await db.get_task(task_db_id)})
+
+        dl_done_event = asyncio.Event()
+        progress_state = {"last_pct": -1, "last_status": "pending"}
+
+        async def on_progress(task: DownloadTask, _tid=task_db_id, _file_index=file_index,
+                              _sequence=fi, _total_files=total_files, _state=progress_state):
+            progress = round(task.downloaded / task.total_size * 100, 1) if task.total_size > 0 else 0
+            task_dict = task.to_dict()
+            current_status = task.status.value
+            await _broadcast({
+                "type": "download_progress",
+                "task_id": _tid,
+                "index": _file_index,
+                "file_index": _sequence,
+                "total_files": _total_files,
+                "filename": task.filename,
+                "progress": progress,
+                "speed": task_dict["speed_str"],
+                "downloaded": task_dict["downloaded_str"],
+                "downloaded_bytes": task.downloaded,
+                "total": task_dict["total_str"],
+                "total_bytes": task.total_size,
+                "eta": task_dict["eta_str"],
+                "connections": task.connections,
+                "max_connections": task.max_connections,
+                "status": current_status,
+            })
+
+            int_pct = int(progress)
+            should_sync = (
+                current_status != _state["last_status"] or
+                (int_pct % 5 == 0 and int_pct != _state["last_pct"])
+            )
+            if should_sync:
+                _state["last_status"] = current_status
+                _state["last_pct"] = int_pct
+                await db.update_task(
+                    _tid,
+                    status=current_status,
+                    download_progress=progress,
+                    download_speed=task_dict["speed_str"] if current_status == TaskStatus.DOWNLOADING.value else "",
+                    file_size=task_dict["total_str"],
+                )
+
+        async def on_complete(task: DownloadTask, _done_event=dl_done_event):
+            _done_event.set()
+
+        try:
+            dl_task = await downloader.add_task(
+                url=url,
+                filename=name,
+                task_id=task_db_id,
+                on_progress=on_progress,
+                on_complete=on_complete,
+                base_dir=str(task_download_dir),
+            )
+        except Exception as e:
+            await db.update_task(task_db_id, status="failed", error=str(e))
+            await task_manager.broadcast({"type": "task_update",
+                                          "data": await db.get_task(task_db_id)})
+            await _broadcast({"type": "task_error", "index": file_index,
+                              "message": f"下载链接推送失败: {name} - {e}"})
             continue
 
-    # PikPak 网盘文件清理
+        queued_count += 1
+        file_workers.append(asyncio.create_task(
+            process_queued_file(task_db_id, name, dl_task, dl_done_event, file_index)
+        ))
+
+    await _broadcast({"type": "push_done", "index": index,
+                      "success_count": queued_count, "total_count": total_files,
+                      "target": push_target})
+
+    if file_workers:
+        await asyncio.gather(*file_workers)
+
     if delete_pikpak_ids:
         try:
             pikpak, _ = await _ensure_clients()

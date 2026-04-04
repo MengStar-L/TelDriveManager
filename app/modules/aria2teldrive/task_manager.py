@@ -96,12 +96,20 @@ class TaskManager:
         """重新加载配置并重建客户端"""
         self.config = load_config()
         self._init_clients()
+
+        pikpak_cfg = self.config.get("pikpak", {})
+        downloader.update_config(
+            max_concurrent=pikpak_cfg.get("max_concurrent_downloads", 3),
+            connections_per_task=pikpak_cfg.get("connections_per_task", 8),
+        )
+
         # upload_concurrency 变更后无需重建对象，
         # _wait_upload_slot 每次实时读取 config 值
         # 唤醒等待槽位的协程，让它们用新并发数重新检查
         self._upload_slot_event.set()
         # 异步同步 aria2 全局选项
         asyncio.create_task(self._apply_aria2_options())
+
 
     def _get_upload_path(self, local_path: str) -> str:
         """将 aria2 下载路径映射到用户配置的上传文件目录。
