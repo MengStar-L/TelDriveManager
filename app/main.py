@@ -13,8 +13,8 @@ import asyncio
 import logging
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, Request
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi import Cookie, FastAPI, Request
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pathlib import Path
 
@@ -133,9 +133,10 @@ async def index():
 
 
 @app.get("/login")
-async def login_page():
+async def login_page(auth_token: str | None = Cookie(None)):
     if not is_auth_enabled():
-        from fastapi.responses import RedirectResponse
+        return RedirectResponse("/")
+    if auth_token and verify_token(auth_token):
         return RedirectResponse("/")
     return FileResponse(STATIC_DIR / "login.html")
 

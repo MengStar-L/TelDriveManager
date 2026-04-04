@@ -1,6 +1,7 @@
 """登录路由 — 统一认证接口"""
 
-from fastapi import APIRouter, Response, Cookie
+from fastapi import APIRouter, Cookie
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from typing import Optional
 from app.auth import (
@@ -17,25 +18,27 @@ class LoginRequest(BaseModel):
 
 
 @router.post("/login")
-async def login(req: LoginRequest, response: Response):
+async def login(req: LoginRequest):
     if not is_auth_enabled():
         return {"success": True, "message": "认证未启用"}
     if not verify_credentials(req.username, req.password):
         return {"success": False, "message": "用户名或密码错误"}
     token = create_token()
+    response = JSONResponse({"success": True, "token": token})
     response.set_cookie(
         key="auth_token", value=token,
         httponly=True, samesite="lax", max_age=86400 * 7,
     )
-    return {"success": True, "token": token}
+    return response
 
 
 @router.post("/logout")
-async def logout(response: Response, auth_token: Optional[str] = Cookie(None)):
+async def logout(auth_token: Optional[str] = Cookie(None)):
     if auth_token:
         revoke_token(auth_token)
+    response = JSONResponse({"success": True})
     response.delete_cookie("auth_token")
-    return {"success": True}
+    return response
 
 
 @router.get("/auth/check")

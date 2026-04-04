@@ -1015,6 +1015,7 @@ const a2tdPendingTaskActions = new Map();
 let a2tdRenderScheduled = false;
 let a2tdSnapshotPending = false;
 let a2tdTaskFilter = 'all';
+let a2tdTaskSortSeed = 0;
 
 const A2TD_TASK_FILTER_LABELS = {
     all: '全部',
@@ -1091,11 +1092,55 @@ function showA2TDToast(message, type = 'info') {
     }, 2400);
 }
 
+function ensureA2TDTaskSortSerial(value = 0) {
+    const serial = getA2TDNumber(value);
+    if (serial > a2tdTaskSortSeed) a2tdTaskSortSeed = serial;
+    if (serial > 0) return serial;
+    a2tdTaskSortSeed += 1;
+    return a2tdTaskSortSeed;
+}
+
+function getA2TDTaskSortBucket(status) {
+    switch (String(status || '')) {
+        case 'downloading':
+            return 0;
+        case 'uploading':
+            return 1;
+        case 'pending':
+            return 2;
+        case 'paused':
+            return 3;
+        case 'failed':
+            return 4;
+        case 'completed':
+            return 5;
+        default:
+            return 4;
+    }
+}
+
+function getA2TDTaskSortAnchor(task = {}, fallbackTs = 0) {
+    return getA2TDNumber(task.sort_anchor_at)
+        || parseA2TDTimestamp(task.created_at)
+        || parseA2TDTimestamp(task.updated_at)
+        || fallbackTs
+        || Date.now();
+}
+
 function getA2TDTaskList() {
     return Array.from(a2tdTaskStore.values()).sort((a, b) => {
-        const timeA = getA2TDNumber(a.last_event_at || parseA2TDTimestamp(a.updated_at) || parseA2TDTimestamp(a.created_at));
-        const timeB = getA2TDNumber(b.last_event_at || parseA2TDTimestamp(b.updated_at) || parseA2TDTimestamp(b.created_at));
-        return timeB - timeA;
+        const bucketDiff = getA2TDTaskSortBucket(a.status) - getA2TDTaskSortBucket(b.status);
+        if (bucketDiff !== 0) return bucketDiff;
+
+        const anchorA = getA2TDTaskSortAnchor(a);
+        const anchorB = getA2TDTaskSortAnchor(b);
+        if (anchorA !== anchorB) return anchorB - anchorA;
+
+        const serialA = getA2TDNumber(a.sort_serial);
+        const serialB = getA2TDNumber(b.sort_serial);
+        if (serialA !== serialB) return serialA - serialB;
+
+        return String(a.task_id || '').localeCompare(String(b.task_id || ''));
     });
 }
 
@@ -1162,6 +1207,8 @@ function setA2TDTasks(tasks) {
                 task_id: taskId,
                 last_event_at: eventTs,
                 last_progress_change_at: getA2TDNumber(existing.last_progress_change_at) || eventTs,
+                sort_anchor_at: getA2TDTaskSortAnchor(existing, getA2TDTaskSortAnchor(task, eventTs)),
+                sort_serial: ensureA2TDTaskSortSerial(existing.sort_serial),
             });
         });
     }
@@ -1185,6 +1232,8 @@ function upsertA2TDTask(task) {
         ...task,
         task_id: taskId,
         last_event_at: getA2TDNumber(task.last_event_at) || nowTs,
+        sort_anchor_at: getA2TDTaskSortAnchor(existing, getA2TDTaskSortAnchor(task, nowTs)),
+        sort_serial: ensureA2TDTaskSortSerial(existing.sort_serial),
     };
     const existingStatus = existing.status || '';
     const nextStatus = nextTask.status || '';

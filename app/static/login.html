@@ -1,26 +1,36 @@
 <!DOCTYPE html>
 <html lang="zh-CN">
-
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>TelDriveManager - 登录</title>
     <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+    <script src="https://unpkg.com/@phosphor-icons/web"></script>
     <style>
         :root {
-            --bg-primary: #0b0b10;
-            --bg-card: #1a1a26;
-            --bg-input: #22222f;
-            --border: #2a2a3c;
-            --text-primary: #e8e8f0;
-            --text-secondary: #8888a0;
-            --text-dim: #55556a;
-            --accent: #7c5cfc;
-            --accent-hover: #8f72ff;
-            --accent-glow: rgba(124, 92, 252, 0.2);
-            --error: #f87171;
-            --radius: 10px;
+            --bg-body: #eef2f5;
+            --bg-card: rgba(255, 255, 255, 0.86);
+            --bg-panel: rgba(248, 250, 252, 0.9);
+            --bg-input: rgba(255, 255, 255, 0.92);
+            --bg-hover: #f1f5f9;
+            --text-primary: #1e293b;
+            --text-secondary: #64748b;
+            --text-dim: #94a3b8;
+            --accent: #0066ff;
+            --accent-hover: #0052cc;
+            --accent-light: #eff6ff;
+            --accent-glow: rgba(0, 102, 255, 0.16);
+            --border: rgba(226, 232, 240, 0.9);
+            --shadow-soft: 0 20px 60px rgba(15, 23, 42, 0.08);
+            --shadow-card: 0 30px 80px rgba(15, 23, 42, 0.12);
+            --success: #10b981;
+            --error: #ef4444;
+            --warning: #f59e0b;
+            --radius-xl: 32px;
+            --radius-lg: 24px;
+            --radius-md: 16px;
+            --radius-sm: 12px;
         }
 
         * {
@@ -31,138 +41,451 @@
 
         body {
             font-family: 'Inter', system-ui, sans-serif;
-            background: var(--bg-primary);
+            min-height: 100vh;
             color: var(--text-primary);
-            height: 100vh;
-            display: flex;
-            align-items: center;
-            justify-content: center;
+            background:
+                radial-gradient(circle at top left, rgba(59, 130, 246, 0.18), transparent 28%),
+                radial-gradient(circle at 85% 15%, rgba(14, 165, 233, 0.14), transparent 24%),
+                radial-gradient(circle at 50% 100%, rgba(99, 102, 241, 0.08), transparent 32%),
+                linear-gradient(180deg, #f8fbff 0%, #eef2f5 54%, #e8eef6 100%);
             overflow: hidden;
         }
 
-        /* 背景动画 */
-        body::before {
+        body::before,
+        body::after {
             content: '';
             position: fixed;
-            top: -50%;
-            left: -50%;
-            width: 200%;
-            height: 200%;
-            background: radial-gradient(ellipse at 30% 50%, rgba(124, 92, 252, 0.06) 0%, transparent 60%),
-                radial-gradient(ellipse at 70% 50%, rgba(99, 70, 224, 0.04) 0%, transparent 60%);
-            animation: bgShift 15s ease-in-out infinite alternate;
+            border-radius: 999px;
+            filter: blur(10px);
+            pointer-events: none;
             z-index: 0;
+            animation: floatOrb 14s ease-in-out infinite alternate;
         }
 
-        @keyframes bgShift {
-            from {
-                transform: translate(0, 0) rotate(0deg);
-            }
-
-            to {
-                transform: translate(2%, 1%) rotate(3deg);
-            }
+        body::before {
+            width: 320px;
+            height: 320px;
+            top: -60px;
+            left: -40px;
+            background: rgba(59, 130, 246, 0.14);
         }
 
-        .login-container {
+        body::after {
+            width: 280px;
+            height: 280px;
+            right: -40px;
+            bottom: -50px;
+            background: rgba(14, 165, 233, 0.12);
+            animation-duration: 18s;
+        }
+
+        @keyframes floatOrb {
+            from { transform: translate3d(0, 0, 0) scale(1); }
+            to { transform: translate3d(24px, -18px, 0) scale(1.08); }
+        }
+
+        .login-shell {
             position: relative;
             z-index: 1;
-            width: 380px;
-            max-width: 90vw;
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 32px;
+            animation: shellIn 0.72s cubic-bezier(0.16, 1, 0.3, 1) both;
+        }
+
+        @keyframes shellIn {
+            from { opacity: 0; transform: translateY(18px) scale(0.985); }
+            to { opacity: 1; transform: translateY(0) scale(1); }
+        }
+
+        .login-frame {
+            width: min(1120px, 100%);
+            display: grid;
+            grid-template-columns: minmax(0, 1.15fr) minmax(380px, 440px);
+            gap: 28px;
+            align-items: stretch;
+        }
+
+        .hero-panel,
+        .login-panel {
+            position: relative;
+            border: 1px solid rgba(255, 255, 255, 0.62);
+            border-radius: var(--radius-xl);
+            backdrop-filter: blur(20px);
+            -webkit-backdrop-filter: blur(20px);
+            box-shadow: var(--shadow-soft);
+            overflow: hidden;
+        }
+
+        .hero-panel {
+            padding: 36px;
+            background: linear-gradient(145deg, rgba(255, 255, 255, 0.88), rgba(248, 250, 252, 0.78));
+            display: flex;
+            flex-direction: column;
+            justify-content: space-between;
+            min-height: 620px;
+        }
+
+        .hero-panel::before {
+            content: '';
+            position: absolute;
+            inset: 0;
+            background:
+                radial-gradient(circle at top left, rgba(59, 130, 246, 0.18), transparent 34%),
+                linear-gradient(180deg, rgba(255,255,255,0.12), transparent 50%);
+            pointer-events: none;
+        }
+
+        .hero-top,
+        .hero-bottom {
+            position: relative;
+            z-index: 1;
+        }
+
+        .brand-chip {
+            display: inline-flex;
+            align-items: center;
+            gap: 10px;
+            padding: 10px 14px;
+            border-radius: 999px;
+            background: rgba(255, 255, 255, 0.74);
+            border: 1px solid rgba(191, 219, 254, 0.92);
+            color: var(--accent);
+            font-size: 13px;
+            font-weight: 700;
+            letter-spacing: 0.01em;
+            box-shadow: 0 10px 24px rgba(59, 130, 246, 0.08);
+        }
+
+        .brand-chip i {
+            width: 24px;
+            height: 24px;
+            border-radius: 50%;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            background: linear-gradient(135deg, #0066ff, #3b82f6);
+            color: white;
+            font-size: 14px;
+            box-shadow: 0 8px 16px rgba(0, 102, 255, 0.24);
+        }
+
+        .hero-copy {
+            margin-top: 28px;
+            max-width: 560px;
+        }
+
+        .hero-copy h1 {
+            font-size: clamp(34px, 4vw, 52px);
+            line-height: 1.06;
+            letter-spacing: -0.04em;
+            font-weight: 800;
+            margin-bottom: 18px;
+        }
+
+        .hero-copy p {
+            font-size: 16px;
+            line-height: 1.8;
+            color: var(--text-secondary);
+            max-width: 520px;
+        }
+
+        .hero-grid {
+            margin-top: 32px;
+            display: grid;
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+            gap: 16px;
+        }
+
+        .hero-card {
+            padding: 18px;
+            border-radius: 22px;
+            background: rgba(255, 255, 255, 0.72);
+            border: 1px solid rgba(226, 232, 240, 0.88);
+            box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.84);
+        }
+
+        .hero-card i {
+            width: 42px;
+            height: 42px;
+            border-radius: 14px;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 20px;
+            margin-bottom: 14px;
+            background: var(--accent-light);
+            color: var(--accent);
+        }
+
+        .hero-card strong {
+            display: block;
+            font-size: 15px;
+            font-weight: 700;
+            margin-bottom: 6px;
+        }
+
+        .hero-card span {
+            display: block;
+            font-size: 13px;
+            line-height: 1.7;
+            color: var(--text-secondary);
+        }
+
+        .hero-bottom {
+            display: grid;
+            grid-template-columns: repeat(3, minmax(0, 1fr));
+            gap: 14px;
+        }
+
+        .metric-card {
+            padding: 18px;
+            border-radius: 22px;
+            background: rgba(15, 23, 42, 0.84);
+            color: white;
+            box-shadow: 0 20px 36px rgba(15, 23, 42, 0.14);
+        }
+
+        .metric-card small {
+            display: block;
+            font-size: 12px;
+            color: rgba(226, 232, 240, 0.72);
+            margin-bottom: 8px;
+        }
+
+        .metric-card strong {
+            display: block;
+            font-size: 22px;
+            font-weight: 800;
+            letter-spacing: -0.03em;
+            margin-bottom: 8px;
+        }
+
+        .metric-card span {
+            display: block;
+            font-size: 12px;
+            line-height: 1.65;
+            color: rgba(226, 232, 240, 0.78);
+        }
+
+        .login-panel {
+            padding: 28px;
+            background: linear-gradient(180deg, rgba(255, 255, 255, 0.96), rgba(248, 250, 252, 0.9));
+            box-shadow: var(--shadow-card);
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+        }
+
+        .login-panel::before {
+            content: '';
+            position: absolute;
+            inset: 0;
+            background: linear-gradient(180deg, rgba(255,255,255,0.12), transparent 24%);
+            pointer-events: none;
         }
 
         .login-card {
-            background: var(--bg-card);
-            border: 1px solid var(--border);
-            border-radius: 16px;
-            padding: 40px 32px 36px;
-            box-shadow: 0 8px 40px rgba(0, 0, 0, 0.3),
-                0 0 80px rgba(124, 92, 252, 0.05);
+            position: relative;
+            z-index: 1;
+            border-radius: 28px;
+            padding: 10px;
         }
 
         .login-brand {
-            text-align: center;
-            margin-bottom: 32px;
+            margin-bottom: 30px;
         }
 
-        .login-brand .icon {
-            font-size: 36px;
-            margin-bottom: 12px;
-            display: block;
+        .login-badge {
+            width: 62px;
+            height: 62px;
+            border-radius: 20px;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 28px;
+            color: white;
+            background: linear-gradient(135deg, #0066ff, #3b82f6);
+            box-shadow: 0 18px 32px rgba(0, 102, 255, 0.24);
+            margin-bottom: 18px;
         }
 
-        .login-brand h1 {
-            font-size: 22px;
-            font-weight: 700;
-            background: linear-gradient(135deg, #7c5cfc, #a78bfa);
-            background-clip: text;
-            -webkit-background-clip: text;
-            -webkit-text-fill-color: transparent;
+        .login-brand h2 {
+            font-size: 30px;
+            font-weight: 800;
+            letter-spacing: -0.04em;
+            margin-bottom: 10px;
         }
 
         .login-brand p {
-            font-size: 13px;
+            font-size: 14px;
+            line-height: 1.8;
             color: var(--text-secondary);
-            margin-top: 6px;
+        }
+
+        .mini-status {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 10px;
+            margin-top: 18px;
+        }
+
+        .mini-status span {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            padding: 8px 12px;
+            border-radius: 999px;
+            background: var(--bg-panel);
+            border: 1px solid var(--border);
+            color: var(--text-secondary);
+            font-size: 12px;
+            font-weight: 600;
+        }
+
+        .mini-status i {
+            color: var(--accent);
+            font-size: 14px;
+        }
+
+        .login-form {
+            display: flex;
+            flex-direction: column;
+            gap: 18px;
         }
 
         .form-group {
-            margin-bottom: 20px;
+            display: flex;
+            flex-direction: column;
+            gap: 9px;
         }
 
         .form-group label {
-            display: block;
-            font-size: 12px;
-            font-weight: 500;
+            font-size: 13px;
+            font-weight: 700;
             color: var(--text-secondary);
-            margin-bottom: 6px;
+        }
+
+        .input-wrap {
+            position: relative;
+        }
+
+        .input-wrap i {
+            position: absolute;
+            top: 50%;
+            left: 16px;
+            transform: translateY(-50%);
+            font-size: 18px;
+            color: var(--text-dim);
+            pointer-events: none;
+            transition: color 0.2s ease;
         }
 
         .form-input {
             width: 100%;
-            padding: 11px 14px;
-            background: var(--bg-input);
+            height: 54px;
             border: 1px solid var(--border);
-            border-radius: 8px;
+            border-radius: 16px;
+            padding: 0 16px 0 46px;
+            background: var(--bg-input);
             color: var(--text-primary);
             font-family: inherit;
             font-size: 14px;
             outline: none;
-            transition: border-color 0.2s, box-shadow 0.2s;
+            transition: border-color 0.2s ease, box-shadow 0.2s ease, background 0.2s ease;
+            box-shadow: inset 0 1px 2px rgba(15, 23, 42, 0.02);
         }
 
         .form-input:focus {
+            background: white;
             border-color: var(--accent);
-            box-shadow: 0 0 0 3px var(--accent-glow);
+            box-shadow: 0 0 0 4px var(--accent-glow);
+        }
+
+        .form-input:focus + i,
+        .input-wrap:focus-within i {
+            color: var(--accent);
         }
 
         .form-input::placeholder {
             color: var(--text-dim);
         }
 
-        .btn-login {
-            width: 100%;
-            padding: 12px;
-            border: none;
-            border-radius: 8px;
-            font-family: inherit;
-            font-size: 14px;
-            font-weight: 600;
-            cursor: pointer;
-            background: linear-gradient(135deg, var(--accent), #6346e0);
-            color: white;
-            box-shadow: 0 4px 16px var(--accent-glow);
-            transition: all 0.2s;
+        .helper-row {
             display: flex;
             align-items: center;
-            justify-content: center;
+            justify-content: space-between;
+            gap: 10px;
+            font-size: 12px;
+            color: var(--text-secondary);
+            margin-top: -4px;
+        }
+
+        .helper-row span {
+            display: inline-flex;
+            align-items: center;
             gap: 6px;
         }
 
+        .form-status {
+            min-height: 0;
+            opacity: 0;
+            transform: translateY(-6px);
+            pointer-events: none;
+            padding: 0 16px;
+            border-radius: 14px;
+            font-size: 13px;
+            font-weight: 600;
+            line-height: 1.5;
+            transition: opacity 0.25s ease, transform 0.25s ease, padding 0.25s ease, min-height 0.25s ease;
+        }
+
+        .form-status.show {
+            opacity: 1;
+            transform: translateY(0);
+            padding-top: 12px;
+            padding-bottom: 12px;
+            min-height: 48px;
+            pointer-events: auto;
+        }
+
+        .form-status.error {
+            background: rgba(239, 68, 68, 0.1);
+            color: #b91c1c;
+            border: 1px solid rgba(239, 68, 68, 0.18);
+        }
+
+        .form-status.success {
+            background: rgba(16, 185, 129, 0.12);
+            color: #047857;
+            border: 1px solid rgba(16, 185, 129, 0.18);
+        }
+
+        .btn-login {
+            position: relative;
+            height: 54px;
+            border: none;
+            border-radius: 16px;
+            background: linear-gradient(135deg, var(--accent), #3b82f6);
+            color: white;
+            font-family: inherit;
+            font-size: 15px;
+            font-weight: 700;
+            letter-spacing: 0.01em;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            gap: 10px;
+            cursor: pointer;
+            box-shadow: 0 18px 28px rgba(0, 102, 255, 0.22);
+            transition: transform 0.2s ease, box-shadow 0.2s ease, opacity 0.2s ease;
+        }
+
         .btn-login:hover {
-            background: linear-gradient(135deg, var(--accent-hover), #7556f0);
             transform: translateY(-1px);
-            box-shadow: 0 6px 24px rgba(124, 92, 252, 0.3);
+            box-shadow: 0 22px 34px rgba(0, 102, 255, 0.26);
         }
 
         .btn-login:active {
@@ -170,51 +493,30 @@
         }
 
         .btn-login:disabled {
-            opacity: 0.6;
             cursor: not-allowed;
-            transform: none;
         }
 
-        .error-msg {
-            margin-top: 16px;
-            padding: 10px 14px;
-            background: rgba(248, 113, 113, 0.1);
-            border: 1px solid rgba(248, 113, 113, 0.2);
-            border-radius: 8px;
-            color: var(--error);
-            font-size: 13px;
-            text-align: center;
-            display: none;
-            animation: shakeIn 0.3s ease;
+        .btn-login.loading,
+        .btn-login.success {
+            pointer-events: none;
         }
 
-        .error-msg.show {
-            display: block;
+        .btn-login.loading {
+            opacity: 0.92;
         }
 
-        @keyframes shakeIn {
-
-            0%,
-            100% {
-                transform: translateX(0);
-            }
-
-            25% {
-                transform: translateX(-6px);
-            }
-
-            75% {
-                transform: translateX(6px);
-            }
+        .btn-login.success {
+            background: linear-gradient(135deg, #0f766e, #10b981);
+            box-shadow: 0 18px 28px rgba(16, 185, 129, 0.24);
         }
 
         .spinner {
-            width: 16px;
-            height: 16px;
-            border: 2px solid rgba(255, 255, 255, 0.3);
+            width: 18px;
+            height: 18px;
+            border: 2px solid rgba(255, 255, 255, 0.32);
             border-top-color: white;
             border-radius: 50%;
-            animation: spin 0.7s linear infinite;
+            animation: spin 0.72s linear infinite;
             display: none;
         }
 
@@ -222,92 +524,301 @@
             display: block;
         }
 
+        .btn-login.loading .btn-icon,
         .btn-login.loading .btn-text {
-            display: none;
+            opacity: 0.92;
         }
 
         @keyframes spin {
-            to {
-                transform: rotate(360deg);
+            to { transform: rotate(360deg); }
+        }
+
+        .login-footnote {
+            margin-top: 22px;
+            font-size: 12px;
+            line-height: 1.8;
+            color: var(--text-secondary);
+            text-align: center;
+        }
+
+        body.is-entering-app {
+            pointer-events: none;
+        }
+
+        body.is-entering-app .login-shell {
+            animation: shellOut 0.46s cubic-bezier(0.4, 0, 0.2, 1) forwards;
+        }
+
+        body.is-entering-app::before,
+        body.is-entering-app::after {
+            animation-duration: 0.46s;
+        }
+
+        @keyframes shellOut {
+            from { opacity: 1; transform: scale(1) translateY(0); filter: blur(0); }
+            to { opacity: 0; transform: scale(1.02) translateY(-10px); filter: blur(10px); }
+        }
+
+        @media (max-width: 980px) {
+            body {
+                overflow-y: auto;
+            }
+
+            .login-shell {
+                min-height: auto;
+                padding: 20px;
+            }
+
+            .login-frame {
+                grid-template-columns: 1fr;
+                max-width: 680px;
+            }
+
+            .hero-panel {
+                min-height: auto;
+                gap: 24px;
+            }
+        }
+
+        @media (max-width: 640px) {
+            .login-shell {
+                padding: 14px;
+            }
+
+            .hero-panel,
+            .login-panel {
+                border-radius: 24px;
+            }
+
+            .hero-panel,
+            .login-panel {
+                padding: 22px;
+            }
+
+            .hero-grid,
+            .hero-bottom {
+                grid-template-columns: 1fr;
+            }
+
+            .login-brand h2 {
+                font-size: 26px;
+            }
+
+            .hero-copy h1 {
+                font-size: 32px;
             }
         }
     </style>
 </head>
-
 <body>
-    <div class="login-container">
-        <div class="login-card">
-            <div class="login-brand">
-                <span class="icon">⚡</span>
-                <h1>TelDriveManager</h1>
-                <p>请输入管理员账号和密码</p>
-            </div>
+    <div class="login-shell">
+        <div class="login-frame">
+            <section class="hero-panel">
+                <div class="hero-top">
+                    <div class="brand-chip">
+                        <i class="ph-fill ph-rocket-launch"></i>
+                        TelDriveManager 控制台
+                    </div>
 
-            <form id="loginForm" autocomplete="off">
-                <div class="form-group">
-                    <label for="username">用户名</label>
-                    <input type="text" id="username" class="form-input" placeholder="请输入用户名" autofocus required>
+                    <div class="hero-copy">
+                        <h1>统一管理下载、上传与 Telegram 自动化链路</h1>
+                        <p>保持和主程序一致的轻盈控制台风格，在同一入口集中管理 PikPak、aria2、TelDrive 与 Telegram 中转任务。</p>
+                    </div>
+
+                    <div class="hero-grid">
+                        <div class="hero-card">
+                            <i class="ph ph-hard-drives"></i>
+                            <strong>下载与上传联动</strong>
+                            <span>实时查看 aria2 下载队列、TelDrive 上传进度与任务状态。</span>
+                        </div>
+                        <div class="hero-card">
+                            <i class="ph ph-sliders-horizontal"></i>
+                            <strong>集中配置</strong>
+                            <span>统一管理 aria2、本地控制面板、Telegram 中转和数据库设置。</span>
+                        </div>
+                        <div class="hero-card">
+                            <i class="ph ph-plugs-connected"></i>
+                            <strong>链路自检</strong>
+                            <span>快速确认 PikPak、aria2 与 TelDrive 服务可用性。</span>
+                        </div>
+                        <div class="hero-card">
+                            <i class="ph ph-lightning"></i>
+                            <strong>丝滑过渡</strong>
+                            <span>登录后自动进入主程序，并带有与主界面一致的平滑切换动画。</span>
+                        </div>
+                    </div>
                 </div>
 
-                <div class="form-group">
-                    <label for="password">密码</label>
-                    <input type="password" id="password" class="form-input" placeholder="请输入密码" required>
+                <div class="hero-bottom">
+                    <div class="metric-card">
+                        <small>控制台体验</small>
+                        <strong>Light UI</strong>
+                        <span>与主程序相同的浅色主题、圆角卡片与蓝色强调色。</span>
+                    </div>
+                    <div class="metric-card">
+                        <small>登录链路</small>
+                        <strong>Auto Redirect</strong>
+                        <span>认证完成后自动校验会话并直接进入主程序页面。</span>
+                    </div>
+                    <div class="metric-card">
+                        <small>视觉过渡</small>
+                        <strong>Smooth Entry</strong>
+                        <span>进入控制台前加入淡入、位移和柔光蒙层过渡效果。</span>
+                    </div>
                 </div>
+            </section>
 
-                <button type="submit" class="btn-login" id="loginBtn">
-                    <span class="btn-text">🔓 登录</span>
-                    <div class="spinner"></div>
-                </button>
-            </form>
+            <aside class="login-panel">
+                <div class="login-card">
+                    <div class="login-brand">
+                        <div class="login-badge"><i class="ph-fill ph-lock-key"></i></div>
+                        <h2>欢迎回来</h2>
+                        <p>请输入管理员账号和密码，进入 TelDriveManager 主控制台。</p>
+                        <div class="mini-status">
+                            <span><i class="ph-fill ph-shield-check"></i> 受保护的管理入口</span>
+                            <span><i class="ph-fill ph-cookie"></i> 会话自动建立</span>
+                        </div>
+                    </div>
 
-            <div class="error-msg" id="errorMsg"></div>
+                    <form id="loginForm" class="login-form" autocomplete="off">
+                        <div class="form-group">
+                            <label for="username">用户名</label>
+                            <div class="input-wrap">
+                                <input type="text" id="username" class="form-input" placeholder="请输入管理员用户名" autofocus required>
+                                <i class="ph ph-user"></i>
+                            </div>
+                        </div>
+
+                        <div class="form-group">
+                            <label for="password">密码</label>
+                            <div class="input-wrap">
+                                <input type="password" id="password" class="form-input" placeholder="请输入登录密码" required>
+                                <i class="ph ph-password"></i>
+                            </div>
+                        </div>
+
+                        <div class="helper-row">
+                            <span><i class="ph ph-info"></i> 登录成功后会自动跳转进入主程序</span>
+                            <span><i class="ph ph-sparkle"></i> 过渡动画已启用</span>
+                        </div>
+
+                        <div class="form-status" id="formStatus"></div>
+
+                        <button type="submit" class="btn-login" id="loginBtn">
+                            <i class="ph-fill ph-sign-in btn-icon"></i>
+                            <span class="btn-text">登录并进入控制台</span>
+                            <div class="spinner"></div>
+                        </button>
+                    </form>
+
+                    <div class="login-footnote">如果长时间停留在此页，请确认浏览器允许当前站点建立会话 Cookie。</div>
+                </div>
+            </aside>
         </div>
     </div>
 
     <script>
         const form = document.getElementById('loginForm');
         const btn = document.getElementById('loginBtn');
-        const errEl = document.getElementById('errorMsg');
+        const btnText = btn.querySelector('.btn-text');
+        const statusEl = document.getElementById('formStatus');
+        const usernameEl = document.getElementById('username');
+        const passwordEl = document.getElementById('password');
+        let loginPending = false;
 
-        form.addEventListener('submit', async (e) => {
+        async function readJsonSafe(resp) {
+            return await resp.json().catch(() => ({}));
+        }
+
+        function setStatus(message = '', type = '') {
+            statusEl.textContent = message;
+            statusEl.className = 'form-status';
+            if (!message) return;
+            statusEl.classList.add('show');
+            if (type) statusEl.classList.add(type);
+        }
+
+        function setLoading(loading, label = '登录并进入控制台') {
+            btn.disabled = loading;
+            btn.classList.toggle('loading', loading);
+            if (!btn.classList.contains('success')) btnText.textContent = label;
+        }
+
+        async function waitForAuthReady(maxAttempts = 10) {
+            for (let i = 0; i < maxAttempts; i += 1) {
+                try {
+                    const resp = await fetch('/api/auth/check', {
+                        method: 'GET',
+                        credentials: 'same-origin',
+                        cache: 'no-store',
+                        headers: { 'Cache-Control': 'no-cache' }
+                    });
+                    const data = await readJsonSafe(resp);
+                    if (resp.ok && data.authenticated) return true;
+                } catch (e) {}
+                await new Promise(resolve => setTimeout(resolve, 140 + i * 40));
+            }
+            return false;
+        }
+
+        async function enterApp() {
+            try {
+                sessionStorage.setItem('tdm-login-transition', '1');
+            } catch (e) {}
+            btn.classList.remove('loading');
+            btn.classList.add('success');
+            btnText.textContent = '正在进入控制台...';
+            document.body.classList.add('is-entering-app');
+            await new Promise(resolve => setTimeout(resolve, 420));
+            window.location.replace('/');
+        }
+
+        async function submitLogin(e) {
             e.preventDefault();
-            const username = document.getElementById('username').value;
-            const password = document.getElementById('password').value;
-            if (!username || !password) return;
+            if (loginPending) return;
 
-            btn.classList.add('loading');
-            btn.disabled = true;
-            errEl.classList.remove('show');
+            const username = usernameEl.value.trim();
+            const password = passwordEl.value;
+            if (!username || !password) {
+                setStatus('请输入用户名和密码。', 'error');
+                return;
+            }
+
+            loginPending = true;
+            setStatus('');
+            setLoading(true, '正在验证账号...');
 
             try {
                 const resp = await fetch('/api/login', {
                     method: 'POST',
+                    credentials: 'same-origin',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ username, password }),
+                    body: JSON.stringify({ username, password })
                 });
+                const data = await readJsonSafe(resp);
 
-                const data = await resp.json();
-
-                if (resp.ok && data.success) {
-                    window.location.href = '/';
-                } else {
-                    errEl.textContent = data.message || '用户名或密码错误';
-                    errEl.classList.add('show');
+                if (!resp.ok || !data.success) {
+                    throw new Error(data.message || '用户名或密码错误');
                 }
-            } catch (err) {
-                errEl.textContent = '网络错误，请重试';
-                errEl.classList.add('show');
-            } finally {
-                btn.classList.remove('loading');
-                btn.disabled = false;
-            }
-        });
 
-        // 回车提交
-        document.getElementById('password').addEventListener('keydown', (e) => {
-            if (e.key === 'Enter') form.dispatchEvent(new Event('submit'));
-        });
+                setStatus('登录成功，正在建立会话并进入主程序...', 'success');
+                const authenticated = await waitForAuthReady();
+                if (!authenticated) {
+                    throw new Error('登录状态未及时建立，请重试');
+                }
+                await enterApp();
+                return;
+            } catch (err) {
+                setStatus(err.message || '网络错误，请稍后重试', 'error');
+            } finally {
+                if (!document.body.classList.contains('is-entering-app')) {
+                    loginPending = false;
+                    setLoading(false);
+                }
+            }
+        }
+
+        form.addEventListener('submit', submitLogin);
     </script>
 </body>
-
 </html>
