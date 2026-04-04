@@ -65,11 +65,16 @@ async def _ensure_clients():
     return _pikpak, _aria2
 
 
-def reset_clients():
+async def reset_clients():
     """配置变更后重置客户端"""
     global _pikpak, _aria2
+    old_pikpak, old_aria2 = _pikpak, _aria2
     _pikpak = None
     _aria2 = None
+    if old_pikpak is not None:
+        await old_pikpak.close()
+    if old_aria2 is not None:
+        await old_aria2.close()
 
 
 async def _broadcast(msg: dict):
@@ -295,12 +300,17 @@ async def api_status():
 @router.post("/test")
 async def api_test():
     results = {}
+    pikpak = None
+    aria2 = None
     try:
-        pikpak, aria2 = _create_clients()
+        pikpak, _ = _create_clients()
         await pikpak.login()
         results["pikpak"] = {"ok": True, "message": "登录成功"}
     except Exception as e:
         results["pikpak"] = {"ok": False, "message": str(e)}
+    finally:
+        if pikpak is not None:
+            await pikpak.close()
 
     try:
         _, aria2 = _create_clients()
@@ -308,6 +318,9 @@ async def api_test():
         results["aria2"] = {"ok": test_result["success"], "message": test_result["message"]}
     except Exception as e:
         results["aria2"] = {"ok": False, "message": str(e)}
+    finally:
+        if aria2 is not None:
+            await aria2.close()
     return results
 
 

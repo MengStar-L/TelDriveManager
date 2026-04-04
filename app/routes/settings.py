@@ -38,8 +38,9 @@ async def update_settings(request_body: dict):
     current = reload_config()
     await aria2_service.handle_config_update(previous, current)
     task_manager.reload_config()
-    pikpak_routes.reset_clients()
+    await pikpak_routes.reset_clients()
     return {"success": True, "message": "设置已保存"}
+
 
 
 @router.get("/aria2/runtime")
@@ -77,8 +78,7 @@ async def install_aria2_upload(
     return await aria2_service.begin_uploaded_install(temp_path, os_type, archive.filename or temp_name)
 
 
-@router.post("/test/aria2")
-async def test_aria2(payload: dict = Body(None)):
+async def _test_aria2_connection(payload: dict | None = None):
     cfg = load_config(force_reload=True)
     aria2_cfg = dict(cfg.get("aria2", {}))
     if payload:
@@ -95,9 +95,16 @@ async def test_aria2(payload: dict = Body(None)):
         rpc_port=aria2_cfg.get("rpc_port", 6800),
         rpc_secret=aria2_cfg.get("rpc_secret", ""),
     )
-    result = await client.test_connection()
-    await client.close()
-    return result
+    try:
+        return await client.test_connection()
+    finally:
+        await client.close()
+
+
+@router.post("/test/aria2")
+async def test_aria2(payload: dict | None = Body(None)):
+    return await _test_aria2_connection(payload)
+
 
 
 @router.post("/test/teldrive")
@@ -130,6 +137,7 @@ async def test_pikpak(payload: dict = Body(None)):
         if not username or not password:
             return {"success": False, "message": "PikPak 账号密码不能为空"}
 
+    client = None
     try:
         client = PikPakClient(
             username=username,
@@ -144,6 +152,10 @@ async def test_pikpak(payload: dict = Body(None)):
 
     except Exception as e:
         return {"success": False, "message": f"PikPak 连接失败: {str(e)}"}
+    finally:
+        if client is not None:
+            await client.close()
+
 
 
 @router.post("/test/telegram")
@@ -240,8 +252,9 @@ async def global_health_check():
         except Exception:
             pass
 
-        aria2_result = await test_aria2()
+        aria2_result = await _test_aria2_connection()
         statuses["aria2"] = bool(aria2_result.get("success"))
+
         statuses["teldrive"] = task_manager.teldrive is not None and bool(cfg.get("teldrive", {}).get("access_token"))
 
         try:

@@ -108,13 +108,17 @@ class Aria2Service:
             "rpc_port": int(cfg.get("aria2", {}).get("rpc_port") or 6800),
         })
         if snapshot["running"]:
+            client = None
             try:
                 client = self._build_client(cfg)
                 version = await client.get_version()
                 snapshot["version"] = str(version.get("version") or "")
-                await client.close()
             except Exception:
                 snapshot["running"] = False
+            finally:
+                if client is not None:
+                    await client.close()
+
         return snapshot
 
     def _build_client(self, cfg: Optional[dict] = None) -> Aria2Client:
@@ -131,7 +135,19 @@ class Aria2Service:
         data.update(kwargs)
         self._state = InstallState(**data)
 
+    @staticmethod
+    def _read_log_tail(max_lines: int = 20) -> str:
+        if not ARIA2_LOG_FILE.exists():
+            return ""
+        try:
+            lines = ARIA2_LOG_FILE.read_text(encoding="utf-8", errors="ignore").splitlines()
+            tail = [line.strip() for line in lines[-max_lines:] if line.strip()]
+            return " | ".join(tail[-6:])
+        except Exception:
+            return ""
+
     async def handle_config_update(self, previous: Optional[dict], current: dict):
+
         prev_aria2 = (previous or {}).get("aria2", {})
         curr_aria2 = current.get("aria2", {})
         keys = {
@@ -191,16 +207,30 @@ class Aria2Service:
             command.append(f"--rpc-secret={aria2_cfg['rpc_secret']}")
 
         creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
+        env = os.environ.copy()
+        if os.name != "nt":
+            lib_path = str(binary_path.parent)
+            current_lib_path = str(env.get("LD_LIBRARY_PATH") or "").strip()
+            env["LD_LIBRARY_PATH"] = f"{lib_path}{os.pathsep}{current_lib_path}" if current_lib_path else lib_path
         self._log_handle = open(ARIA2_LOG_FILE, "ab")
         self._process = subprocess.Popen(
             command,
-            cwd=str(ARIA2_HOME),
+            cwd=str(binary_path.parent),
             stdout=self._log_handle,
             stderr=self._log_handle,
             creationflags=creationflags,
+            env=env,
         )
-        await self._wait_until_ready(cfg)
+        try:
+            await self._wait_until_ready(cfg)
+        except Exception as exc:
+            log_tail = self._read_log_tail()
+            await self.stop()
+            if log_tail:
+                raise RuntimeError(f"{exc}；最近 aria2 日志: {log_tail}") from exc
+            raise
         logger.info("本地 aria2 服务已启动")
+
 
     async def stop(self):
         process = self._process
@@ -228,10 +258,10 @@ class Aria2Service:
         while asyncio.get_running_loop().time() < deadline:
             if self._process and self._process.poll() is not None:
                 raise RuntimeError("aria2 进程启动后立即退出，请检查安装包或日志")
+            client = None
             try:
                 client = self._build_client(cfg)
                 version = await client.get_version()
-                await client.close()
                 self._set_state(
                     status="completed",
                     progress=100.0,
@@ -246,7 +276,11 @@ class Aria2Service:
             except Exception as exc:
                 last_error = exc
                 await asyncio.sleep(0.5)
+            finally:
+                if client is not None:
+                    await client.close()
         raise RuntimeError(f"aria2 启动超时: {last_error}")
+
 
     async def begin_auto_install(self, os_type: str) -> dict:
         async with self._install_lock:

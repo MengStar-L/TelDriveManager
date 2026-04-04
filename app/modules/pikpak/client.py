@@ -83,6 +83,14 @@ class PikPakClient:
         except Exception:
             pass
 
+    async def close(self):
+        httpx_client = getattr(self.client, "httpx_client", None)
+        if httpx_client is not None:
+            try:
+                await httpx_client.aclose()
+            except Exception:
+                pass
+
     async def login(self):
         if self.client.refresh_token:
             try:
