@@ -72,6 +72,23 @@
         .wizard-dots { display: flex; gap: 8px; align-items: center; justify-content: center; margin-bottom: 24px; }
         .wizard-dot { width: 8px; height: 8px; border-radius: 50%; background: #e2e8f0; transition: all 0.3s; }
         .wizard-dot.active { background: #0066ff; width: 24px; border-radius: 4px; }
+        .wizard-choice-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+        .wizard-status-card { border: 1px solid var(--border); border-radius: var(--radius-md); padding: 16px; background: #f8fafc; display: flex; flex-direction: column; gap: 10px; }
+        .wizard-status-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+        .wizard-status-badge { display: inline-flex; align-items: center; gap: 6px; padding: 6px 10px; border-radius: 999px; font-size: 12px; font-weight: 600; background: #e2e8f0; color: var(--text-secondary); }
+        .wizard-status-badge.success { background: rgba(16,185,129,0.12); color: #047857; }
+        .wizard-status-badge.warning { background: rgba(245,158,11,0.12); color: #b45309; }
+        .wizard-status-badge.error { background: rgba(239,68,68,0.12); color: #b91c1c; }
+        .wizard-status-badge.info { background: rgba(59,130,246,0.12); color: #1d4ed8; }
+        .wizard-progress-track { width: 100%; height: 10px; border-radius: 999px; background: #e2e8f0; overflow: hidden; }
+        .wizard-progress-fill { height: 100%; width: 0; border-radius: 999px; background: linear-gradient(90deg, #2563eb, #60a5fa); transition: width 0.3s ease; }
+        .wizard-note { font-size: 12px; line-height: 1.6; color: var(--text-secondary); }
+        .wizard-note code { background: rgba(15, 23, 42, 0.06); padding: 2px 6px; border-radius: 6px; }
+        .wizard-meta-list { display: grid; grid-template-columns: 1fr; gap: 8px; }
+        .wizard-meta-item { font-size: 12px; color: var(--text-secondary); display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+        .wizard-meta-item strong { color: var(--text-primary); font-weight: 600; }
+
+
 
         /* ── Pages ── */
         .page-content { flex: 1; min-height: 0; overflow-y: auto; padding-bottom: 20px; scrollbar-width: none; position: relative; }
@@ -674,9 +691,6 @@
             <div class="nav-item" data-page="rss" data-tooltip="RSS订阅" onclick="switchPage('rss', { animated: true, source: 'user' })">
                 <i class="ph ph-rss"></i>
             </div>
-            <div class="nav-item" data-page="tasks" data-tooltip="Pik离线任务" onclick="switchPage('tasks', { animated: true, source: 'user' })">
-                <i class="ph ph-cloud-arrow-down"></i>
-            </div>
             <div class="nav-item" data-page="progress" data-tooltip="下载链接推送" onclick="switchPage('progress', { animated: true, source: 'user' })">
 
                 <i class="ph ph-list-dashes"></i>
@@ -840,22 +854,6 @@
                     </div>
                 </div>
 
-                <!-- Tasks -->
-                <div class="page" id="page-tasks">
-                    <div class="card">
-                        <div class="card-header">
-                            <h3><i class="ph ph-cloud-check"></i> 云端持久化拉取</h3>
-                            <button class="btn btn-ghost btn-sm" onclick="refreshStatus()"><i class="ph ph-arrows-clockwise"></i> 刷新同步</button>
-                        </div>
-                        <div class="card-body" style="padding:0">
-                            <div class="task-list" id="taskList">
-                                <div class="log-empty" style="padding:40px;"><i class="ph ph-tray"></i> 请点击刷新获取数据</div>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-
-                
                 <!-- Aria2TelDrive -->
                 <div class="page" id="page-aria2teldrive">
                     <!-- System Dashboard -->
@@ -894,7 +892,8 @@
                     <div class="card">
                         <div class="card-header" style="flex-wrap: wrap; gap: 12px; align-items: center;">
                             <div class="a2td-header-main">
-                                <h3><i class="ph ph-hard-drives"></i> 内置引擎上传拉取队列</h3>
+                                <h3><i class="ph ph-hard-drives"></i> aria2 下载与 TelDrive 上传队列</h3>
+
                                 <div class="a2td-filter-group" id="a2tdTaskFilters">
                                     <button class="a2td-filter-btn active" data-a2td-filter="all" onclick="setA2TDTaskFilter('all')">全部</button>
                                     <button class="a2td-filter-btn" data-a2td-filter="downloading" onclick="setA2TDTaskFilter('downloading')">下载中</button>
@@ -916,7 +915,8 @@
                         </div>
 
                         <div class="card-body" style="padding:16px">
-                            <!-- 实时进度条区域(内置下载引擎使用)代替原有的纯文本列表 -->
+                            <!-- 实时进度卡片区域 -->
+
                             <div id="progressBarsContainer" style="display:none;">
                                 <div id="progressBars"></div>
                             </div>
@@ -1082,37 +1082,42 @@
                                         <div class="toggle-switch"><input type="checkbox" id="cfgPikpakDelete"><span class="toggle-slider"></span></div>
                                     </label>
                                 </div>
-                                <div style="margin-top:20px; padding-top:20px; border-top:1px solid var(--border)">
-                                    <h4 style="margin-bottom:12px; font-size:13px; color:var(--text-secondary)"><i class="ph ph-download-simple"></i> 下载引擎</h4>
-                                    <div class="field-grid">
-                                        <div class="form-group">
-                                            <label>引擎类型</label>
-                                            <select class="form-input" id="cfgPikpakEngine">
-                                                <option value="builtin">内置引擎（下载+上传 TelDrive）</option>
-                                                <option value="aria2">下载链接推送（仅导出直链）</option>
-
-                                            </select>
-                                        </div>
-                                        <div class="form-group"><label>最大并发下载</label><input class="form-input" type="number" id="cfgPikpakMaxDownloads" min="1" max="10" placeholder="3"></div>
-                                        <div class="form-group"><label>单文件连接数</label><input class="form-input" type="number" id="cfgPikpakConnections" min="1" max="32" placeholder="8"></div>
-                                    </div>
-                                </div>
                             </div>
                         </div>
                         
                         <div class="card">
-                            <div class="card-header"><h3><i class="ph-fill ph-engine"></i> 下载链接接收端配置</h3></div>
-
+                            <div class="card-header"><h3><i class="ph-fill ph-engine"></i> 本地 aria2 下载配置</h3></div>
                             <div class="card-body">
+                                <div class="wizard-status-card" style="margin-bottom:16px;">
+                                    <div class="wizard-status-row">
+                                        <div>
+                                            <div style="font-size:13px; font-weight:600; color:var(--text-primary); margin-bottom:4px;">本地托管 aria2 运行状态</div>
+                                            <div class="wizard-note" id="cfgAria2RuntimeHint">正在读取 aria2 状态...</div>
+                                        </div>
+                                        <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap;">
+                                            <span class="wizard-status-badge info" id="cfgAria2RuntimeBadge"><i class="ph ph-circle-dashed"></i> 检查中</span>
+                                            <button type="button" class="btn btn-ghost btn-sm" onclick="refreshAria2RuntimeStatus(true)"><i class="ph ph-arrows-clockwise"></i> 刷新</button>
+                                        </div>
+                                    </div>
+                                    <div class="wizard-meta-list">
+                                        <div class="wizard-meta-item"><span>安装路径</span><strong id="cfgAria2BinaryPath">--</strong></div>
+                                        <div class="wizard-meta-item"><span>固定下载目录</span><strong id="cfgAria2DownloadDirText">--</strong></div>
+                                    </div>
+                                </div>
                                 <div class="field-grid">
-                                    <div class="form-group"><label>通讯端点 URL</label><input class="form-input" type="text" id="cfgAria2Url" placeholder="例如 http://localhost:6800/jsonrpc"></div>
-                                    <div class="form-group"><label>Secret Key</label><input class="form-input" type="password" id="cfgAria2Secret" placeholder="为空跳过认证"></div>
+                                    <div class="form-group"><label>RPC 端口</label><input class="form-input" type="number" id="cfgAria2Port" min="1" max="65535" placeholder="6800"></div>
+                                    <div class="form-group"><label>RPC Secret</label><input class="form-input" type="password" id="cfgAria2Secret" placeholder="首次安装后会自动生成"></div>
+                                    <div class="form-group"><label>最大并发下载</label><input class="form-input" type="number" id="cfgAria2MaxConcurrent" min="1" max="32" placeholder="3"></div>
+                                    <div class="form-group"><label>单任务分块数</label><input class="form-input" type="number" id="cfgAria2Split" min="1" max="64" placeholder="8"></div>
+                                    <div class="form-group"><label>单服务器最大连接数</label><input class="form-input" type="number" id="cfgAria2MaxConnPerServer" min="1" max="64" placeholder="8"></div>
+                                    <div class="form-group"><label>最小分块大小 (MB)</label><input class="form-input" type="number" id="cfgAria2MinSplitSize" min="1" max="1024" placeholder="5"></div>
                                 </div>
                                 <div class="field-grid cols-1">
-                                    <div class="form-group"><label>本地输出域 (缺省跟随节点)</label><input class="form-input" type="text" id="cfgAria2Dir" placeholder="/downloads"></div>
+                                    <div class="form-group"><label>RPC 地址</label><input class="form-input" type="text" id="cfgAria2Url" placeholder="http://127.0.0.1" readonly></div>
                                 </div>
                             </div>
                         </div>
+
                         
                         <div class="card" style="grid-column: span 2/span 2">
                             <div class="card-header"><h3><i class="ph-fill ph-hard-drives"></i> TelDrive 持久化上传</h3></div>
@@ -1180,7 +1185,8 @@
 
     <div id="a2tdToastContainer" class="app-toast-container"></div>
 
-    <script src="/static/app.js?v=20260404a"></script>
+    <script src="/static/app.js?v=20260404b"></script>
+
 
 
 
@@ -1190,10 +1196,10 @@
 
     <!-- Setup Wizard Overlay -->
     <div id="setupWizard" class="wizard-overlay">
-        <div class="wizard-card">
+        <div class="wizard-card" style="width:min(720px, calc(100vw - 32px)); max-height:calc(100vh - 32px); overflow-y:auto;">
             <div class="wizard-header">
                 <div class="wizard-title">欢迎使用 TelDriveManager</div>
-                <div class="wizard-subtitle">看起来是第一次运行，让我们完成基础配置</div>
+                <div class="wizard-subtitle">首次运行需要先安装并配置 aria2，完成后才能进入主界面</div>
             </div>
             
             <div class="wizard-dots">
@@ -1201,6 +1207,8 @@
                 <div class="wizard-dot" id="dot2"></div>
                 <div class="wizard-dot" id="dot3"></div>
                 <div class="wizard-dot" id="dot4"></div>
+                <div class="wizard-dot" id="dot5"></div>
+                <div class="wizard-dot" id="dot6"></div>
             </div>
 
             <!-- Step 1: PikPak -->
@@ -1208,38 +1216,110 @@
                 <div class="field-grid cols-1">
                     <div class="form-group">
                         <label>PikPak 账号 / 邮箱</label>
-                        <input class="form-input" type="text" id="wPikUser" placeholder="填写您的绑定的邮箱或账号">
+                        <input class="form-input" type="text" id="wPikUser" placeholder="填写您的绑定邮箱或账号">
                     </div>
                     <div class="form-group">
                         <label>PikPak 密码</label>
-                        <input class="form-input" type="password" id="wPikPass" placeholder="请填写内容">
+                        <input class="form-input" type="password" id="wPikPass" placeholder="请填写登录密码">
                     </div>
                 </div>
                 <div class="wizard-footer" style="justify-content: flex-end;">
-                    <button class="btn btn-primary" onclick="wizardNext(1, 2)">下一步 <i class="ph ph-arrow-right"></i></button>
+                    <button class="btn btn-primary" onclick="wizardNext(1, 2, this)">下一步 <i class="ph ph-arrow-right"></i></button>
                 </div>
             </div>
 
-            <!-- Step 2: TelDrive -->
+            <!-- Step 2: Aria2 Install -->
             <div class="wizard-step" id="wStep2">
                 <div class="field-grid cols-1">
                     <div class="form-group">
-                        <label>TelDrive API 地址 (必选)</label>
+                        <label>当前操作系统</label>
+                        <select class="form-input" id="wAria2Os">
+                            <option value="">请选择当前运行环境</option>
+                            <option value="win">Windows</option>
+                            <option value="linux">Linux</option>
+                        </select>
+                    </div>
+                </div>
+                <div class="wizard-choice-grid">
+                    <button type="button" class="btn btn-primary" id="wAria2AutoBtn" style="width:100%; justify-content:center; min-height:48px;" onclick="startWizardAria2AutoInstall()"><i class="ph ph-download-simple"></i> 自动拉取并安装 aria2</button>
+                    <div>
+                        <input type="file" id="wAria2Archive" accept=".zip,.tar,.tar.gz,.tgz,.tar.xz" style="display:none;" onchange="handleWizardAria2Upload(event)">
+                        <button type="button" class="btn btn-ghost" id="wAria2UploadBtn" style="width:100%; justify-content:center; min-height:48px;" onclick="triggerWizardAria2Upload()"><i class="ph ph-upload-simple"></i> 上传 aria2 压缩包安装</button>
+                    </div>
+                </div>
+                <div class="wizard-status-card">
+                    <div class="wizard-status-row">
+                        <div>
+                            <div style="font-size:13px; font-weight:600; color:var(--text-primary); margin-bottom:4px;">安装进度</div>
+                            <div class="wizard-note" id="wAria2InstallHint">请选择系统后开始安装。安装未完成前无法进入下一步。</div>
+                        </div>
+                        <span class="wizard-status-badge info" id="wAria2InstallBadge"><i class="ph ph-circle-dashed"></i> 未安装</span>
+                    </div>
+                    <div class="wizard-progress-track">
+                        <div class="wizard-progress-fill" id="wAria2InstallProgress"></div>
+                    </div>
+                    <div class="wizard-status-row" style="font-size:12px; color:var(--text-secondary);">
+                        <span id="wAria2InstallText">等待开始</span>
+                        <span id="wAria2InstallPercent">0%</span>
+                    </div>
+                    <div class="wizard-meta-list">
+                        <div class="wizard-meta-item"><span>安装路径</span><strong id="wAria2BinaryPath">--</strong></div>
+                        <div class="wizard-meta-item"><span>固定下载目录</span><strong id="wAria2DownloadDir">--</strong></div>
+                    </div>
+                </div>
+                <div class="wizard-footer">
+                    <button class="btn btn-ghost" onclick="wizardNext(2, 1, this)"><i class="ph ph-arrow-left"></i> 上一步</button>
+                    <button class="btn btn-primary" id="wAria2NextBtn" onclick="wizardNext(2, 3)">下一步 <i class="ph ph-arrow-right"></i></button>
+                </div>
+            </div>
+
+            <!-- Step 3: Aria2 Params -->
+            <div class="wizard-step" id="wStep3">
+                <div class="wizard-note" style="margin-bottom:8px;">aria2 下载目录已固定为程序目录下的 <code>downloads</code>，这里只需要配置下载参数。</div>
+                <div class="field-grid">
+                    <div class="form-group">
+                        <label>最大并发下载</label>
+                        <input class="form-input" type="number" id="wAria2MaxConcurrent" min="1" max="32" placeholder="3">
+                    </div>
+                    <div class="form-group">
+                        <label>单任务分块数</label>
+                        <input class="form-input" type="number" id="wAria2Split" min="1" max="64" placeholder="8">
+                    </div>
+                    <div class="form-group">
+                        <label>单服务器最大连接数</label>
+                        <input class="form-input" type="number" id="wAria2MaxConnPerServer" min="1" max="64" placeholder="8">
+                    </div>
+                    <div class="form-group">
+                        <label>最小分块大小 (MB)</label>
+                        <input class="form-input" type="number" id="wAria2MinSplitSize" min="1" max="1024" placeholder="5">
+                    </div>
+                </div>
+                <div class="wizard-footer">
+                    <button class="btn btn-ghost" onclick="wizardNext(3, 2, this)"><i class="ph ph-arrow-left"></i> 上一步</button>
+                    <button class="btn btn-primary" onclick="wizardNext(3, 4)">下一步 <i class="ph ph-arrow-right"></i></button>
+                </div>
+            </div>
+
+            <!-- Step 4: TelDrive -->
+            <div class="wizard-step" id="wStep4">
+                <div class="field-grid cols-1">
+                    <div class="form-group">
+                        <label>TelDrive API 地址 (必填)</label>
                         <input class="form-input" type="text" id="wTdUrl" placeholder="如 http://localhost:8080">
                     </div>
                     <div class="form-group">
-                        <label>TelDrive Token (必选)</label>
+                        <label>TelDrive Token (必填)</label>
                         <input class="form-input" type="password" id="wTdToken" placeholder="抓包获取的 Bearer Token">
                     </div>
                 </div>
                 <div class="wizard-footer">
-                    <button class="btn btn-ghost" onclick="wizardNext(2, 1)"><i class="ph ph-arrow-left"></i> 上一步</button>
-                    <button class="btn btn-primary" onclick="wizardNext(2, 3)">下一步 <i class="ph ph-arrow-right"></i></button>
+                    <button class="btn btn-ghost" onclick="wizardNext(4, 3, this)"><i class="ph ph-arrow-left"></i> 上一步</button>
+                    <button class="btn btn-primary" onclick="wizardNext(4, 5, this)">下一步 <i class="ph ph-arrow-right"></i></button>
                 </div>
             </div>
 
-            <!-- Step 3: Telegram -->
-            <div class="wizard-step" id="wStep3">
+            <!-- Step 5: Telegram -->
+            <div class="wizard-step" id="wStep5">
                 <div class="field-grid cols-1" style="position: relative;">
                     <div class="form-group">
                         <label>Telegram API ID</label>
@@ -1251,17 +1331,17 @@
                     </div>
                 </div>
                 <div class="wizard-footer">
-                    <button class="btn btn-ghost" onclick="wizardNext(3, 2)"><i class="ph ph-arrow-left"></i> 上一步</button>
-                    <button class="btn btn-primary" onclick="wizardNext(3, 4)">下一步 <i class="ph ph-arrow-right"></i></button>
+                    <button class="btn btn-ghost" onclick="wizardNext(5, 4)"><i class="ph ph-arrow-left"></i> 上一步</button>
+                    <button class="btn btn-primary" onclick="wizardNext(5, 6, this)">下一步 <i class="ph ph-arrow-right"></i></button>
                 </div>
             </div>
 
-            <!-- Step 4: Postgres -->
-            <div class="wizard-step" id="wStep4">
-                <div class="field-grid cols-2">
+            <!-- Step 6: Postgres -->
+            <div class="wizard-step" id="wStep6">
+                <div class="field-grid">
                     <div class="form-group" style="grid-column: span 2;">
-                        <label>Postgres 主机IP</label>
-                        <input class="form-input" type="text" id="wDbHost" placeholder="默认无需建立填写 localhost">
+                        <label>Postgres 主机地址</label>
+                        <input class="form-input" type="text" id="wDbHost" placeholder="例如 localhost 或 Supabase Pooler 地址">
                     </div>
                     <div class="form-group">
                         <label>端口</label>
@@ -1277,16 +1357,17 @@
                     </div>
                     <div class="form-group">
                         <label>密码</label>
-                        <input class="form-input" type="password" id="wDbPass" placeholder="空">
+                        <input class="form-input" type="password" id="wDbPass" placeholder="留空则为空密码">
                     </div>
                 </div>
                 <div class="wizard-footer">
-                    <button class="btn btn-ghost" onclick="wizardNext(4, 3)"><i class="ph ph-arrow-left"></i> 上一步</button>
-                    <button class="btn btn-primary" onclick="wizardFinish()"><i class="ph ph-check"></i> 完成配置</button>
+                    <button class="btn btn-ghost" onclick="wizardNext(6, 5)"><i class="ph ph-arrow-left"></i> 上一步</button>
+                    <button class="btn btn-primary" onclick="wizardFinish(this)"><i class="ph ph-check"></i> 完成配置</button>
                 </div>
             </div>
         </div>
     </div>
+
 
 </body>
 </html>

@@ -1,19 +1,30 @@
-"""统一设置路由 — 管理所有模块的配置和连接测试"""
+"""统一设置路由 — 管理所有模块的配置、aria2 安装与连接测试"""
 
-from fastapi import APIRouter, Body
-from app.config import load_config, save_config, reload_config
+import uuid
+from pathlib import Path
+
+from fastapi import APIRouter, Body, File, Form, UploadFile
+
 from app.aria2_client import Aria2Client
-from app.modules.aria2teldrive.teldrive_client import TelDriveClient
+from app.aria2_service import ARIA2_TMP_DIR, aria2_service
+from app.config import load_config, needs_setup, reload_config, save_config
 from app.modules.aria2teldrive.task_manager import task_manager
+from app.modules.aria2teldrive.teldrive_client import TelDriveClient
 from app.modules.pikpak import routes as pikpak_routes
 
 router = APIRouter(prefix="/api/settings")
 
 
+def _sanitize_payload(payload: dict | None) -> dict:
+    payload = payload or {}
+    return {
+        key: value for key, value in payload.items()
+        if not str(key).startswith("_")
+    }
+
+
 @router.get("")
 async def get_settings():
-    """获取当前所有配置"""
-    from app.config import needs_setup
     config = load_config()
     data = dict(config)
     data["_meta"] = {"needs_setup": needs_setup()}
@@ -22,25 +33,67 @@ async def get_settings():
 
 @router.put("")
 async def update_settings(request_body: dict):
-    """保存配置"""
-    save_config(request_body)
-    # 重新加载到各模块
+    previous = load_config(force_reload=True)
+    save_config(_sanitize_payload(request_body))
+    current = reload_config()
+    await aria2_service.handle_config_update(previous, current)
     task_manager.reload_config()
     pikpak_routes.reset_clients()
     return {"success": True, "message": "设置已保存"}
 
 
+@router.get("/aria2/runtime")
+async def get_aria2_runtime():
+    return await aria2_service.get_runtime_status()
+
+
+@router.get("/aria2/install/status")
+async def get_aria2_install_status():
+    return await aria2_service.get_runtime_status()
+
+
+@router.post("/aria2/install/auto")
+async def install_aria2_auto(payload: dict = Body(...)):
+    os_type = str((payload or {}).get("os_type") or "").strip().lower()
+    return await aria2_service.begin_auto_install(os_type)
+
+
+@router.post("/aria2/install/upload")
+async def install_aria2_upload(
+    os_type: str = Form(...),
+    archive: UploadFile = File(...),
+):
+    suffixes = "".join(Path(archive.filename or "aria2-package").suffixes)
+    temp_name = f"aria2-upload-{uuid.uuid4().hex}{suffixes}"
+    ARIA2_TMP_DIR.mkdir(parents=True, exist_ok=True)
+    temp_path = ARIA2_TMP_DIR / temp_name
+    with open(temp_path, "wb") as fh:
+        while True:
+            chunk = await archive.read(1024 * 1024)
+            if not chunk:
+                break
+            fh.write(chunk)
+    await archive.close()
+    return await aria2_service.begin_uploaded_install(temp_path, os_type, archive.filename or temp_name)
+
+
 @router.post("/test/aria2")
 async def test_aria2(payload: dict = Body(None)):
+    cfg = load_config(force_reload=True)
+    aria2_cfg = dict(cfg.get("aria2", {}))
     if payload:
-        cfg = payload
-    else:
-        cfg = load_config()["aria2"]
-    
+        aria2_cfg.update(payload)
+
+    if aria2_cfg.get("installed") and not aria2_service.is_running():
+        try:
+            await aria2_service.start()
+        except Exception:
+            pass
+
     client = Aria2Client(
-        rpc_url=cfg.get("rpc_url", ""),
-        rpc_port=cfg.get("rpc_port", 6800),
-        rpc_secret=cfg.get("rpc_secret", "")
+        rpc_url=aria2_cfg.get("rpc_url", "http://127.0.0.1"),
+        rpc_port=aria2_cfg.get("rpc_port", 6800),
+        rpc_secret=aria2_cfg.get("rpc_secret", ""),
     )
     result = await client.test_connection()
     await client.close()
@@ -49,14 +102,10 @@ async def test_aria2(payload: dict = Body(None)):
 
 @router.post("/test/teldrive")
 async def test_teldrive(payload: dict = Body(None)):
-    if payload:
-        cfg = payload
-    else:
-        cfg = load_config()["teldrive"]
-        
+    cfg = payload or load_config()["teldrive"]
     client = TelDriveClient(
         api_host=cfg.get("api_host", ""),
-        access_token=cfg.get("access_token", "")
+        access_token=cfg.get("access_token", ""),
     )
     return await client.test_connection()
 
@@ -64,11 +113,8 @@ async def test_teldrive(payload: dict = Body(None)):
 @router.post("/test/pikpak")
 async def test_pikpak(payload: dict = Body(None)):
     from app.modules.pikpak.client import PikPakClient
-    if payload:
-        cfg = payload
-    else:
-        cfg = load_config()["pikpak"]
 
+    cfg = payload or load_config()["pikpak"]
     login_mode = cfg.get("login_mode", "password")
     if login_mode == "session":
         session = (cfg.get("session") or "").strip()
@@ -98,47 +144,36 @@ async def test_pikpak(payload: dict = Body(None)):
         return {"success": False, "message": f"PikPak 连接失败: {str(e)}"}
 
 
-
 @router.post("/test/telegram")
 async def test_telegram(payload: dict = Body(None)):
-    from app.modules.tel2teldrive.service import service
     if payload:
-        # Dynamic check
         api_id = payload.get("api_id")
         api_hash = payload.get("api_hash")
         if not api_id or not api_hash:
             return {"success": False, "message": "Telegram API ID 和 Hash 不能为空"}
         try:
             from telethon import TelegramClient
-            import pathlib
-            
-            # Using memory session since we just want to verify credentials
             from telethon.sessions import MemorySession
-            temp_client = TelegramClient(
-                MemorySession(),
-                api_id=api_id,
-                api_hash=api_hash
-            )
-            # Try connecting
+
+            temp_client = TelegramClient(MemorySession(), api_id=api_id, api_hash=api_hash)
             await temp_client.connect()
             connected = temp_client.is_connected()
             await temp_client.disconnect()
-            
             if connected:
                 return {"success": True, "message": "Telegram 握手成功"}
-            else:
-                return {"success": False, "message": "Telegram 连接失败"}
+            return {"success": False, "message": "Telegram 连接失败"}
         except Exception as e:
             return {"success": False, "message": f"Telegram 验证失败: {str(e)}"}
-    else:
-        from app.modules.tel2teldrive.service import broker
-        state = broker.snapshot()
-        if state.get("authorized"):
-            return {"success": True, "message": "Telegram 连接正常并已授权"}
-        elif state.get("phase") in ("awaiting_qr", "awaiting_password"):
-            return {"success": True, "message": "正常：等待扫码验证"}
-        else:
-            return {"success": False, "message": f"连接异常: {state.get('last_error', '服务未激活')}"}
+
+    from app.modules.tel2teldrive.service import broker
+
+    state = broker.snapshot()
+    if state.get("authorized"):
+        return {"success": True, "message": "Telegram 连接正常并已授权"}
+    if state.get("phase") in ("awaiting_qr", "awaiting_password"):
+        return {"success": True, "message": "正常：等待扫码验证"}
+    return {"success": False, "message": f"连接异常: {state.get('last_error', '服务未激活')}"}
+
 
 @router.post("/test/database")
 async def test_database(payload: dict = Body(None)):
@@ -162,6 +197,7 @@ async def test_database(payload: dict = Body(None)):
 
     try:
         import psycopg2
+
         conn = psycopg2.connect(
             host=host,
             port=int(port),
@@ -177,6 +213,7 @@ async def test_database(payload: dict = Body(None)):
     except Exception as e:
         return {"success": False, "message": f"数据库连接失败: {str(e)}"}
 
+
 @router.get("/health")
 async def global_health_check():
     statuses = {
@@ -187,24 +224,26 @@ async def global_health_check():
         "database": False,
     }
     try:
-        # PikPak: 检查配置是否存在
-        cfg = load_config()
+        cfg = load_config(force_reload=True)
         pikpak_cfg = cfg.get("pikpak", {})
         pikpak_mode = pikpak_cfg.get("login_mode", "password")
         statuses["pikpak"] = bool(pikpak_cfg.get("session")) if pikpak_mode == "session" else (
             bool(pikpak_cfg.get("username")) and bool(pikpak_cfg.get("password"))
         )
 
+        try:
+            if cfg.get("aria2", {}).get("installed") and not aria2_service.is_running():
+                await aria2_service.start()
+        except Exception:
+            pass
 
-        # Aria2
-        statuses["aria2"] = task_manager.aria2 is not None
+        aria2_result = await test_aria2()
+        statuses["aria2"] = bool(aria2_result.get("success"))
+        statuses["teldrive"] = task_manager.teldrive is not None and bool(cfg.get("teldrive", {}).get("access_token"))
 
-        # TelDrive
-        statuses["teldrive"] = task_manager.teldrive is not None
-
-        # Telegram
         try:
             from app.modules.tel2teldrive.service import broker
+
             tg_state = broker.snapshot()
             statuses["telegram"] = bool(
                 tg_state.get("authorized")
@@ -214,15 +253,14 @@ async def global_health_check():
             tg_cfg = cfg.get("telegram", {})
             statuses["telegram"] = bool(tg_cfg.get("api_id")) and bool(tg_cfg.get("api_hash"))
 
-        # Database
         db_cfg = cfg.get("telegram_db", {})
         statuses["database"] = bool(db_cfg.get("host"))
     except Exception as e:
         import logging
+
         logging.getLogger(__name__).warning(f"健康检查异常: {e}")
 
     is_healthy = all(statuses.values())
     err_modules = [k for k, v in statuses.items() if not v]
     msg = "所有系统服务连接正常" if is_healthy else f"存在异常服务: {', '.join(err_modules)}"
     return {"healthy": is_healthy, "message": msg, "details": statuses}
-

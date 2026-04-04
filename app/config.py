@@ -9,8 +9,11 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-CONFIG_PATH = Path(__file__).parent.parent / "config.toml"
-EXAMPLE_PATH = Path(__file__).parent.parent / "config.example.toml"
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+CONFIG_PATH = PROJECT_ROOT / "config.toml"
+EXAMPLE_PATH = PROJECT_ROOT / "config.example.toml"
+FIXED_DOWNLOAD_DIR = str((PROJECT_ROOT / "downloads").resolve())
+FIXED_ARIA2_HOME = str((PROJECT_ROOT / "aria2").resolve())
 
 # Python 3.11+ 内置 tomllib
 if sys.version_info >= (3, 11):
@@ -36,12 +39,21 @@ DEFAULTS: dict[str, Any] = {
     "pikpak": {
         "login_mode": "password", "username": "", "password": "", "session": "", "save_dir": "/",
         "delete_after_download": True, "poll_interval": 3, "max_wait_time": 3600,
-        "download_engine": "builtin", "max_concurrent_downloads": 3,
-        "connections_per_task": 8,
+        "share_download_url_timeout": 60, "share_download_url_poll_interval": 3,
     },
     "aria2": {
-        "rpc_url": "http://localhost", "rpc_port": 6800, "rpc_secret": "",
-        "max_concurrent": 3, "download_dir": "/downloads",
+        "managed": True,
+        "installed": False,
+        "os_type": "",
+        "binary_path": "",
+        "rpc_url": "http://127.0.0.1",
+        "rpc_port": 6800,
+        "rpc_secret": "",
+        "max_concurrent": 3,
+        "split": 8,
+        "max_connection_per_server": 8,
+        "min_split_size_mb": 5,
+        "download_dir": FIXED_DOWNLOAD_DIR,
     },
     "teldrive": {
         "api_host": "", "access_token": "", "channel_id": 0,
@@ -104,7 +116,7 @@ def load_config(force_reload: bool = False) -> dict:
             if env_val is not None:
                 raw.setdefault(section, {})[key] = _cast_env(env_val, items[key])
 
-    _config_cache = _deep_merge(DEFAULTS, raw)
+    _config_cache = _normalize_config(_deep_merge(DEFAULTS, raw), raw)
     return _config_cache
 
 
@@ -125,6 +137,42 @@ def _cast_env(value: str, default: Any) -> Any:
     return value
 
 
+def _normalize_config(merged: dict, raw: dict | None = None) -> dict:
+    raw = raw or {}
+    pikpak_cfg = merged.setdefault("pikpak", {})
+    aria2_cfg = merged.setdefault("aria2", {})
+
+    raw_aria2 = raw.get("aria2") if isinstance(raw.get("aria2"), dict) else {}
+    raw_pikpak = raw.get("pikpak") if isinstance(raw.get("pikpak"), dict) else {}
+
+    legacy_max = raw_pikpak.get("max_concurrent_downloads", pikpak_cfg.get("max_concurrent_downloads", 3))
+    legacy_conn = raw_pikpak.get("connections_per_task", pikpak_cfg.get("connections_per_task", 8))
+
+    if "max_concurrent" not in raw_aria2:
+        aria2_cfg["max_concurrent"] = int(legacy_max or aria2_cfg.get("max_concurrent") or 3)
+    if "split" not in raw_aria2:
+        aria2_cfg["split"] = int(legacy_conn or aria2_cfg.get("split") or 8)
+    if "max_connection_per_server" not in raw_aria2:
+        aria2_cfg["max_connection_per_server"] = int(legacy_conn or aria2_cfg.get("max_connection_per_server") or 8)
+
+    aria2_cfg["managed"] = bool(aria2_cfg.get("managed", True))
+    aria2_cfg["installed"] = bool(aria2_cfg.get("installed", False))
+    aria2_cfg["download_dir"] = FIXED_DOWNLOAD_DIR
+    aria2_cfg["rpc_url"] = "http://127.0.0.1"
+    aria2_cfg["rpc_port"] = int(aria2_cfg.get("rpc_port") or 6800)
+    aria2_cfg["max_concurrent"] = max(1, int(aria2_cfg.get("max_concurrent") or 3))
+    aria2_cfg["split"] = max(1, int(aria2_cfg.get("split") or 8))
+    aria2_cfg["max_connection_per_server"] = max(1, int(aria2_cfg.get("max_connection_per_server") or 8))
+    aria2_cfg["min_split_size_mb"] = max(1, int(aria2_cfg.get("min_split_size_mb") or 5))
+    aria2_cfg["binary_path"] = str(aria2_cfg.get("binary_path") or "").strip()
+    aria2_cfg["os_type"] = str(aria2_cfg.get("os_type") or "").strip().lower()
+
+    for deprecated_key in ("download_engine", "max_concurrent_downloads", "connections_per_task"):
+        pikpak_cfg.pop(deprecated_key, None)
+
+    return merged
+
+
 def save_config(data: dict) -> None:
     """保存配置到 config.toml"""
     global _config_cache
@@ -133,13 +181,17 @@ def save_config(data: dict) -> None:
     
     # 增量合并：在现有配置的基础上覆盖
     current = load_config()
-    merged = _deep_merge(current, data)
+    sanitized = {
+        key: value for key, value in (data or {}).items()
+        if not str(key).startswith("_")
+    }
+    merged = _normalize_config(_deep_merge(current, sanitized), sanitized)
 
     upload_cfg = merged.get("upload")
     if isinstance(upload_cfg, dict):
         for deprecated_key in ("max_disk_usage", "cpu_limit", "max_disk_usage_gb", "cpu_usage_limit", "check_interval"):
             upload_cfg.pop(deprecated_key, None)
-    
+
     with open(CONFIG_PATH, "wb") as f:
         tomli_w.dump(merged, f)
     _config_cache = merged
@@ -168,11 +220,14 @@ def needs_setup() -> bool:
     has_pikpak_auth = bool(pikpak_cfg.get("session")) if pikpak_mode == "session" else (
         bool(pikpak_cfg.get("username")) and bool(pikpak_cfg.get("password"))
     )
+    aria2_cfg = cfg.get("aria2", {})
     teldrive_token = cfg.get("teldrive", {}).get("access_token", "")
     telegram_hash = cfg.get("telegram", {}).get("api_hash", "")
-    
-    # 如果三个核心凭证全为空或不完整，则需要弹窗引导配置
-    if not has_pikpak_auth or not teldrive_token or not telegram_hash:
+    aria2_binary = str(aria2_cfg.get("binary_path", "")).strip()
+    has_aria2 = bool(aria2_cfg.get("installed")) and bool(aria2_binary) and Path(aria2_binary).exists()
+
+    # 如果核心凭证或 aria2 环境不完整，则需要弹窗引导配置
+    if not has_pikpak_auth or not has_aria2 or not teldrive_token or not telegram_hash:
         return True
         
     return False

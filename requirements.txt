@@ -13,3 +13,4 @@ telethon>=1.41,<2.0
 requests>=2.32,<3.0
 qrcode>=8.2,<9.0
 psycopg2-binary>=2.9,<3.0
+python-multipart>=0.0.9

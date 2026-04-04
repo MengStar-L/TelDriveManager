@@ -21,6 +21,7 @@ from pathlib import Path
 from app.config import load_config
 from app.auth import is_auth_enabled, verify_token
 from app import database as db
+from app.aria2_service import aria2_service
 from app.modules.aria2teldrive.task_manager import task_manager
 
 # 路由
@@ -41,6 +42,12 @@ async def lifespan(app: FastAPI):
     """应用生命周期管理"""
     logger.info("TelDriveManager 启动中...")
 
+    # 启动本地 aria2 托管服务
+    try:
+        await aria2_service.start()
+    except Exception as e:
+        logger.warning(f"本地 aria2 启动失败: {e}")
+
     # 启动 Aria2TelDrive 任务管理器
     await task_manager.start()
 
@@ -59,6 +66,7 @@ async def lifespan(app: FastAPI):
     # 关闭
     logger.info("TelDriveManager 关闭中...")
     await task_manager.stop()
+    await aria2_service.stop()
 
     if t2td_task:
         try:

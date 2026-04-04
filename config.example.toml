@@ -19,17 +19,23 @@ save_dir = "/"
 delete_after_download = true
 poll_interval = 3
 max_wait_time = 3600
-download_engine = "builtin"          # "builtin"（内置下载+上传TelDrive） 或 "aria2"（仅推送直链）
-max_concurrent_downloads = 3         # 最大同时下载任务数
-connections_per_task = 8             # 单文件并行连接数（多线程下载）
+share_download_url_timeout = 60      # 分享转存后等待直链就绪超时（秒）
+share_download_url_poll_interval = 3 # 分享直链轮询间隔（秒）
 
-# ─── Aria2 下载引擎（共享） ───
+# ─── Aria2 本地托管下载引擎 ───
 [aria2]
-rpc_url = "http://localhost"
+managed = true
+installed = false
+os_type = ""                        # "win" 或 "linux"
+binary_path = ""
+rpc_url = "http://127.0.0.1"
 rpc_port = 6800
 rpc_secret = ""
-max_concurrent = 3
-download_dir = "/downloads"
+max_concurrent = 3                   # 最大同时下载任务数
+split = 8                            # 单任务分块数
+max_connection_per_server = 8        # 单服务器最大连接数
+min_split_size_mb = 5                # 最小分块大小（MB）
+download_dir = "./downloads"        # 固定由程序托管到项目 downloads 目录
 
 # ─── TelDrive 云盘（共享） ───
 [teldrive]

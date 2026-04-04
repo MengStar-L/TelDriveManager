@@ -1,244 +1,503 @@
 
+
 // ── Setup Wizard ──
+const WIZARD_TOTAL_STEPS = 6;
+let wizardCurrentStep = 1;
+let wizardAria2PollTimer = null;
+let latestAria2Runtime = null;
+
+function clearWizardAria2Poll() {
+    if (wizardAria2PollTimer) {
+        clearTimeout(wizardAria2PollTimer);
+        wizardAria2PollTimer = null;
+    }
+}
+
+function scheduleWizardAria2Poll(delay = 1200) {
+    clearWizardAria2Poll();
+    wizardAria2PollTimer = setTimeout(() => refreshAria2RuntimeStatus(), delay);
+}
+
+async function readJsonSafe(resp) {
+    return await resp.json().catch(() => ({}));
+}
+
+function showWizardError(btn, message) {
+    if (!btn || !message) return;
+    if (window._wizardErrTimeout) clearTimeout(window._wizardErrTimeout);
+    const footer = btn.parentElement;
+    if (!footer) return;
+    footer.style.position = 'relative';
+    const oldToast = footer.querySelector('.wizard-err-toast');
+    if (oldToast) oldToast.remove();
+
+    const info = document.createElement('div');
+    info.className = 'wizard-err-toast';
+    info.innerHTML = `<i class="ph-fill ph-warning-circle"></i> ${message}`;
+    info.style = 'position:absolute; bottom:-45px; right:0; background:var(--error); color:white; padding:8px 16px; border-radius:8px; font-size:13px; display:flex; align-items:center; gap:8px; box-shadow:0 4px 12px rgba(239,68,68,0.3); z-index:100; opacity:0; transform:translateY(-10px); transition:all 0.3s;';
+    footer.appendChild(info);
+    setTimeout(() => {
+        info.style.opacity = '1';
+        info.style.transform = 'translateY(0)';
+    }, 10);
+    window._wizardErrTimeout = setTimeout(() => {
+        info.style.opacity = '0';
+        setTimeout(() => info.remove(), 300);
+    }, 3500);
+}
+
+function setWizardStep(step) {
+    wizardCurrentStep = Math.max(1, Math.min(WIZARD_TOTAL_STEPS, Number(step) || 1));
+    for (let i = 1; i <= WIZARD_TOTAL_STEPS; i++) {
+        document.getElementById('wStep' + i)?.classList.remove('active');
+        document.getElementById('dot' + i)?.classList.remove('active');
+    }
+    document.getElementById('wStep' + wizardCurrentStep)?.classList.add('active');
+    document.getElementById('dot' + wizardCurrentStep)?.classList.add('active');
+    if (wizardCurrentStep === 2) refreshAria2RuntimeStatus();
+}
+
+function ensureCurrentConfig() {
+    if (!window.currentConfig || typeof window.currentConfig !== 'object') {
+        window.currentConfig = {};
+    }
+    return window.currentConfig;
+}
+
+function mergeCurrentConfig(patch = {}) {
+    const target = ensureCurrentConfig();
+    Object.entries(patch || {}).forEach(([section, value]) => {
+        if (value && typeof value === 'object' && !Array.isArray(value)) {
+            target[section] = { ...(target[section] || {}), ...value };
+        } else {
+            target[section] = value;
+        }
+    });
+    return target;
+}
+
+async function syncCurrentConfigFromServer() {
+    const resp = await fetch('/api/settings');
+    if (!resp.ok) throw new Error('读取配置失败');
+    const data = await readJsonSafe(resp);
+    window.currentConfig = data;
+    fillWizardInputs(data);
+    return data;
+}
+
+async function persistCurrentConfig(patch = null) {
+    if (patch) mergeCurrentConfig(patch);
+    const resp = await fetch('/api/settings', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(ensureCurrentConfig())
+    });
+    const data = await readJsonSafe(resp);
+    if (!resp.ok || data.success === false) {
+        throw new Error(data.detail || data.message || data.error || '保存配置失败');
+    }
+    return data;
+}
+
+function fillWizardInputs(data = {}) {
+    try {
+        document.getElementById('wPikUser').value = data.pikpak?.username || '';
+        document.getElementById('wPikPass').value = data.pikpak?.password || '';
+        document.getElementById('wTdUrl').value = data.teldrive?.api_host || '';
+        document.getElementById('wTdToken').value = data.teldrive?.access_token || '';
+        document.getElementById('wTgId').value = data.telegram?.api_id || '';
+        document.getElementById('wTgHash').value = data.telegram?.api_hash || '';
+        document.getElementById('wDbHost').value = data.telegram_db?.host || '';
+        document.getElementById('wDbPort').value = data.telegram_db?.port || 5432;
+        document.getElementById('wDbName').value = data.telegram_db?.name || 'postgres';
+        document.getElementById('wDbUser').value = data.telegram_db?.user || 'postgres';
+        document.getElementById('wAria2Os').value = data.aria2?.os_type || document.getElementById('wAria2Os').value || '';
+        document.getElementById('wAria2MaxConcurrent').value = data.aria2?.max_concurrent || 3;
+        document.getElementById('wAria2Split').value = data.aria2?.split || 8;
+        document.getElementById('wAria2MaxConnPerServer').value = data.aria2?.max_connection_per_server || 8;
+        document.getElementById('wAria2MinSplitSize').value = data.aria2?.min_split_size_mb || 5;
+    } catch (e) {
+        console.warn('填充向导配置失败', e);
+    }
+}
+
+function getWizardAria2Config() {
+    const existing = window.currentConfig?.aria2 || {};
+    const portInput = document.getElementById('cfgAria2Port');
+    const secretInput = document.getElementById('cfgAria2Secret');
+    return {
+        rpc_port: Math.max(1, parseInt(portInput?.value || existing.rpc_port || '6800', 10) || 6800),
+        rpc_secret: (secretInput?.value ?? existing.rpc_secret ?? '').trim(),
+        max_concurrent: Math.max(1, parseInt(document.getElementById('wAria2MaxConcurrent').value, 10) || existing.max_concurrent || 3),
+        split: Math.max(1, parseInt(document.getElementById('wAria2Split').value, 10) || existing.split || 8),
+        max_connection_per_server: Math.max(1, parseInt(document.getElementById('wAria2MaxConnPerServer').value, 10) || existing.max_connection_per_server || 8),
+        min_split_size_mb: Math.max(1, parseInt(document.getElementById('wAria2MinSplitSize').value, 10) || existing.min_split_size_mb || 5),
+    };
+}
+
+
+function setStatusBadge(el, status, text) {
+    if (!el) return;
+    el.className = `wizard-status-badge ${status}`;
+    el.innerHTML = text;
+}
+
+function isAria2InstallBusyStatus(status = '') {
+    return ['downloading', 'extracting', 'starting'].includes(status);
+}
+
+function applyWizardAria2ActionLock(runtime = latestAria2Runtime || {}) {
+    const locked = isAria2InstallBusyStatus(runtime.status) || !!runtime.installed;
+    const autoBtn = document.getElementById('wAria2AutoBtn');
+    const uploadBtn = document.getElementById('wAria2UploadBtn');
+    if (autoBtn) autoBtn.disabled = locked;
+    if (uploadBtn) uploadBtn.disabled = locked;
+}
+
+function renderAria2RuntimeViews(runtime = {}) {
+    latestAria2Runtime = runtime;
+    const progress = Math.max(0, Math.min(100, Number(runtime.progress) || 0));
+    const isBusy = isAria2InstallBusyStatus(runtime.status);
+    const isInstalled = !!runtime.installed;
+    const isRunning = !!runtime.running;
+
+    const badgeState = runtime.status === 'failed'
+        ? 'error'
+        : isBusy
+            ? 'warning'
+            : isRunning
+                ? 'success'
+                : isInstalled
+                    ? 'info'
+                    : 'info';
+    const badgeText = runtime.status === 'failed'
+        ? '<i class="ph ph-warning-circle"></i> 安装失败'
+        : isBusy
+            ? '<i class="ph ph-spinner-gap"></i> 安装中'
+            : isRunning
+                ? '<i class="ph ph-check-circle"></i> 已运行'
+                : isInstalled
+                    ? '<i class="ph ph-check-circle"></i> 已安装'
+                    : '<i class="ph ph-circle-dashed"></i> 未安装';
+
+    const binaryPath = runtime.binary_path || '--';
+    const downloadDir = runtime.download_dir || '--';
+    const statusText = runtime.error || runtime.message || '尚未安装';
+    const percentText = `${progress.toFixed(0)}%`;
+
+    document.getElementById('wAria2InstallProgress')?.style.setProperty('width', `${progress}%`);
+    const wText = document.getElementById('wAria2InstallText');
+    if (wText) wText.textContent = statusText;
+    const wPercent = document.getElementById('wAria2InstallPercent');
+    if (wPercent) wPercent.textContent = percentText;
+    const wHint = document.getElementById('wAria2InstallHint');
+    if (wHint) {
+        wHint.textContent = isInstalled
+            ? `aria2 已部署到本地并固定使用 ${downloadDir}`
+            : '请选择系统后开始安装。安装未完成前无法进入下一步。';
+    }
+    setStatusBadge(document.getElementById('wAria2InstallBadge'), badgeState, badgeText);
+    const wBinary = document.getElementById('wAria2BinaryPath');
+    if (wBinary) wBinary.textContent = binaryPath;
+    const wDir = document.getElementById('wAria2DownloadDir');
+    if (wDir) wDir.textContent = downloadDir;
+    const wNext = document.getElementById('wAria2NextBtn');
+    if (wNext) wNext.disabled = !isInstalled || isBusy;
+
+    applyWizardAria2ActionLock(runtime);
+
+    const cfgHint = document.getElementById('cfgAria2RuntimeHint');
+
+    if (cfgHint) cfgHint.textContent = statusText;
+    setStatusBadge(document.getElementById('cfgAria2RuntimeBadge'), badgeState, badgeText);
+    const cfgBinary = document.getElementById('cfgAria2BinaryPath');
+    if (cfgBinary) cfgBinary.textContent = binaryPath;
+    const cfgDir = document.getElementById('cfgAria2DownloadDirText');
+    if (cfgDir) cfgDir.textContent = downloadDir;
+}
+
+async function refreshAria2RuntimeStatus(showToast = false) {
+    try {
+        const resp = await fetch('/api/settings/aria2/runtime');
+        const data = await readJsonSafe(resp);
+        if (!resp.ok) throw new Error(data.detail || data.message || '读取 aria2 状态失败');
+        renderAria2RuntimeViews(data);
+        const osInput = document.getElementById('wAria2Os');
+        if (osInput && !osInput.value && data.host_os) osInput.value = data.host_os;
+        if (data.installed && (!window.currentConfig?.aria2?.binary_path || window.currentConfig?.aria2?.installed !== true)) {
+            await syncCurrentConfigFromServer();
+        }
+        if (['downloading', 'extracting', 'starting'].includes(data.status)) {
+            scheduleWizardAria2Poll();
+        } else {
+            clearWizardAria2Poll();
+        }
+        if (showToast && typeof showA2TDToast === 'function') {
+            showA2TDToast(data.message || 'aria2 状态已刷新', 'info');
+        }
+        return data;
+    } catch (e) {
+        clearWizardAria2Poll();
+        renderAria2RuntimeViews({
+            status: 'failed',
+            progress: 0,
+            message: '读取 aria2 状态失败',
+            error: e.message,
+            installed: false,
+            running: false,
+            binary_path: '',
+            download_dir: ''
+        });
+        if (showToast && typeof showA2TDToast === 'function') {
+            showA2TDToast(e.message || '读取 aria2 状态失败', 'error');
+        }
+        throw e;
+    }
+}
+
+function getWizardSelectedOs() {
+    return String(document.getElementById('wAria2Os')?.value || '').trim().toLowerCase();
+}
+
+async function startWizardAria2AutoInstall() {
+    const osType = getWizardSelectedOs();
+    if (!osType) {
+        alert('请先选择当前运行的操作系统');
+        return;
+    }
+    const btn = document.getElementById('wAria2AutoBtn');
+    const oldHtml = btn?.innerHTML || '';
+    if (btn) {
+        btn.disabled = true;
+        btn.innerHTML = '<span class="spinner"></span> 提交中...';
+    }
+    try {
+        const resp = await fetch('/api/settings/aria2/install/auto', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ os_type: osType })
+        });
+        const data = await readJsonSafe(resp);
+        if (!resp.ok || data.success === false) throw new Error(data.detail || data.message || data.error || '提交自动安装失败');
+        await refreshAria2RuntimeStatus();
+    } catch (e) {
+        alert(e.message || '自动安装失败');
+    } finally {
+        if (btn) {
+            btn.innerHTML = oldHtml;
+        }
+        applyWizardAria2ActionLock();
+    }
+}
+
+
+function triggerWizardAria2Upload() {
+    const osType = getWizardSelectedOs();
+    if (!osType) {
+        alert('请先选择当前运行的操作系统');
+        return;
+    }
+    document.getElementById('wAria2Archive')?.click();
+}
+
+async function handleWizardAria2Upload(event) {
+    const fileInput = event?.target;
+    const file = fileInput?.files?.[0];
+    if (!file) return;
+    const osType = getWizardSelectedOs();
+    if (!osType) {
+        alert('请先选择当前运行的操作系统');
+        fileInput.value = '';
+        return;
+    }
+    const btn = document.getElementById('wAria2UploadBtn');
+    const oldHtml = btn?.innerHTML || '';
+    if (btn) {
+        btn.disabled = true;
+        btn.innerHTML = '<span class="spinner"></span> 上传中...';
+    }
+    try {
+        const formData = new FormData();
+        formData.append('os_type', osType);
+        formData.append('archive', file);
+        const resp = await fetch('/api/settings/aria2/install/upload', {
+            method: 'POST',
+            body: formData
+        });
+        const data = await readJsonSafe(resp);
+        if (!resp.ok || data.success === false) throw new Error(data.detail || data.message || data.error || '上传安装包失败');
+        await refreshAria2RuntimeStatus();
+    } catch (e) {
+        alert(e.message || '上传安装失败');
+    } finally {
+        if (btn) {
+            btn.innerHTML = oldHtml;
+        }
+        applyWizardAria2ActionLock();
+        if (fileInput) fileInput.value = '';
+    }
+}
+
+
 async function checkSetupRequired() {
     try {
-        const resp = await fetch('/api/settings');
-        if (!resp.ok) return;
-        const data = await resp.json();
-        window.currentConfig = data;
-
-        // Auto-fill existing data into wizard inputs
-        try {
-            if (data.pikpak) {
-                if(data.pikpak.username) document.getElementById('wPikUser').value = data.pikpak.username;
-                if(data.pikpak.password) document.getElementById('wPikPass').value = data.pikpak.password;
-            }
-
-            if (data.teldrive) {
-                if(data.teldrive.api_host) document.getElementById('wTdUrl').value = data.teldrive.api_host;
-                if(data.teldrive.access_token) document.getElementById('wTdToken').value = data.teldrive.access_token;
-            }
-            if (data.telegram) {
-                if(data.telegram.api_id) document.getElementById('wTgId').value = data.telegram.api_id;
-                if(data.telegram.api_hash) document.getElementById('wTgHash').value = data.telegram.api_hash;
-            }
-            if (data.telegram_db) {
-                if(data.telegram_db.host) document.getElementById('wDbHost').value = data.telegram_db.host;
-                if(data.telegram_db.port) document.getElementById('wDbPort').value = data.telegram_db.port;
-                if(data.telegram_db.name) document.getElementById('wDbName').value = data.telegram_db.name;
-                if(data.telegram_db.user) document.getElementById('wDbUser').value = data.telegram_db.user;
-            }
-        } catch(fillErr) { /* some fields may not exist yet */ }
-
-        // Fetch health
+        const data = await syncCurrentConfigFromServer();
         let healthData = { healthy: false, details: {} };
         try {
             const hResp = await fetch('/api/settings/health');
-            if (hResp.ok) healthData = await hResp.json();
-        } catch(e) { /* health unavailable */ }
+            if (hResp.ok) healthData = await readJsonSafe(hResp);
+        } catch (e) {}
 
         window.healthDetails = healthData.details || {};
-        const needsSetup = (data._meta && data._meta.needs_setup);
+        const needsSetup = !!(data._meta && data._meta.needs_setup);
+        await refreshAria2RuntimeStatus();
 
-        if (needsSetup) {
-            const wiz = document.getElementById('setupWizard');
-            if (wiz) {
-                wiz.classList.add('show');
-                wiz.classList.add('active');
-            }
-
-            // Determine first failed step
-            const d = healthData.details || {};
-            let firstStep = 1;
-            if (d.pikpak) firstStep = 2;
-            if (firstStep === 2 && d.teldrive) firstStep = 3;
-            if (firstStep === 3 && d.telegram) firstStep = 4;
-
-            // Jump to first failed step
-            if (firstStep > 1) {
-                for (let i = 1; i <= 4; i++) {
-                    const s = document.getElementById('wStep' + i);
-                    if (s) s.classList.remove('active');
-                }
-                const target = document.getElementById('wStep' + firstStep);
-                if (target) target.classList.add('active');
-                document.querySelectorAll('.wizard-dot').forEach(dot => dot.classList.remove('active'));
-                const dot = document.getElementById('dot' + firstStep);
-                if (dot) dot.classList.add('active');
-            }
+        const wiz = document.getElementById('setupWizard');
+        if (!wiz) return;
+        if (!needsSetup) {
+            wiz.classList.remove('active', 'show');
+            clearWizardAria2Poll();
+            return;
         }
+
+        wiz.classList.add('show', 'active');
+        const hasPikpak = !!(data.pikpak?.session || (data.pikpak?.username && data.pikpak?.password));
+        const hasAria2 = !!(latestAria2Runtime?.installed || data.aria2?.installed);
+        const hasTeldrive = !!(data.teldrive?.api_host && data.teldrive?.access_token);
+        const hasTelegram = !!(data.telegram?.api_id && data.telegram?.api_hash);
+        const hasDatabase = !!data.telegram_db?.host;
+
+        let firstStep = 1;
+        if (hasPikpak) firstStep = 2;
+        if (hasPikpak && hasAria2) firstStep = 4;
+        if (hasPikpak && hasAria2 && hasTeldrive) firstStep = 5;
+        if (hasPikpak && hasAria2 && hasTeldrive && hasTelegram) firstStep = 6;
+        if (hasPikpak && hasAria2 && hasTeldrive && hasTelegram && hasDatabase) firstStep = 1;
+
+        if (!window.healthDetails?.aria2) firstStep = Math.min(firstStep, 2);
+        setWizardStep(firstStep);
     } catch (e) {
         console.error('Failed to check setup', e);
     }
 }
 
-async function wizardNext(current, next) {
-    if (next < current) { // "Previous" button
-        document.getElementById('wStep' + current).classList.remove('active');
-        document.getElementById('wStep' + next).classList.add('active');
-        document.querySelectorAll('.wizard-dot').forEach(d => d.classList.remove('active'));
-        const dot = document.getElementById('dot' + next);
-        if(dot) dot.classList.add('active');
+async function wizardNext(current, next, btn = null) {
+    if (next < current) {
+        setWizardStep(next);
         return;
     }
 
-    const btn = event.currentTarget;
+    btn = btn || event?.currentTarget;
+    if (!btn) return;
+
     const oldHtml = btn.innerHTML;
     btn.disabled = true;
     btn.innerHTML = '<span class="spinner" style="width:14px;height:14px;border-width:2px;display:inline-block;margin-right:8px;"></span> 验证中...';
-    
-    if(window._wizardErrTimeout) clearTimeout(window._wizardErrTimeout);
-    let errMsg = "";
-    let dataToSave = {};
 
+    let dataToSave = {};
     try {
-        if (current === 1) { // PikPak
+        if (current === 1) {
             const user = document.getElementById('wPikUser').value.trim();
             const pass = document.getElementById('wPikPass').value.trim();
-            if(!user || !pass) throw new Error("您必须填写 PikPak 账密");
-            const payload = {username: user, password: pass};
+            if (!user || !pass) throw new Error('您必须填写 PikPak 账密');
+            const payload = { login_mode: 'password', username: user, password: pass, session: '' };
             const r = await fetch('/api/settings/test/pikpak', {
-                method: 'POST', headers: {'Content-Type': 'application/json'},
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(payload)
             });
-            const d = await r.json();
-            if(!d.success) throw new Error(d.message || "PikPak验证失败");
+            const d = await readJsonSafe(r);
+            if (!d.success) throw new Error(d.message || 'PikPak 验证失败');
             dataToSave.pikpak = payload;
-        }
-        else if (current === 2) { // TelDrive
+        } else if (current === 2) {
+            const runtime = await refreshAria2RuntimeStatus();
+            if (!runtime.installed) throw new Error('aria2 尚未安装完成，请先完成自动安装或上传安装包');
+            await syncCurrentConfigFromServer();
+        } else if (current === 3) {
+            dataToSave.aria2 = getWizardAria2Config();
+        } else if (current === 4) {
             const tUrl = document.getElementById('wTdUrl').value.trim();
             const tTok = document.getElementById('wTdToken').value.trim();
-            if(!tUrl || !tTok) throw new Error("TelDrive API和Token为必填");
-            const tdPayload = {api_host: tUrl, access_token: tTok};
+            if (!tUrl || !tTok) throw new Error('TelDrive API 和 Token 为必填');
+            const tdPayload = { api_host: tUrl, access_token: tTok };
             const r = await fetch('/api/settings/test/teldrive', {
-                method: 'POST', headers: {'Content-Type': 'application/json'},
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(tdPayload)
             });
-            const d = await r.json();
-            if(!d.success && !d.ok) throw new Error("TelDrive连接失败");
-
+            const d = await readJsonSafe(r);
+            if (!d.success && !d.ok) throw new Error(d.message || 'TelDrive 连接失败');
             dataToSave.teldrive = tdPayload;
-        }
-        else if (current === 3) { // Telegram
+        } else if (current === 5) {
             const tid = document.getElementById('wTgId').value.trim();
             const tHash = document.getElementById('wTgHash').value.trim();
-            if(!tid || !tHash) throw new Error("必须提供 Telegram 授权参数");
-            const tgPayload = {api_id: parseInt(tid), api_hash: tHash};
+            if (!tid || !tHash) throw new Error('必须提供 Telegram 授权参数');
+            const tgPayload = { api_id: parseInt(tid, 10), api_hash: tHash };
             const r = await fetch('/api/settings/test/telegram', {
-                method: 'POST', headers: {'Content-Type': 'application/json'},
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(tgPayload)
             });
-            const d = await r.json();
-            if(!d.success) throw new Error(d.message || "Telegram验证失败");
+            const d = await readJsonSafe(r);
+            if (!d.success) throw new Error(d.message || 'Telegram 验证失败');
             dataToSave.telegram = tgPayload;
         }
-    } catch (e) {
-        errMsg = e.message;
-    }
 
-    if (errMsg) {
+        if (Object.keys(dataToSave).length > 0) {
+            await persistCurrentConfig(dataToSave);
+        }
+
         btn.disabled = false;
         btn.innerHTML = oldHtml;
-        const info = document.createElement('div');
-        info.className = 'wizard-err-toast';
-        info.innerHTML = `<i class="ph-fill ph-warning-circle"></i> ${errMsg}`;
-        info.style = 'position:absolute; bottom:-45px; right:0; background:var(--error); color:white; padding:8px 16px; border-radius:8px; font-size:13px; display:flex; align-items:center; gap:8px; box-shadow:0 4px 12px rgba(239,68,68,0.3); z-index:100; opacity:0; transform:translateY(-10px); transition:all 0.3s;';
-        
-        const footer = btn.parentElement;
-        footer.style.position = 'relative';
-        const oldToast = footer.querySelector('.wizard-err-toast');
-        if(oldToast) oldToast.remove();
-        footer.appendChild(info);
-        setTimeout(() => { info.style.opacity='1'; info.style.transform='translateY(0)'; }, 10);
-        window._wizardErrTimeout = setTimeout(() => {
-            info.style.opacity='0';
-            setTimeout(() => info.remove(), 300);
-        }, 3500);
-        return;
+        setWizardStep(next);
+    } catch (e) {
+        btn.disabled = false;
+        btn.innerHTML = oldHtml;
+        showWizardError(btn, e.message || '操作失败');
     }
-
-    // Success! Save config incrementally if there is data to save
-    if (Object.keys(dataToSave).length > 0) {
-        if (!window.currentConfig) window.currentConfig = {};
-        for(let k in dataToSave) {
-            if(!window.currentConfig[k]) window.currentConfig[k] = {};
-            // merge
-            Object.assign(window.currentConfig[k], dataToSave[k]);
-        }
-        await fetch('/api/settings', {
-            method: 'PUT', headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify(window.currentConfig)
-        });
-    }
-
-    btn.disabled = false;
-    btn.innerHTML = oldHtml;
-
-    document.getElementById('wStep' + current).classList.remove('active');
-    document.getElementById('wStep' + next).classList.add('active');
-    document.querySelectorAll('.wizard-dot').forEach(d => d.classList.remove('active'));
-    const dot = document.getElementById('dot' + next);
-    if(dot) dot.classList.add('active');
 }
 
-async function wizardFinish() {
-    const btn = event.currentTarget;
+async function wizardFinish(btn = null) {
+    btn = btn || event?.currentTarget;
+    if (!btn) return;
+
     const oldHtml = btn.innerHTML;
     btn.disabled = true;
     btn.innerHTML = '<span class="spinner" style="width:14px;height:14px;border-width:2px;display:inline-block;margin-right:8px;"></span> 验证中...';
 
-    // validate DB
-    const dbHost = document.getElementById('wDbHost').value.trim();
-    if (!dbHost) {
-        alert("请输入数据库地址");
-        btn.disabled = false;
-        btn.innerHTML = oldHtml;
-        return;
-    }
-    
-    let dbPayload = {};
     try {
-        dbPayload = {
+        const dbHost = document.getElementById('wDbHost').value.trim();
+        if (!dbHost) throw new Error('请输入数据库地址');
+
+        const dbPayload = {
             host: dbHost,
-            port: parseInt(document.getElementById('wDbPort').value) || 5432,
-            name: document.getElementById('wDbName').value.trim(),
-            user: document.getElementById('wDbUser').value.trim(),
+            port: parseInt(document.getElementById('wDbPort').value, 10) || 5432,
+            name: document.getElementById('wDbName').value.trim() || 'postgres',
+            user: document.getElementById('wDbUser').value.trim() || 'postgres',
             password: document.getElementById('wDbPass').value.trim()
         };
         const r = await fetch('/api/settings/test/database', {
-            method: 'POST', headers: {'Content-Type': 'application/json'},
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(dbPayload)
         });
-        const d = await r.json();
-        if(!d.success) throw new Error(d.message || "连接失败");
-    } catch(e) {
-        alert('数据库连接失败: ' + e.message);
-        btn.disabled = false;
-        btn.innerHTML = oldHtml;
-        return;
-    }
+        const d = await readJsonSafe(r);
+        if (!d.success) throw new Error(d.message || '数据库连接失败');
 
-    btn.innerHTML = '<span class="spinner" style="width:14px;height:14px;border-width:2px;display:inline-block;margin-right:8px;"></span> 部署中...';
-    
-    if (!window.currentConfig) window.currentConfig = {};
-    if (!window.currentConfig.telegram_db) window.currentConfig.telegram_db = {};
-    Object.assign(window.currentConfig.telegram_db, dbPayload);
-    
-    try {
-        await fetch('/api/settings', {
-            method: 'PUT',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(window.currentConfig)
-        });
+        btn.innerHTML = '<span class="spinner" style="width:14px;height:14px;border-width:2px;display:inline-block;margin-right:8px;"></span> 部署中...';
+        await persistCurrentConfig({ telegram_db: dbPayload, aria2: getWizardAria2Config() });
+
         const wiz = document.getElementById('setupWizard');
-        if(wiz) { wiz.classList.remove('active'); wiz.classList.remove('show'); }
+        if (wiz) wiz.classList.remove('active', 'show');
+        clearWizardAria2Poll();
         location.reload();
     } catch (e) {
-        alert("保存最终配置失败", e);
         btn.disabled = false;
         btn.innerHTML = oldHtml;
+        showWizardError(btn, e.message || '保存最终配置失败');
     }
 }
+
 
 
 // ── 全局 401 拦截 ──
@@ -258,11 +517,11 @@ let lastPageSwitchAt = 0;
 let lastPageSwitchName = '';
 
 function runPageSideEffects(name) {
-    if (name === 'tasks') refreshPikPakTasks();
     if (name === 'aria2teldrive') loadA2TDTasks();
     if (name === 'tel2teldrive') loadT2TDState();
     if (name === 'settings') loadConfig();
 }
+
 
 function switchPage(name, options = {}) {
     const targetPage = document.getElementById('page-' + name);
@@ -482,7 +741,8 @@ function handleWSMessage(msg) {
         return;
     }
 
-    // ── 内置引擎进度条 ──
+    // ── 兼容旧版进度事件 ──
+
     if (msg.type === "download_progress") {
         updateProgressBar(
             msg.task_id,
@@ -1015,12 +1275,12 @@ function renderA2TDStats(stats) {
 
     if (stats.download_speed !== undefined) {
         const detail = stats.download_speed_detail || {};
-        const externalSpeed = formatBytes(getA2TDNumber(detail.aria2));
-        const builtinSpeed = formatBytes(getA2TDNumber(detail.builtin));
+        const aria2Speed = formatBytes(getA2TDNumber(detail.aria2 || stats.download_speed));
         const el = document.getElementById('sysDownloadStat');
         el.textContent = `${formatBytes(stats.download_speed)}/s`;
-        el.title = `外部接收端: ${externalSpeed}/s | 内置下载器: ${builtinSpeed}/s`;
+        el.title = `aria2 当前下载速度: ${aria2Speed}/s`;
     }
+
 
     if (stats.upload_speed !== undefined) {
         document.getElementById('sysUploadStat').textContent = `${formatBytes(stats.upload_speed)}/s`;
@@ -1482,13 +1742,13 @@ async function importPikpakSessionFile(event) {
 }
 
 function collectSettingsConfig() {
-
+    const currentAria2 = window.currentConfig?.aria2 || {};
     return {
         auth: {
             username: document.getElementById('cfgAuthUser').value.trim(),
             password: document.getElementById('cfgAuthPass').value.trim()
         },
-        server: { port: parseInt(document.getElementById('cfgServerPort').value) || 8888 },
+        server: { port: parseInt(document.getElementById('cfgServerPort').value, 10) || 8888 },
         pikpak: {
             login_mode: document.getElementById('cfgPikpakLoginMode').value || 'password',
             username: document.getElementById('cfgPikpakUsername').value,
@@ -1496,37 +1756,37 @@ function collectSettingsConfig() {
             session: document.getElementById('cfgPikpakSession').value.trim(),
             save_dir: document.getElementById('cfgPikpakSaveDir').value || '/',
             delete_after_download: document.getElementById('cfgPikpakDelete').checked,
-            download_engine: document.getElementById('cfgPikpakEngine').value || 'builtin',
-            max_concurrent_downloads: parseInt(document.getElementById('cfgPikpakMaxDownloads').value) || 3,
-            connections_per_task: parseInt(document.getElementById('cfgPikpakConnections').value) || 8
         },
         aria2: {
-            rpc_url: document.getElementById('cfgAria2Url').value,
-            rpc_secret: document.getElementById('cfgAria2Secret').value,
-            download_dir: document.getElementById('cfgAria2Dir').value
+            rpc_url: document.getElementById('cfgAria2Url').value || currentAria2.rpc_url || 'http://127.0.0.1',
+            rpc_port: Math.max(1, parseInt(document.getElementById('cfgAria2Port').value, 10) || currentAria2.rpc_port || 6800),
+            rpc_secret: document.getElementById('cfgAria2Secret').value.trim(),
+            max_concurrent: Math.max(1, parseInt(document.getElementById('cfgAria2MaxConcurrent').value, 10) || currentAria2.max_concurrent || 3),
+            split: Math.max(1, parseInt(document.getElementById('cfgAria2Split').value, 10) || currentAria2.split || 8),
+            max_connection_per_server: Math.max(1, parseInt(document.getElementById('cfgAria2MaxConnPerServer').value, 10) || currentAria2.max_connection_per_server || 8),
+            min_split_size_mb: Math.max(1, parseInt(document.getElementById('cfgAria2MinSplitSize').value, 10) || currentAria2.min_split_size_mb || 5),
         },
         teldrive: {
             api_host: document.getElementById('cfgTeldriveHost').value,
             access_token: document.getElementById('cfgTeldriveToken').value,
-            channel_id: parseInt(document.getElementById('cfgTeldriveChannel').value) || 0,
-            upload_concurrency: parseInt(document.getElementById('cfgTeldriveConcurrency').value) || 4,
-            chunk_size: "500M"
+            channel_id: parseInt(document.getElementById('cfgTeldriveChannel').value, 10) || 0,
+            upload_concurrency: parseInt(document.getElementById('cfgTeldriveConcurrency').value, 10) || 4,
+            chunk_size: '500M'
         },
         upload: {
             auto_delete: document.getElementById('cfgUploadAutoDelete').checked,
             max_retries: 3
         },
-
         telegram: {
-            api_id: parseInt(document.getElementById('cfgTelegramApiId').value) || 0,
+            api_id: parseInt(document.getElementById('cfgTelegramApiId').value, 10) || 0,
             api_hash: document.getElementById('cfgTelegramApiHash').value,
-            channel_id: parseInt(document.getElementById('cfgTelegramChannelId').value) || 0,
-            sync_interval: parseInt(document.getElementById('cfgTelegramSyncInterval').value) || 10,
+            channel_id: parseInt(document.getElementById('cfgTelegramChannelId').value, 10) || 0,
+            sync_interval: parseInt(document.getElementById('cfgTelegramSyncInterval').value, 10) || 10,
             sync_enabled: document.getElementById('cfgTelegramSyncEnabled').checked
         },
         telegram_db: {
             host: document.getElementById('cfgDbHost').value,
-            port: parseInt(document.getElementById('cfgDbPort').value) || 5432,
+            port: parseInt(document.getElementById('cfgDbPort').value, 10) || 5432,
             user: document.getElementById('cfgDbUser').value,
             password: document.getElementById('cfgDbPassword').value,
             name: document.getElementById('cfgDbName').value || 'postgres'
@@ -1535,14 +1795,14 @@ function collectSettingsConfig() {
 }
 
 async function loadConfig() {
-
     try {
         const resp = await fetch('/api/settings');
-        const cfg = await resp.json();
-        
+        const cfg = await readJsonSafe(resp);
+        if (!resp.ok) throw new Error(cfg.detail || cfg.message || '读取配置失败');
+        window.currentConfig = cfg;
+
         document.getElementById('cfgAuthUser').value = cfg.auth?.username || '';
         document.getElementById('cfgAuthPass').value = cfg.auth?.password || '';
-        
         document.getElementById('cfgServerPort').value = cfg.server?.port || 8888;
 
         document.getElementById('cfgPikpakLoginMode').value = cfg.pikpak?.login_mode || 'password';
@@ -1551,24 +1811,24 @@ async function loadConfig() {
         document.getElementById('cfgPikpakSession').value = cfg.pikpak?.session || '';
         document.getElementById('cfgPikpakSessionFileName').textContent = cfg.pikpak?.session ? '已保存 Session' : '未选择文件';
         document.getElementById('cfgPikpakSaveDir').value = cfg.pikpak?.save_dir || '/';
-
-        document.getElementById('cfgPikpakDelete').checked = cfg.pikpak?.delete_after_download || false;
-        document.getElementById('cfgPikpakEngine').value = cfg.pikpak?.download_engine || 'builtin';
-        document.getElementById('cfgPikpakMaxDownloads').value = cfg.pikpak?.max_concurrent_downloads || 3;
-        document.getElementById('cfgPikpakConnections').value = cfg.pikpak?.connections_per_task || 8;
+        document.getElementById('cfgPikpakDelete').checked = !!cfg.pikpak?.delete_after_download;
         togglePikpakLoginMode();
 
-        
-        document.getElementById('cfgAria2Url').value = cfg.aria2?.rpc_url || '';
+        document.getElementById('cfgAria2Url').value = cfg.aria2?.rpc_url || 'http://127.0.0.1';
+        document.getElementById('cfgAria2Port').value = cfg.aria2?.rpc_port || 6800;
         document.getElementById('cfgAria2Secret').value = cfg.aria2?.rpc_secret || '';
-        document.getElementById('cfgAria2Dir').value = cfg.aria2?.download_dir || '';
-        
+        document.getElementById('cfgAria2MaxConcurrent').value = cfg.aria2?.max_concurrent || 3;
+        document.getElementById('cfgAria2Split').value = cfg.aria2?.split || 8;
+        document.getElementById('cfgAria2MaxConnPerServer').value = cfg.aria2?.max_connection_per_server || 8;
+        document.getElementById('cfgAria2MinSplitSize').value = cfg.aria2?.min_split_size_mb || 5;
+        document.getElementById('cfgAria2BinaryPath').textContent = cfg.aria2?.binary_path || '--';
+        document.getElementById('cfgAria2DownloadDirText').textContent = cfg.aria2?.download_dir || '--';
+
         document.getElementById('cfgTeldriveHost').value = cfg.teldrive?.api_host || '';
         document.getElementById('cfgTeldriveToken').value = cfg.teldrive?.access_token || '';
         document.getElementById('cfgTeldriveChannel').value = cfg.teldrive?.channel_id || 0;
         document.getElementById('cfgTeldriveConcurrency').value = cfg.teldrive?.upload_concurrency || 4;
-        
-        document.getElementById('cfgUploadAutoDelete').checked = cfg.upload?.auto_delete || false;
+        document.getElementById('cfgUploadAutoDelete').checked = !!cfg.upload?.auto_delete;
 
         document.getElementById('cfgTelegramApiId').value = cfg.telegram?.api_id || '';
         document.getElementById('cfgTelegramApiHash').value = cfg.telegram?.api_hash || '';
@@ -1581,11 +1841,14 @@ async function loadConfig() {
         document.getElementById('cfgDbUser').value = cfg.telegram_db?.user || '';
         document.getElementById('cfgDbPassword').value = cfg.telegram_db?.password || '';
         document.getElementById('cfgDbName').value = cfg.telegram_db?.name || 'postgres';
-        
+
+        fillWizardInputs(cfg);
+        await refreshAria2RuntimeStatus();
     } catch (e) {
         console.error('加载配置失败:', e);
     }
 }
+
 
 async function saveConfig() {
     const btn = document.getElementById('saveBtn');
@@ -1635,7 +1898,11 @@ async function doAutoSave(triggerInput) {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(cfg)
         });
-        if (resp.ok) showFieldCheck(triggerInput);
+        if (resp.ok) {
+            mergeCurrentConfig(cfg);
+            showFieldCheck(triggerInput);
+        }
+
     } catch (e) { /* silent fail */ }
 }
 

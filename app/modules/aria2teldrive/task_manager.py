@@ -1,7 +1,6 @@
 """任务管理器 - 监控 aria2 下载并自动上传到 TelDrive"""
 
 import asyncio
-import uuid
 import os
 import shutil
 import logging
@@ -12,16 +11,17 @@ from pathlib import Path
 from app.config import load_config
 from app.aria2_client import Aria2Client
 from app.modules.aria2teldrive.teldrive_client import TelDriveClient
-from app.downloader import downloader, TaskStatus
 from app import database as db
 
 
 def get_aria2_rpc_url(config: dict) -> str:
+
     """获取 Aria2 RPC 地址"""
     return config.get("aria2", {}).get("rpc_url", "http://localhost:6800/jsonrpc")
 
-from pathlib import Path
+
 def get_download_dir(config: dict) -> str:
+
     """获取下载目录"""
     download_dir = config.get("aria2", {}).get("download_dir", "./downloads")
     path = Path(download_dir)
@@ -97,13 +97,8 @@ class TaskManager:
         self.config = load_config()
         self._init_clients()
 
-        pikpak_cfg = self.config.get("pikpak", {})
-        downloader.update_config(
-            max_concurrent=pikpak_cfg.get("max_concurrent_downloads", 3),
-            connections_per_task=pikpak_cfg.get("connections_per_task", 8),
-        )
-
         # upload_concurrency 变更后无需重建对象，
+
         # _wait_upload_slot 每次实时读取 config 值
         # 唤醒等待槽位的协程，让它们用新并发数重新检查
         self._upload_slot_event.set()
@@ -143,16 +138,19 @@ class TaskManager:
         """将本地配置同步到远端 aria2"""
         try:
             cfg = self.config
+            aria2_cfg = cfg["aria2"]
             options = {
-                "max-concurrent-downloads": str(cfg["aria2"].get("max_concurrent", 3)),
+                "max-concurrent-downloads": str(aria2_cfg.get("max_concurrent", 3)),
+                "split": str(aria2_cfg.get("split", 8)),
+                "max-connection-per-server": str(aria2_cfg.get("max_connection_per_server", 8)),
+                "min-split-size": f"{int(aria2_cfg.get('min_split_size_mb', 5))}M",
                 "max-overall-download-limit": "0",
-                "dir": cfg["aria2"].get("download_dir", "./downloads"),
+                "dir": aria2_cfg.get("download_dir", "./downloads"),
             }
-
             await self.aria2.change_global_option(options)
-            # logger.info(f"已同步 aria2 全局选项: {options}")
-        except Exception as e:
+        except Exception:
             pass
+
 
     async def start(self):
         """启动任务管理器"""
@@ -165,16 +163,6 @@ class TaskManager:
         for t in all_tasks:
             if t.get("aria2_gid"):
                 self._known_gids.add(t["aria2_gid"])
-
-        # 内置下载器任务无法跨进程恢复，启动时统一标记失败，避免出现高进度 0 速的僵尸任务
-        for t in all_tasks:
-            if t.get("task_id", "").startswith("bd-") and t["status"] in ("downloading", "paused"):
-                await db.update_task(
-                    t["task_id"],
-                    status="failed",
-                    download_speed="",
-                    error="服务重启后内置下载任务已中断，请点击重试重新拉起"
-                )
 
         # 恢复僵死的 uploading 任务（应用重启后 uploading 状态不会自动恢复）
         for t in all_tasks:
@@ -218,11 +206,11 @@ class TaskManager:
             await asyncio.gather(*self._upload_tasks.values(), return_exceptions=True)
             self._upload_tasks.clear()
 
-        # 关闭 aria2 / 内置下载器 HTTP 会话
+        # 关闭 aria2 HTTP 会话
         if self.aria2:
             await self.aria2.close()
-        await downloader.close()
         logger.info("任务管理器已停止")
+
 
 
     def register_ws(self, ws):
@@ -243,110 +231,8 @@ class TaskManager:
                 dead.add(ws)
         self._ws_clients -= dead
 
-    def _get_builtin_download_speed(self) -> int:
-        total_speed = 0
-        for task in downloader.get_all_tasks():
-            if task.status == TaskStatus.DOWNLOADING:
-                total_speed += int(task.speed or 0)
-        return total_speed
-
-    def _get_builtin_task_snapshot(self, task_id: str) -> dict:
-        task = downloader.get_task(task_id)
-        if not task:
-            return {}
-        task_dict = task.to_dict()
-        total_size = int(task.total_size or 0)
-        progress = round(task.downloaded / total_size * 100, 1) if total_size > 0 else 0
-        return {
-            "url": task.url,
-            "filename": task.filename,
-            "status": task.status.value,
-            "download_progress": progress,
-            "file_size": task_dict["total_str"],
-            "download_speed": task_dict["speed_str"] if task.status == TaskStatus.DOWNLOADING else "",
-            "local_path": str(task.dest_path),
-            "error": task.error or None,
-        }
-
-
-    @staticmethod
-    def _task_field_changed(current_value, next_value) -> bool:
-        if isinstance(next_value, float):
-            try:
-                return abs(float(current_value or 0) - next_value) >= 0.1
-            except (TypeError, ValueError):
-                return True
-        return current_value != next_value
-
-    async def _sync_single_builtin_task_into_db(self, task_id: str, existing_task: Optional[dict] = None) -> Optional[dict]:
-        snapshot = self._get_builtin_task_snapshot(task_id)
-        if not snapshot:
-            return existing_task
-
-        task = existing_task or await db.get_task(task_id)
-        if not task:
-            await db.add_task(
-                task_id,
-                snapshot.get("url", "") or "",
-                snapshot.get("filename"),
-                self.config["teldrive"].get("target_path", "/")
-            )
-            task = await db.get_task(task_id)
-
-        if not task:
-            task = {
-                "task_id": task_id,
-                "url": snapshot.get("url", "") or "",
-                "filename": snapshot.get("filename"),
-                "status": "pending",
-                "download_progress": 0.0,
-                "upload_progress": 0.0,
-                "download_speed": "",
-                "upload_speed": "",
-                "file_size": "",
-                "error": None,
-                "teldrive_path": self.config["teldrive"].get("target_path", "/"),
-                "aria2_gid": None,
-                "local_path": snapshot.get("local_path"),
-                "created_at": None,
-                "updated_at": None,
-            }
-
-        persisted_fields = (
-            "url",
-            "filename",
-            "status",
-            "download_progress",
-            "download_speed",
-            "file_size",
-            "local_path",
-            "error",
-        )
-        update_data = {}
-        for key in persisted_fields:
-            value = snapshot.get(key)
-            if self._task_field_changed(task.get(key), value):
-                update_data[key] = value
-
-        if update_data:
-            await db.update_task(task_id, **update_data)
-            task = {**task, **update_data}
-
-        return {**task, **snapshot}
-
-    async def _sync_builtin_cache_into_db(self):
-        for builtin_task in downloader.get_all_tasks():
-            await self._sync_single_builtin_task_into_db(builtin_task.task_id)
-
-    async def _merge_builtin_task_snapshot(self, task: Optional[dict]) -> Optional[dict]:
-        if not task:
-            return None
-        if self._is_builtin_task_record(task):
-            task = await self._sync_single_builtin_task_into_db(task["task_id"], task)
-        return self._merge_runtime_task_fields(task)
-
-
     def _set_runtime_task_fields(self, task_id: str, **kwargs):
+
         task_id = str(task_id or "")
         if not task_id:
             return
@@ -428,9 +314,9 @@ class TaskManager:
         error = str(task.get("error") or "")
         blocked_markers = (
             "用户手动暂停上传",
-            "服务重启后内置下载任务已中断",
             "本地文件不存在",
         )
+
         return any(marker in error for marker in blocked_markers)
 
     @staticmethod
@@ -444,11 +330,6 @@ class TaskManager:
             path = path.replace("//", "/")
         return path.rstrip("/") or "/"
 
-    @staticmethod
-    def _is_builtin_task_record(task: dict) -> bool:
-        task_id = str(task.get("task_id") or "")
-        return task_id.startswith("bd-") and not task.get("aria2_gid")
-
     def _get_task_teldrive_path(self, task: dict, local_path: str) -> str:
         configured_target = self._normalize_teldrive_path(
             self.config["teldrive"].get("target_path", "/")
@@ -456,27 +337,21 @@ class TaskManager:
         task_target = self._normalize_teldrive_path(
             task.get("teldrive_path") or configured_target
         )
-
-        if self._is_builtin_task_record(task):
-            return task_target
-
         if task_target != configured_target:
             return task_target
-
         return self._calc_teldrive_path(local_path)
 
     def get_global_stat(self) -> dict:
 
         """获取当前缓存的全局统计数据（供 WS init 立即推送）"""
-        builtin_download_speed = self._get_builtin_download_speed()
         data = {
-            "download_speed": self._last_download_speed + builtin_download_speed,
+            "download_speed": int(self._last_download_speed),
             "download_speed_detail": {
                 "aria2": int(self._last_download_speed),
-                "builtin": int(builtin_download_speed),
             },
             "upload_speed": int(self._upload_speed),
         }
+
         if self._disk_usage_info:
             data["disk"] = self._disk_usage_info
         if self._cpu_info:
@@ -835,22 +710,6 @@ class TaskManager:
         """释放一个上传槽位"""
         self._active_uploads = max(0, self._active_uploads - 1)
         self._upload_slot_event.set()
-
-    async def upload_local_with_slot(self, task_id: str, local_path: str,
-                                     teldrive_path: str = "/",
-                                     auto_delete_local: bool = False):
-        """供内置下载链路复用：上传前统一占用全局上传槽位。"""
-        await self._wait_upload_slot()
-        try:
-            if os.path.isdir(local_path):
-                await self._upload_directory(task_id, local_path, teldrive_path)
-            else:
-                await self._upload(task_id, local_path, teldrive_path)
-
-            if auto_delete_local:
-                await self._auto_delete_local(task_id, local_path)
-        finally:
-            self._release_upload_slot()
 
     @staticmethod
     def _calc_upload_timeout(file_size: int) -> int:
@@ -1330,25 +1189,34 @@ class TaskManager:
         task = await db.get_task(task_id)
         if not task:
             return {"success": False, "message": "任务不存在"}
-        if task["status"] != "downloading":
-            return {"success": False, "message": "只能暂停下载中的任务"}
 
-        is_builtin_task = task_id.startswith("bd-") and not task.get("aria2_gid")
+        status = task.get("status")
+        if status not in ("downloading", "uploading"):
+            return {"success": False, "message": "只能暂停下载中或上传中的任务"}
 
         try:
-            update_data = {"status": "paused", "download_speed": ""}
-            if is_builtin_task:
-                paused = await downloader.pause(task_id)
-                if not paused:
-                    return {"success": False, "message": "内置下载任务当前不可暂停"}
-                update_data.update(self._get_builtin_task_snapshot(task_id))
-            else:
-                await self.aria2.pause(task["aria2_gid"])
-            await db.update_task(task_id, **update_data)
+            if status == "uploading":
+                self._cancel_existing_upload(task_id)
+                self.clear_upload_progress(task_id)
+                self._set_runtime_task_fields(task_id, upload_note=None, upload_note_level=None)
+                old_gid = task.get("aria2_gid", "")
+                if old_gid:
+                    self._uploading_gids.discard(old_gid)
+                await db.update_task(task_id, status="paused", download_speed="", upload_speed="", error=None)
+                await self._broadcast_task_update(task_id)
+                return {"success": True, "message": "已暂停上传"}
+
+            if not task.get("aria2_gid"):
+                return {"success": False, "message": "缺少 aria2 GID，无法暂停"}
+
+            await self.aria2.pause(task["aria2_gid"])
+            await db.update_task(task_id, status="paused", download_speed="")
             await self._broadcast_task_update(task_id)
             return {"success": True, "message": "已暂停"}
         except Exception as e:
             return {"success": False, "message": str(e)}
+
+
 
     async def resume_task(self, task_id: str) -> dict:
         """恢复任务"""
@@ -1358,45 +1226,37 @@ class TaskManager:
         if task["status"] != "paused":
             return {"success": False, "message": "只能恢复已暂停的任务"}
 
-        is_builtin_task = task_id.startswith("bd-") and not task.get("aria2_gid")
-
         try:
-            update_data = {"status": "downloading"}
-            if is_builtin_task:
-                resumed = await downloader.resume(task_id)
-                if resumed:
-                    update_data.update(self._get_builtin_task_snapshot(task_id))
-                    await db.update_task(task_id, **update_data)
-                    await self._broadcast_task_update(task_id)
-                    return {"success": True, "message": "已恢复下载"}
+            local_path = self._get_upload_path(task.get("local_path", ""))
+            if self._is_upload_stage_task(task):
+                if not local_path or not os.path.exists(local_path):
+                    return {"success": False, "message": "本地文件不存在，无法继续上传"}
 
-                local_path = self._get_upload_path(task.get("local_path", ""))
-                if self._is_upload_stage_task(task) and local_path and os.path.exists(local_path):
-                    self._cancel_existing_upload(task_id)
-                    self.clear_upload_progress(task_id)
-                    self._upload_retry_counts.pop(task_id, None)
-                    total_chunks = self._count_path_chunks(local_path)
-                    self._set_runtime_task_fields(
-                        task_id,
-                        upload_chunk_done=0,
-                        upload_chunk_total=total_chunks,
-                        upload_note="已恢复上传，等待上传槽位...",
-                        upload_note_level="warning",
-                    )
-                    await db.update_task(task_id, status="uploading", download_speed="", upload_speed="", error=None, upload_progress=0.0)
-                    await self._broadcast_task_update(task_id)
-                    self._upload_tasks[task_id] = asyncio.create_task(self._retry_upload(task_id))
-                    return {"success": True, "message": "已恢复上传"}
+                self._upload_retry_counts.pop(task_id, None)
+                total_chunks = self._count_path_chunks(local_path)
+                self._set_runtime_task_fields(
+                    task_id,
+                    upload_chunk_done=0,
+                    upload_chunk_total=total_chunks,
+                    upload_note="正在继续上传，等待上传槽位...",
+                    upload_note_level="warning",
+                )
+                await db.update_task(task_id, status="uploading", upload_progress=0.0, upload_speed="", error=None)
+                await self._broadcast_task_update(task_id)
+                self._upload_tasks[task_id] = asyncio.create_task(self._retry_upload(task_id))
+                return {"success": True, "message": "已恢复上传"}
 
-
-                return {"success": False, "message": "内置任务当前不可恢复"}
+            if not task.get("aria2_gid"):
+                return {"success": False, "message": "缺少 aria2 GID，无法恢复"}
 
             await self.aria2.unpause(task["aria2_gid"])
-            await db.update_task(task_id, **update_data)
+            await db.update_task(task_id, status="downloading")
             await self._broadcast_task_update(task_id)
             return {"success": True, "message": "已恢复"}
         except Exception as e:
             return {"success": False, "message": str(e)}
+
+
 
 
     async def cancel_task(self, task_id: str) -> dict:
@@ -1407,16 +1267,8 @@ class TaskManager:
         if task["status"] in ("completed", "cancelled"):
             return {"success": False, "message": "任务已结束"}
 
-        is_builtin_task = task_id.startswith("bd-") and not task.get("aria2_gid")
-
         try:
-            if is_builtin_task and task["status"] == "uploading":
-                return {"success": False, "message": "内置引擎上传中的任务暂不支持取消"}
-
-            if is_builtin_task:
-                await downloader.cancel(task_id)
-                await downloader.remove_task(task_id)
-            elif task.get("aria2_gid"):
+            if task.get("aria2_gid"):
                 try:
                     await self.aria2.force_remove(task["aria2_gid"])
                 except Exception:
@@ -1426,7 +1278,6 @@ class TaskManager:
             self.clear_upload_progress(task_id)
             self._clear_runtime_task_fields(task_id)
             self._upload_retry_counts.pop(task_id, None)
-
 
             old_gid = task.get("aria2_gid", "")
             if old_gid:
@@ -1445,6 +1296,7 @@ class TaskManager:
             await self.broadcast({"type": "task_deleted", "data": {"task_id": task_id}})
             return {"success": True, "message": "已取消"}
         except Exception as e:
+
             return {"success": False, "message": str(e)}
 
 
@@ -1635,25 +1487,14 @@ class TaskManager:
 
     async def get_all_tasks(self) -> list:
         """获取所有任务"""
-        await self._sync_builtin_cache_into_db()
         tasks = await db.get_all_tasks()
-        result = []
-        for task in tasks:
-            merged_task = await self._merge_builtin_task_snapshot(task)
-            if merged_task:
-                result.append(merged_task)
-        return result
+        return [self._merge_runtime_task_fields(task) for task in tasks if task]
 
     async def get_task(self, task_id: str) -> Optional[dict]:
         """获取单个任务"""
         task = await db.get_task(task_id)
-        if task:
-            return await self._merge_builtin_task_snapshot(task)
+        return self._merge_runtime_task_fields(task) if task else None
 
-        synced_task = await self._sync_single_builtin_task_into_db(task_id)
-        if synced_task:
-            return self._merge_runtime_task_fields(synced_task)
-        return None
 
 
 
