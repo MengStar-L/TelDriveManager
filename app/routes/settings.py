@@ -115,11 +115,12 @@ async def test_pikpak(payload: dict = Body(None)):
     from app.modules.pikpak.client import PikPakClient
 
     cfg = payload or load_config()["pikpak"]
-    login_mode = cfg.get("login_mode", "password")
-    if login_mode == "session":
+    login_mode = str(cfg.get("login_mode", "password") or "password").strip().lower()
+    login_mode = "token" if login_mode in ("token", "session") else "password"
+    if login_mode == "token":
         session = (cfg.get("session") or "").strip()
         if not session:
-            return {"success": False, "message": "PikPak Session 不能为空"}
+            return {"success": False, "message": "PikPak Encoded Token 不能为空"}
         username = ""
         password = ""
     else:
@@ -138,8 +139,9 @@ async def test_pikpak(payload: dict = Body(None)):
             save_dir=cfg.get("save_dir", "/"),
         )
         await client.login()
-        mode_text = "Session" if login_mode == "session" else "账号密码"
+        mode_text = "Token" if login_mode == "token" else "账号密码"
         return {"success": True, "message": f"PikPak {mode_text} 登录成功"}
+
     except Exception as e:
         return {"success": False, "message": f"PikPak 连接失败: {str(e)}"}
 
@@ -226,10 +228,11 @@ async def global_health_check():
     try:
         cfg = load_config(force_reload=True)
         pikpak_cfg = cfg.get("pikpak", {})
-        pikpak_mode = pikpak_cfg.get("login_mode", "password")
-        statuses["pikpak"] = bool(pikpak_cfg.get("session")) if pikpak_mode == "session" else (
+        pikpak_mode = str(pikpak_cfg.get("login_mode", "password") or "password").strip().lower()
+        statuses["pikpak"] = bool(pikpak_cfg.get("session")) if pikpak_mode == "token" else (
             bool(pikpak_cfg.get("username")) and bool(pikpak_cfg.get("password"))
         )
+
 
         try:
             if cfg.get("aria2", {}).get("installed") and not aria2_service.is_running():

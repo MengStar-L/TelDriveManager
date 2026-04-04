@@ -99,10 +99,27 @@ async function persistCurrentConfig(patch = null) {
     return data;
 }
 
+function normalizePikpakLoginMode(mode = 'password') {
+    const normalized = String(mode || 'password').trim().toLowerCase();
+    return normalized === 'session' || normalized === 'token' ? 'token' : 'password';
+}
+
+function toggleWizardPikpakLoginMode() {
+    const mode = normalizePikpakLoginMode(document.getElementById('wPikLoginMode')?.value || 'password');
+    const passwordFields = document.getElementById('wPikPasswordFields');
+    const tokenFields = document.getElementById('wPikTokenFields');
+    if (passwordFields) passwordFields.style.display = mode === 'token' ? 'none' : 'grid';
+    if (tokenFields) tokenFields.style.display = mode === 'token' ? 'grid' : 'none';
+}
+
 function fillWizardInputs(data = {}) {
     try {
+        const pikpakMode = normalizePikpakLoginMode(data.pikpak?.login_mode || 'password');
+        document.getElementById('wPikLoginMode').value = pikpakMode;
         document.getElementById('wPikUser').value = data.pikpak?.username || '';
         document.getElementById('wPikPass').value = data.pikpak?.password || '';
+        document.getElementById('wPikToken').value = data.pikpak?.session || '';
+        toggleWizardPikpakLoginMode();
         document.getElementById('wTdUrl').value = data.teldrive?.api_host || '';
         document.getElementById('wTdToken').value = data.teldrive?.access_token || '';
         document.getElementById('wTgId').value = data.telegram?.api_id || '';
@@ -120,6 +137,7 @@ function fillWizardInputs(data = {}) {
         console.warn('填充向导配置失败', e);
     }
 }
+
 
 function getWizardAria2Config() {
     const existing = window.currentConfig?.aria2 || {};
@@ -361,8 +379,12 @@ async function checkSetupRequired() {
         }
 
         wiz.classList.add('show', 'active');
-        const hasPikpak = !!(data.pikpak?.session || (data.pikpak?.username && data.pikpak?.password));
+        const pikpakMode = normalizePikpakLoginMode(data.pikpak?.login_mode || 'password');
+        const hasPikpak = pikpakMode === 'token'
+            ? !!data.pikpak?.session
+            : !!(data.pikpak?.username && data.pikpak?.password);
         const hasAria2 = !!(latestAria2Runtime?.installed || data.aria2?.installed);
+
         const hasTeldrive = !!(data.teldrive?.api_host && data.teldrive?.access_token);
         const hasTelegram = !!(data.telegram?.api_id && data.telegram?.api_hash);
         const hasDatabase = !!data.telegram_db?.host;
@@ -397,10 +419,18 @@ async function wizardNext(current, next, btn = null) {
     let dataToSave = {};
     try {
         if (current === 1) {
-            const user = document.getElementById('wPikUser').value.trim();
-            const pass = document.getElementById('wPikPass').value.trim();
-            if (!user || !pass) throw new Error('您必须填写 PikPak 账密');
-            const payload = { login_mode: 'password', username: user, password: pass, session: '' };
+            const loginMode = normalizePikpakLoginMode(document.getElementById('wPikLoginMode')?.value || 'password');
+            let payload = null;
+            if (loginMode === 'token') {
+                const token = document.getElementById('wPikToken').value.trim();
+                if (!token) throw new Error('请填写 PikPak Encoded Token');
+                payload = { login_mode: 'token', username: '', password: '', session: token };
+            } else {
+                const user = document.getElementById('wPikUser').value.trim();
+                const pass = document.getElementById('wPikPass').value.trim();
+                if (!user || !pass) throw new Error('您必须填写 PikPak 账密');
+                payload = { login_mode: 'password', username: user, password: pass, session: '' };
+            }
             const r = await fetch('/api/settings/test/pikpak', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
@@ -409,6 +439,7 @@ async function wizardNext(current, next, btn = null) {
             const d = await readJsonSafe(r);
             if (!d.success) throw new Error(d.message || 'PikPak 验证失败');
             dataToSave.pikpak = payload;
+
         } else if (current === 2) {
             const runtime = await refreshAria2RuntimeStatus();
             if (!runtime.installed) throw new Error('aria2 尚未安装完成，请先完成自动安装或上传安装包');
@@ -1687,62 +1718,20 @@ async function clearCompletedTasks() {
 
 // ── Settings ──
 function togglePikpakLoginMode() {
-    const mode = document.getElementById('cfgPikpakLoginMode')?.value || 'password';
+    const mode = normalizePikpakLoginMode(document.getElementById('cfgPikpakLoginMode')?.value || 'password');
     const passwordFields = document.getElementById('cfgPikpakPasswordFields');
-    const sessionFields = document.getElementById('cfgPikpakSessionFields');
-    if (passwordFields) passwordFields.style.display = mode === 'session' ? 'none' : 'grid';
-    if (sessionFields) sessionFields.style.display = mode === 'session' ? 'grid' : 'none';
+    const tokenFields = document.getElementById('cfgPikpakTokenFields');
+    if (passwordFields) passwordFields.style.display = mode === 'token' ? 'none' : 'grid';
+    if (tokenFields) tokenFields.style.display = mode === 'token' ? 'grid' : 'none';
 }
 
-function extractPikpakSessionValue(rawText) {
-    const text = String(rawText || '').replace(/^\uFEFF/, '').trim();
-    if (!text) return '';
-    try {
-        const parsed = JSON.parse(text);
-        if (typeof parsed === 'string' && parsed.trim()) return parsed.trim();
-        if (parsed && typeof parsed === 'object') {
-            for (const key of ['encoded_token', 'session', 'token']) {
-                if (typeof parsed[key] === 'string' && parsed[key].trim()) {
-                    return parsed[key].trim();
-                }
-            }
-        }
-    } catch (e) {}
-    return text;
-}
-
-async function importPikpakSessionFile(event) {
-    const fileInput = event?.target;
-    const file = fileInput?.files?.[0];
-    if (!file) return;
-
-    const modeInput = document.getElementById('cfgPikpakLoginMode');
-    const sessionInput = document.getElementById('cfgPikpakSession');
-    const fileNameLabel = document.getElementById('cfgPikpakSessionFileName');
-
-    try {
-        const rawText = await file.text();
-        const session = extractPikpakSessionValue(rawText);
-        if (!session) throw new Error('文件中未识别到有效的 Session / encoded_token');
-
-        if (modeInput) {
-            modeInput.value = 'session';
-            togglePikpakLoginMode();
-        }
-        if (sessionInput) sessionInput.value = session;
-        if (fileNameLabel) fileNameLabel.textContent = `已导入: ${file.name}`;
-
-        await doAutoSave(sessionInput || modeInput || fileInput);
-    } catch (e) {
-        if (fileNameLabel) fileNameLabel.textContent = '导入失败';
-        alert('Session 文件导入失败: ' + (e.message || '未知错误'));
-    } finally {
-        if (fileInput) fileInput.value = '';
-    }
-}
 
 function collectSettingsConfig() {
     const currentAria2 = window.currentConfig?.aria2 || {};
+    const pikpakMode = normalizePikpakLoginMode(document.getElementById('cfgPikpakLoginMode')?.value || 'password');
+    const pikpakUsername = document.getElementById('cfgPikpakUsername').value.trim();
+    const pikpakPassword = document.getElementById('cfgPikpakPassword').value;
+    const pikpakToken = document.getElementById('cfgPikpakToken').value.trim();
     return {
         auth: {
             username: document.getElementById('cfgAuthUser').value.trim(),
@@ -1750,13 +1739,14 @@ function collectSettingsConfig() {
         },
         server: { port: parseInt(document.getElementById('cfgServerPort').value, 10) || 8888 },
         pikpak: {
-            login_mode: document.getElementById('cfgPikpakLoginMode').value || 'password',
-            username: document.getElementById('cfgPikpakUsername').value,
-            password: document.getElementById('cfgPikpakPassword').value,
-            session: document.getElementById('cfgPikpakSession').value.trim(),
+            login_mode: pikpakMode,
+            username: pikpakMode === 'password' ? pikpakUsername : '',
+            password: pikpakMode === 'password' ? pikpakPassword : '',
+            session: pikpakMode === 'token' ? pikpakToken : '',
             save_dir: document.getElementById('cfgPikpakSaveDir').value || '/',
             delete_after_download: document.getElementById('cfgPikpakDelete').checked,
         },
+
         aria2: {
             rpc_url: document.getElementById('cfgAria2Url').value || currentAria2.rpc_url || 'http://127.0.0.1',
             rpc_port: Math.max(1, parseInt(document.getElementById('cfgAria2Port').value, 10) || currentAria2.rpc_port || 6800),
@@ -1805,14 +1795,14 @@ async function loadConfig() {
         document.getElementById('cfgAuthPass').value = cfg.auth?.password || '';
         document.getElementById('cfgServerPort').value = cfg.server?.port || 8888;
 
-        document.getElementById('cfgPikpakLoginMode').value = cfg.pikpak?.login_mode || 'password';
+        document.getElementById('cfgPikpakLoginMode').value = normalizePikpakLoginMode(cfg.pikpak?.login_mode || 'password');
         document.getElementById('cfgPikpakUsername').value = cfg.pikpak?.username || '';
         document.getElementById('cfgPikpakPassword').value = cfg.pikpak?.password || '';
-        document.getElementById('cfgPikpakSession').value = cfg.pikpak?.session || '';
-        document.getElementById('cfgPikpakSessionFileName').textContent = cfg.pikpak?.session ? '已保存 Session' : '未选择文件';
+        document.getElementById('cfgPikpakToken').value = cfg.pikpak?.session || '';
         document.getElementById('cfgPikpakSaveDir').value = cfg.pikpak?.save_dir || '/';
         document.getElementById('cfgPikpakDelete').checked = !!cfg.pikpak?.delete_after_download;
         togglePikpakLoginMode();
+
 
         document.getElementById('cfgAria2Url').value = cfg.aria2?.rpc_url || 'http://127.0.0.1';
         document.getElementById('cfgAria2Port').value = cfg.aria2?.rpc_port || 6800;

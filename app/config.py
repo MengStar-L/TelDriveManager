@@ -145,6 +145,10 @@ def _normalize_config(merged: dict, raw: dict | None = None) -> dict:
     raw_aria2 = raw.get("aria2") if isinstance(raw.get("aria2"), dict) else {}
     raw_pikpak = raw.get("pikpak") if isinstance(raw.get("pikpak"), dict) else {}
 
+    pikpak_mode = str(pikpak_cfg.get("login_mode", "password") or "password").strip().lower()
+    pikpak_cfg["login_mode"] = "token" if pikpak_mode in ("token", "session") else "password"
+    pikpak_cfg["session"] = str(pikpak_cfg.get("session") or "").strip()
+
     legacy_max = raw_pikpak.get("max_concurrent_downloads", pikpak_cfg.get("max_concurrent_downloads", 3))
     legacy_conn = raw_pikpak.get("connections_per_task", pikpak_cfg.get("connections_per_task", 8))
 
@@ -216,8 +220,8 @@ def needs_setup() -> bool:
     
     cfg = load_config()
     pikpak_cfg = cfg.get("pikpak", {})
-    pikpak_mode = pikpak_cfg.get("login_mode", "password")
-    has_pikpak_auth = bool(pikpak_cfg.get("session")) if pikpak_mode == "session" else (
+    pikpak_mode = str(pikpak_cfg.get("login_mode", "password") or "password").strip().lower()
+    has_pikpak_auth = bool(pikpak_cfg.get("session")) if pikpak_mode == "token" else (
         bool(pikpak_cfg.get("username")) and bool(pikpak_cfg.get("password"))
     )
     aria2_cfg = cfg.get("aria2", {})

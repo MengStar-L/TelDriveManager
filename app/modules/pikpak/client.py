@@ -25,7 +25,8 @@ class PikPakClient:
         self.password = password
         self.save_dir = save_dir
         self.session = session.strip()
-        self.login_mode = login_mode if login_mode in {"password", "session"} else "password"
+        normalized_login_mode = str(login_mode or "password").strip().lower()
+        self.login_mode = "token" if normalized_login_mode in {"token", "session"} else "password"
         self._save_dir_id: Optional[str] = None
 
         encoded_token = self.session or self._load_token()
@@ -89,8 +90,8 @@ class PikPakClient:
                 self._save_token()
                 return
             except Exception as e:
-                if self.login_mode == "session" and not (self.username and self.password):
-                    raise ValueError(f"PikPak session 已失效，请更新 session：{e}") from e
+                if self.login_mode == "token" and not (self.username and self.password):
+                    raise ValueError(f"PikPak Token 已失效，请更新 encoded_token：{e}") from e
         if not (self.username and self.password):
             raise ValueError("PikPak 账号密码未配置，无法使用密码登录")
         await self.client.login()
