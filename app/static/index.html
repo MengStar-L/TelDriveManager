@@ -1204,8 +1204,9 @@
         <div class="wizard-card" style="width:min(720px, calc(100vw - 32px)); max-height:calc(100vh - 32px); overflow-y:auto;">
             <div class="wizard-header">
                 <div class="wizard-title">欢迎使用 TelDriveManager</div>
-                <div class="wizard-subtitle">首次运行需要先安装并配置 aria2，完成后才能进入主界面</div>
+                <div class="wizard-subtitle" id="setupWizardSubtitle">首次运行需要先安装并配置 aria2，完成后才能进入主界面</div>
             </div>
+
             
             <div class="wizard-dots">
                 <div class="wizard-dot active" id="dot1"></div>
@@ -1343,11 +1344,16 @@
                 <div class="field-grid cols-1">
                     <div class="form-group">
                         <label>TelDrive API 地址 (必填)</label>
-                        <input class="form-input" type="text" id="wTdUrl" placeholder="如 http://localhost:8080">
+                        <input class="form-input" type="text" id="wTdUrl" placeholder="例如 https://teldrive.example.com">
                     </div>
                     <div class="form-group">
                         <label>TelDrive Token (必填)</label>
-                        <input class="form-input" type="password" id="wTdToken" placeholder="抓包获取的 Bearer Token">
+                        <input class="form-input" type="password" id="wTdToken" placeholder="浏览器登录后从 Cookie / 请求头中获取 access_token">
+                    </div>
+                    <div class="form-group">
+                        <label>TelDrive 同步频道 ID (必填)</label>
+                        <input class="form-input" type="number" id="wTdChannel" placeholder="例如 -1001234567890">
+                        <div class="wizard-note">这里填写 TelDrive 实际存储分片消息的 Telegram 频道 ID，通常是以 <code>-100</code> 开头的负数。</div>
                     </div>
                 </div>
                 <div class="wizard-footer">
@@ -1361,11 +1367,16 @@
                 <div class="field-grid cols-1" style="position: relative;">
                     <div class="form-group">
                         <label>Telegram API ID</label>
-                        <input class="form-input" type="number" id="wTgId" placeholder="前往 my.telegram.org 获取">
+                        <input class="form-input" type="number" id="wTgId" placeholder="前往 my.telegram.org 获取，例如 12345678">
                     </div>
                     <div class="form-group">
                         <label>Telegram API Hash</label>
-                        <input class="form-input" type="text" id="wTgHash" placeholder="如 abcdef1234567890">
+                        <input class="form-input" type="text" id="wTgHash" placeholder="前往 my.telegram.org 获取，例如 0123456789abcdef0123456789abcdef">
+                    </div>
+                    <div class="form-group">
+                        <label>Telegram 监听频道 ID (必填)</label>
+                        <input class="form-input" type="number" id="wTgChannel" placeholder="例如 -1001234567890">
+                        <div class="wizard-note">填写需要监听并同步到 TelDrive 的频道 ID。频道 ID 通常也是 <code>-100</code> 开头的负数。</div>
                     </div>
                 </div>
                 <div class="wizard-footer">
@@ -1373,6 +1384,7 @@
                     <button class="btn btn-primary" onclick="wizardNext(5, 6, this)">下一步 <i class="ph ph-arrow-right"></i></button>
                 </div>
             </div>
+
 
             <!-- Step 6: Postgres -->
             <div class="wizard-step" id="wStep6">

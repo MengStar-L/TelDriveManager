@@ -421,7 +421,7 @@ class Aria2Service:
 
         from app.modules.aria2teldrive.task_manager import task_manager
 
-        task_manager.reload_config()
+        await task_manager.reload_config()
         await self.restart()
         self._set_state(
             status="completed",

@@ -23,7 +23,12 @@ def _sanitize_payload(payload: dict | None) -> dict:
     }
 
 
+def _has_channel_id(value) -> bool:
+    return value not in (None, "", 0, "0")
+
+
 @router.get("")
+
 async def get_settings():
     config = load_config()
     data = dict(config)
@@ -37,7 +42,7 @@ async def update_settings(request_body: dict):
     save_config(_sanitize_payload(request_body))
     current = reload_config()
     await aria2_service.handle_config_update(previous, current)
-    task_manager.reload_config()
+    await task_manager.reload_config()
     await pikpak_routes.reset_clients()
     return {"success": True, "message": "设置已保存"}
 
@@ -255,22 +260,33 @@ async def global_health_check():
         aria2_result = await _test_aria2_connection()
         statuses["aria2"] = bool(aria2_result.get("success"))
 
-        statuses["teldrive"] = task_manager.teldrive is not None and bool(cfg.get("teldrive", {}).get("access_token"))
+        teldrive_cfg = cfg.get("teldrive", {})
+        statuses["teldrive"] = (
+            bool(str(teldrive_cfg.get("api_host") or "").strip())
+            and bool(str(teldrive_cfg.get("access_token") or "").strip())
+            and _has_channel_id(teldrive_cfg.get("channel_id"))
+        )
 
+        tg_cfg = cfg.get("telegram", {})
+        telegram_base_ready = (
+            bool(tg_cfg.get("api_id"))
+            and bool(str(tg_cfg.get("api_hash") or "").strip())
+            and _has_channel_id(tg_cfg.get("channel_id"))
+        )
         try:
             from app.modules.tel2teldrive.service import broker
 
             tg_state = broker.snapshot()
-            statuses["telegram"] = bool(
+            statuses["telegram"] = telegram_base_ready and bool(
                 tg_state.get("authorized")
                 or tg_state.get("phase") in ("awaiting_qr", "awaiting_password")
             )
         except Exception:
-            tg_cfg = cfg.get("telegram", {})
-            statuses["telegram"] = bool(tg_cfg.get("api_id")) and bool(tg_cfg.get("api_hash"))
+            statuses["telegram"] = telegram_base_ready
 
         db_cfg = cfg.get("telegram_db", {})
-        statuses["database"] = bool(db_cfg.get("host"))
+        statuses["database"] = bool(str(db_cfg.get("host") or "").strip())
+
     except Exception as e:
         import logging
 

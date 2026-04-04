@@ -92,9 +92,16 @@ class TaskManager:
             max_retries=cfg.get("upload", {}).get("max_retries", 3)
         )
 
-    def reload_config(self):
+    async def _close_clients(self):
+        old_aria2 = self.aria2
+        self.aria2 = None
+        if old_aria2 is not None:
+            await old_aria2.close()
+
+    async def reload_config(self):
         """重新加载配置并重建客户端"""
-        self.config = load_config()
+        await self._close_clients()
+        self.config = load_config(force_reload=True)
         self._init_clients()
 
         # upload_concurrency 变更后无需重建对象，

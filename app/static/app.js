@@ -2,7 +2,9 @@
 
 // ── Setup Wizard ──
 const WIZARD_TOTAL_STEPS = 6;
+const WIZARD_ALL_STEPS = [1, 2, 3, 4, 5, 6];
 let wizardCurrentStep = 1;
+let wizardActiveSteps = [...WIZARD_ALL_STEPS];
 let wizardAria2PollTimer = null;
 let latestAria2Runtime = null;
 
@@ -46,8 +48,108 @@ function showWizardError(btn, message) {
     }, 3500);
 }
 
+function getWizardStepLabel(step) {
+    const labels = {
+        1: 'PikPak',
+        2: 'aria2 安装',
+        3: 'aria2 参数',
+        4: 'TelDrive',
+        5: 'Telegram 中转',
+        6: 'Postgres'
+    };
+    return labels[Number(step)] || `步骤 ${step}`;
+}
+
+function getWizardActiveSteps() {
+    return Array.isArray(wizardActiveSteps) && wizardActiveSteps.length
+        ? wizardActiveSteps
+        : [...WIZARD_ALL_STEPS];
+}
+
+function setWizardActiveSteps(steps = []) {
+    const normalized = [...new Set((steps || [])
+        .map(step => Number(step))
+        .filter(step => WIZARD_ALL_STEPS.includes(step)))];
+    wizardActiveSteps = normalized.length ? normalized : [...WIZARD_ALL_STEPS];
+
+    for (let i = 1; i <= WIZARD_TOTAL_STEPS; i++) {
+        const enabled = wizardActiveSteps.includes(i);
+        const stepEl = document.getElementById('wStep' + i);
+        const dotEl = document.getElementById('dot' + i);
+        if (stepEl) {
+            stepEl.style.display = enabled ? '' : 'none';
+            if (!enabled) stepEl.classList.remove('active');
+        }
+        if (dotEl) {
+            dotEl.style.display = enabled ? '' : 'none';
+            if (!enabled) dotEl.classList.remove('active');
+        }
+    }
+
+    const subtitle = document.getElementById('setupWizardSubtitle');
+    if (subtitle) {
+        subtitle.textContent = wizardActiveSteps.length >= WIZARD_TOTAL_STEPS
+            ? '首次运行需要先安装并配置 aria2，完成后才能进入主界面'
+            : `检测到以下配置仍需补全：${wizardActiveSteps.map(getWizardStepLabel).join('、')}`;
+    }
+}
+
+function getPrevWizardStep(step) {
+    const active = getWizardActiveSteps();
+    const index = active.indexOf(Number(step));
+    if (index <= 0) return Number(step) || active[0] || 1;
+    return active[index - 1];
+}
+
+function getNextWizardStep(step) {
+    const active = getWizardActiveSteps();
+    const index = active.indexOf(Number(step));
+    if (index === -1) return active[0] || null;
+    return active[index + 1] || null;
+}
+
+function getWizardPendingSteps(data = {}, healthDetails = {}) {
+    const pikpakMode = normalizePikpakLoginMode(data.pikpak?.login_mode || 'password');
+    const pikpakReady = typeof healthDetails?.pikpak === 'boolean'
+        ? healthDetails.pikpak
+        : (pikpakMode === 'token'
+            ? !!data.pikpak?.session
+            : !!(data.pikpak?.username && data.pikpak?.password));
+
+    const aria2Ready = typeof healthDetails?.aria2 === 'boolean'
+        ? healthDetails.aria2
+        : !!(latestAria2Runtime?.installed || data.aria2?.installed);
+
+    const teldriveReady = typeof healthDetails?.teldrive === 'boolean'
+        ? healthDetails.teldrive
+        : !!(data.teldrive?.api_host && data.teldrive?.access_token && Number(data.teldrive?.channel_id || 0));
+
+    const telegramReady = typeof healthDetails?.telegram === 'boolean'
+        ? healthDetails.telegram
+        : !!(data.telegram?.api_id && data.telegram?.api_hash && Number(data.telegram?.channel_id || 0));
+
+    const databaseReady = typeof healthDetails?.database === 'boolean'
+        ? healthDetails.database
+        : !!String(data.telegram_db?.host || '').trim();
+
+    const pending = [];
+    if (!pikpakReady) pending.push(1);
+    if (!aria2Ready) pending.push(2, 3);
+    if (!teldriveReady) pending.push(4);
+    if (!telegramReady) pending.push(5);
+    if (!databaseReady) pending.push(6);
+    return pending;
+}
+
 function setWizardStep(step) {
-    wizardCurrentStep = Math.max(1, Math.min(WIZARD_TOTAL_STEPS, Number(step) || 1));
+    const active = getWizardActiveSteps();
+    if (!active.length) return;
+
+    const requested = Number(step) || active[0] || 1;
+    wizardCurrentStep = active.includes(requested)
+        ? requested
+        : (active.find(item => item >= requested) || active[active.length - 1] || active[0]);
+
     for (let i = 1; i <= WIZARD_TOTAL_STEPS; i++) {
         document.getElementById('wStep' + i)?.classList.remove('active');
         document.getElementById('dot' + i)?.classList.remove('active');
@@ -58,6 +160,7 @@ function setWizardStep(step) {
 }
 
 function ensureCurrentConfig() {
+
     if (!window.currentConfig || typeof window.currentConfig !== 'object') {
         window.currentConfig = {};
     }
@@ -153,9 +256,12 @@ function fillWizardInputs(data = {}) {
         toggleWizardPikpakLoginMode();
         document.getElementById('wTdUrl').value = data.teldrive?.api_host || '';
         document.getElementById('wTdToken').value = data.teldrive?.access_token || '';
+        document.getElementById('wTdChannel').value = data.teldrive?.channel_id || '';
         document.getElementById('wTgId').value = data.telegram?.api_id || '';
         document.getElementById('wTgHash').value = data.telegram?.api_hash || '';
+        document.getElementById('wTgChannel').value = data.telegram?.channel_id || '';
         document.getElementById('wDbHost').value = data.telegram_db?.host || '';
+
         document.getElementById('wDbPort').value = data.telegram_db?.port || 5432;
         document.getElementById('wDbName').value = data.telegram_db?.name || 'postgres';
         document.getElementById('wDbUser').value = data.telegram_db?.user || 'postgres';
@@ -176,7 +282,8 @@ function getWizardAria2Config() {
     const portInput = document.getElementById('cfgAria2Port');
     const secretInput = document.getElementById('cfgAria2Secret');
     return {
-        rpc_port: Math.max(1, parseInt(portInput?.value || existing.rpc_port || '6800', 10) || 6800),
+        rpc_port: Math.max(1, parseInt(portInput?.value || existing.rpc_port || '6822', 10) || 6822),
+
         rpc_secret: (secretInput?.value ?? existing.rpc_secret ?? '').trim(),
         max_concurrent: Math.max(1, parseInt(document.getElementById('wAria2MaxConcurrent').value, 10) || existing.max_concurrent || 3),
         split: Math.max(1, parseInt(document.getElementById('wAria2Split').value, 10) || existing.split || 8),
@@ -435,34 +542,32 @@ async function checkSetupRequired() {
             return;
         }
 
+        const pendingSteps = getWizardPendingSteps(data, window.healthDetails);
+        if (!pendingSteps.length) {
+            wiz.classList.remove('active', 'show');
+            clearWizardAria2Poll();
+            return;
+        }
+
+        setWizardActiveSteps(pendingSteps);
         wiz.classList.add('show', 'active');
-        const pikpakMode = normalizePikpakLoginMode(data.pikpak?.login_mode || 'password');
-        const hasPikpak = pikpakMode === 'token'
-            ? !!data.pikpak?.session
-            : !!(data.pikpak?.username && data.pikpak?.password);
-        const hasAria2 = !!(latestAria2Runtime?.installed || data.aria2?.installed);
-
-        const hasTeldrive = !!(data.teldrive?.api_host && data.teldrive?.access_token);
-        const hasTelegram = !!(data.telegram?.api_id && data.telegram?.api_hash);
-        const hasDatabase = !!data.telegram_db?.host;
-
-        let firstStep = 1;
-        if (hasPikpak) firstStep = 2;
-        if (hasPikpak && hasAria2) firstStep = 4;
-        if (hasPikpak && hasAria2 && hasTeldrive) firstStep = 5;
-        if (hasPikpak && hasAria2 && hasTeldrive && hasTelegram) firstStep = 6;
-        if (hasPikpak && hasAria2 && hasTeldrive && hasTelegram && hasDatabase) firstStep = 1;
-
-        if (!window.healthDetails?.aria2) firstStep = Math.min(firstStep, 2);
-        setWizardStep(firstStep);
+        setWizardStep(pendingSteps[0]);
     } catch (e) {
         console.error('Failed to check setup', e);
     }
 }
 
+
+function closeSetupWizard() {
+    const wiz = document.getElementById('setupWizard');
+    if (wiz) wiz.classList.remove('active', 'show');
+    clearWizardAria2Poll();
+    location.reload();
+}
+
 async function wizardNext(current, next, btn = null) {
     if (next < current) {
-        setWizardStep(next);
+        setWizardStep(getPrevWizardStep(current));
         return;
     }
 
@@ -506,8 +611,10 @@ async function wizardNext(current, next, btn = null) {
         } else if (current === 4) {
             const tUrl = document.getElementById('wTdUrl').value.trim();
             const tTok = document.getElementById('wTdToken').value.trim();
+            const tChannel = parseInt(document.getElementById('wTdChannel').value, 10);
             if (!tUrl || !tTok) throw new Error('TelDrive API 和 Token 为必填');
-            const tdPayload = { api_host: tUrl, access_token: tTok };
+            if (!tChannel) throw new Error('请填写 TelDrive 同步频道 ID');
+            const tdPayload = { api_host: tUrl, access_token: tTok, channel_id: tChannel };
             const r = await fetch('/api/settings/test/teldrive', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
@@ -519,8 +626,10 @@ async function wizardNext(current, next, btn = null) {
         } else if (current === 5) {
             const tid = document.getElementById('wTgId').value.trim();
             const tHash = document.getElementById('wTgHash').value.trim();
+            const tChannel = parseInt(document.getElementById('wTgChannel').value, 10);
             if (!tid || !tHash) throw new Error('必须提供 Telegram 授权参数');
-            const tgPayload = { api_id: parseInt(tid, 10), api_hash: tHash };
+            if (!tChannel) throw new Error('请填写 Telegram 监听频道 ID');
+            const tgPayload = { api_id: parseInt(tid, 10), api_hash: tHash, channel_id: tChannel };
             const r = await fetch('/api/settings/test/telegram', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
@@ -535,9 +644,15 @@ async function wizardNext(current, next, btn = null) {
             await persistCurrentConfig(dataToSave);
         }
 
+        const nextStep = getNextWizardStep(current);
+        if (nextStep == null) {
+            closeSetupWizard();
+            return;
+        }
+
         btn.disabled = false;
         btn.innerHTML = oldHtml;
-        setWizardStep(next);
+        setWizardStep(nextStep);
     } catch (e) {
         btn.disabled = false;
         btn.innerHTML = oldHtml;
@@ -574,17 +689,14 @@ async function wizardFinish(btn = null) {
 
         btn.innerHTML = '<span class="spinner" style="width:14px;height:14px;border-width:2px;display:inline-block;margin-right:8px;"></span> 部署中...';
         await persistCurrentConfig({ telegram_db: dbPayload, aria2: getWizardAria2Config() });
-
-        const wiz = document.getElementById('setupWizard');
-        if (wiz) wiz.classList.remove('active', 'show');
-        clearWizardAria2Poll();
-        location.reload();
+        closeSetupWizard();
     } catch (e) {
         btn.disabled = false;
         btn.innerHTML = oldHtml;
         showWizardError(btn, e.message || '保存最终配置失败');
     }
 }
+
 
 
 

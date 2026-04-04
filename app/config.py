@@ -217,21 +217,37 @@ def needs_setup() -> bool:
     """判断是否为首次运行，或缺乏重要凭据"""
     if not CONFIG_PATH.exists():
         return True
-    
+
     cfg = load_config()
     pikpak_cfg = cfg.get("pikpak", {})
     pikpak_mode = str(pikpak_cfg.get("login_mode", "password") or "password").strip().lower()
     has_pikpak_auth = bool(pikpak_cfg.get("session")) if pikpak_mode == "token" else (
         bool(pikpak_cfg.get("username")) and bool(pikpak_cfg.get("password"))
     )
+
     aria2_cfg = cfg.get("aria2", {})
-    teldrive_token = cfg.get("teldrive", {}).get("access_token", "")
-    telegram_hash = cfg.get("telegram", {}).get("api_hash", "")
     aria2_binary = str(aria2_cfg.get("binary_path", "")).strip()
     has_aria2 = bool(aria2_cfg.get("installed")) and bool(aria2_binary) and Path(aria2_binary).exists()
 
-    # 如果核心凭证或 aria2 环境不完整，则需要弹窗引导配置
-    if not has_pikpak_auth or not has_aria2 or not teldrive_token or not telegram_hash:
+    teldrive_cfg = cfg.get("teldrive", {})
+    has_teldrive = (
+        bool(str(teldrive_cfg.get("api_host") or "").strip())
+        and bool(str(teldrive_cfg.get("access_token") or "").strip())
+        and bool(teldrive_cfg.get("channel_id"))
+    )
+
+    telegram_cfg = cfg.get("telegram", {})
+    has_telegram = (
+        bool(telegram_cfg.get("api_id"))
+        and bool(str(telegram_cfg.get("api_hash") or "").strip())
+        and bool(telegram_cfg.get("channel_id"))
+    )
+
+    telegram_db_cfg = cfg.get("telegram_db", {})
+    has_database = bool(str(telegram_db_cfg.get("host") or "").strip())
+
+    # 如果核心凭证、aria2 或中转所需配置不完整，则需要弹窗引导配置
+    if not has_pikpak_auth or not has_aria2 or not has_teldrive or not has_telegram or not has_database:
         return True
-        
+
     return False
