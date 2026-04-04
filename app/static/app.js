@@ -288,8 +288,8 @@ function switchPage(name, options = {}) {
     }
 
     const pageContent = document.querySelector('.page-content');
-    const recentPageSwitch = Date.now() - lastPageSwitchAt < 900 && lastPageSwitchName !== name;
-    const animated = !!options.animated && options.source === 'user' && !recentPageSwitch;
+    const animated = !!options.animated;
+
 
     const activateTargetPage = () => {
         document.querySelectorAll('.page').forEach(p => {
