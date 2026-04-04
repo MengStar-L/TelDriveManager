@@ -540,7 +540,134 @@
             gap: 8px;
             margin-top: 14px;
         }
+
+        .a2td-header-main {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            flex-wrap: wrap;
+            flex: 1 1 auto;
+            min-width: 0;
+        }
+        .a2td-header-main h3 {
+            margin: 0;
+            flex-shrink: 0;
+        }
+        .a2td-filter-group {
+            display: flex;
+            align-items: center;
+            flex-wrap: wrap;
+            gap: 6px;
+        }
+        .a2td-filter-btn {
+            border: 1px solid rgba(203, 213, 225, 0.95);
+            background: #f8fafc;
+            color: var(--text-secondary);
+            border-radius: 999px;
+            padding: 6px 12px;
+            font-size: 12px;
+            font-weight: 600;
+            line-height: 1;
+            cursor: pointer;
+            transition: all 0.18s ease;
+        }
+        .a2td-filter-btn:hover {
+            color: var(--accent);
+            border-color: rgba(59, 130, 246, 0.22);
+            background: #eff6ff;
+        }
+        .a2td-filter-btn.active {
+            color: var(--accent);
+            background: rgba(59, 130, 246, 0.1);
+            border-color: rgba(59, 130, 246, 0.22);
+            box-shadow: inset 0 0 0 1px rgba(59, 130, 246, 0.06);
+        }
+
+        #progressBarsContainer {
+            max-width: 840px;
+        }
+        #progressBars,
+        #a2tdEmptyPlaceholder {
+            max-width: 840px;
+        }
+        .progress-card {
+            margin-bottom: 10px;
+            border-radius: 14px;
+            padding: 13px 14px;
+            box-shadow: 0 6px 18px rgba(15, 23, 42, 0.035);
+        }
+        .progress-header {
+            align-items: flex-start;
+            gap: 10px;
+            margin-bottom: 10px;
+        }
+        .progress-filename {
+            font-size: 13px;
+            line-height: 1.35;
+        }
+        .progress-header-actions .btn-sm,
+        .progress-header-actions .a2td-filter-btn,
+        .progress-header-actions .btn-action {
+            padding: 5px 10px;
+            min-height: 30px;
+            font-size: 12px;
+        }
+        .task-meta-rows {
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+            margin-bottom: 10px;
+        }
+        .task-meta-row {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 6px;
+            align-items: center;
+            min-height: 28px;
+        }
+        .task-meta-pill {
+            display: inline-flex;
+            align-items: center;
+            gap: 5px;
+            min-width: 0;
+            max-width: 100%;
+            padding: 4px 9px;
+            border-radius: 999px;
+            font-size: 11px;
+            line-height: 1.2;
+            font-weight: 600;
+            color: #475569;
+            background: #f8fafc;
+            border: 1px solid rgba(226, 232, 240, 0.9);
+        }
+        .task-meta-pill.primary {
+            color: var(--accent);
+            background: rgba(59,130,246,0.08);
+            border-color: rgba(59,130,246,0.16);
+        }
+        .task-meta-pill.primary.upload {
+            color: #7c3aed;
+            background: rgba(139,92,246,0.1);
+            border-color: rgba(139,92,246,0.18);
+        }
+        .task-meta-pill.status {
+            color: #475569;
+            background: #fff;
+        }
+        .task-meta-pill.secondary {
+            font-weight: 500;
+            color: var(--text-secondary);
+        }
+        .task-meta-pill.warning {
+            color: #b45309;
+            background: rgba(245,158,11,0.12);
+            border-color: rgba(245,158,11,0.2);
+        }
+        .progress-bar-track {
+            margin-bottom: 8px;
+        }
     </style>
+
 
 </head>
 <body>
@@ -776,8 +903,19 @@
                     </div>
 
                     <div class="card">
-                        <div class="card-header" style="flex-wrap: wrap; gap: 10px;">
-                            <h3><i class="ph ph-hard-drives"></i> 内置引擎上传拉取队列</h3>
+                        <div class="card-header" style="flex-wrap: wrap; gap: 12px; align-items: center;">
+                            <div class="a2td-header-main">
+                                <h3><i class="ph ph-hard-drives"></i> 内置引擎上传拉取队列</h3>
+                                <div class="a2td-filter-group" id="a2tdTaskFilters">
+                                    <button class="a2td-filter-btn active" data-a2td-filter="all" onclick="setA2TDTaskFilter('all')">全部</button>
+                                    <button class="a2td-filter-btn" data-a2td-filter="downloading" onclick="setA2TDTaskFilter('downloading')">下载中</button>
+                                    <button class="a2td-filter-btn" data-a2td-filter="uploading" onclick="setA2TDTaskFilter('uploading')">上传中</button>
+                                    <button class="a2td-filter-btn" data-a2td-filter="completed" onclick="setA2TDTaskFilter('completed')">已完成</button>
+                                    <button class="a2td-filter-btn" data-a2td-filter="failed" onclick="setA2TDTaskFilter('failed')">失败</button>
+                                    <button class="a2td-filter-btn" data-a2td-filter="paused" onclick="setA2TDTaskFilter('paused')">已暂停</button>
+                                    <button class="a2td-filter-btn" data-a2td-filter="pending" onclick="setA2TDTaskFilter('pending')">等待中</button>
+                                </div>
+                            </div>
                             <div class="page-actions" style="display:flex; flex-wrap: wrap; gap:8px;">
                                 <button class="btn btn-ghost btn-sm btn-action btn-action-success" data-bulk-action="resume-all" onclick="a2tdBulkAction('resume-all')"><i class="ph ph-play"></i> 恢复全部</button>
                                 <button class="btn btn-ghost btn-sm btn-action btn-action-warning" data-bulk-action="pause-all" onclick="a2tdBulkAction('pause-all')"><i class="ph ph-pause"></i> 暂停全部</button>
@@ -785,9 +923,9 @@
                                 <button class="btn btn-ghost btn-sm btn-action btn-action-neutral" data-bulk-action="clear-completed" onclick="a2tdBulkAction('clear-completed')"><i class="ph ph-check-circle"></i> 清理已完成</button>
                                 <div style="width:1px; background:var(--border); margin: 0 4px;"></div>
                                 <button class="btn btn-ghost btn-sm btn-action btn-action-danger" data-bulk-action="clear-all" onclick="a2tdBulkAction('clear-all')"><i class="ph ph-trash"></i> 强杀清空</button>
-
                             </div>
                         </div>
+
                         <div class="card-body" style="padding:16px">
                             <!-- 实时进度条区域(内置下载引擎使用)代替原有的纯文本列表 -->
                             <div id="progressBarsContainer" style="display:none;">

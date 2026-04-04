@@ -542,9 +542,20 @@ const a2tdRemovedTaskIds = new Set();
 const a2tdPendingTaskActions = new Map();
 let a2tdRenderScheduled = false;
 let a2tdSnapshotPending = false;
+let a2tdTaskFilter = 'all';
 
+const A2TD_TASK_FILTER_LABELS = {
+    all: '全部',
+    downloading: '下载中',
+    uploading: '上传中',
+    completed: '已完成',
+    failed: '失败',
+    paused: '已暂停',
+    pending: '等待中'
+};
 
 function normalizeA2TDTaskId(taskId, fallback = '') {
+
     return String(taskId || fallback || 'unknown');
 }
 
@@ -616,9 +627,28 @@ function getA2TDTaskList() {
     });
 }
 
+function syncA2TDTaskFilterButtons() {
+    document.querySelectorAll('[data-a2td-filter]').forEach(btn => {
+        btn.classList.toggle('active', btn.dataset.a2tdFilter === a2tdTaskFilter);
+    });
+}
+
+function matchesA2TDTaskFilter(task) {
+    if (a2tdTaskFilter === 'all') return true;
+    return String(task?.status || '') === a2tdTaskFilter;
+}
+
+function setA2TDTaskFilter(filter) {
+    a2tdTaskFilter = A2TD_TASK_FILTER_LABELS[filter] ? filter : 'all';
+    syncA2TDTaskFilterButtons();
+    renderA2TDTaskStore();
+}
+
 function renderA2TDTaskStore() {
+    syncA2TDTaskFilterButtons();
     queueA2TDTaskRender();
 }
+
 
 function setA2TDTasks(tasks) {
     const previousStore = new Map(a2tdTaskStore);
@@ -1118,7 +1148,6 @@ function buildA2TDTaskCardContent(task) {
     const transferredText = mode === 'upload'
         ? `${task.transferred_text || '0 B'} / ${task.total_text || task.file_size || '--'}`
         : `${task.downloaded_text || '--'} / ${task.total_text || task.file_size || '--'}`;
-
     const speedText = task.download_speed || '0 B/s';
     const etaText = stalled
         ? '已无进度超过 15 秒'
@@ -1129,52 +1158,48 @@ function buildA2TDTaskCardContent(task) {
     const activityText = formatA2TDRelativeTime(task.last_event_at || task.updated_at || task.created_at);
     const { done: uploadChunkDone, total: uploadChunkTotal } = getA2TDUploadChunkStats(task);
     const isUploadStage = mode === 'upload' || (task.status !== 'completed' && Number(task.upload_progress || 0) > 0 && Number(task.download_progress || 0) >= 100);
-
     const actionsHtml = getA2TDTaskActions(task);
-    const inlineItems = [];
+    const primaryItems = [];
+    const secondaryItems = [];
 
-    const pushInlineItem = (text, className = 'muted') => {
+    const pushMetaItem = (target, text, className = 'muted') => {
         if (!text) return;
-        inlineItems.push(`<span class="task-inline-item ${className}">${text}</span>`);
+        target.push(`<span class="task-meta-pill ${className}">${text}</span>`);
     };
 
     if (!['downloading', 'uploading', 'completed'].includes(task.status)) {
-        pushInlineItem(statusLabel, 'status');
+        pushMetaItem(primaryItems, statusLabel, 'status');
     }
 
     if (task.status === 'completed') {
-        pushInlineItem('已完成', 'primary');
+        pushMetaItem(primaryItems, '已完成', 'primary');
+        pushMetaItem(primaryItems, `大小 ${escapeA2TDHtml(task.file_size || task.total_text || '--')}`);
     } else if (isUploadStage) {
-        pushInlineItem(
+        pushMetaItem(
+            primaryItems,
             uploadChunkTotal > 0 ? `${uploadChunkDone}/${uploadChunkTotal} 块` : '等待上传',
             'primary upload'
         );
+        pushMetaItem(primaryItems, `已确认 ${escapeA2TDHtml(transferredText)}`);
     } else {
-        pushInlineItem(`${downloadProgress}%`, 'primary');
+        pushMetaItem(primaryItems, `${downloadProgress}%`, 'primary');
+        pushMetaItem(primaryItems, `已下 ${escapeA2TDHtml(transferredText)}`);
+        if (task.status === 'downloading' && speedText && speedText !== '--') {
+            pushMetaItem(primaryItems, `速度 ${escapeA2TDHtml(speedText)}`);
+        }
     }
+
+    if ((task.status === 'downloading' || task.status === 'paused') && connectionText !== '--') {
+        pushMetaItem(secondaryItems, `连接 ${escapeA2TDHtml(connectionText)}`, 'secondary');
+    }
+    if (task.status === 'downloading' && etaText && etaText !== '--') {
+        pushMetaItem(secondaryItems, `剩余 ${escapeA2TDHtml(etaText)}`, 'secondary');
+    }
+    pushMetaItem(secondaryItems, `最近活动 ${escapeA2TDHtml(activityText)}`, 'secondary');
 
     if (stalled) {
-        pushInlineItem('<i class="ph ph-warning"></i> 疑似卡住', 'warning');
+        pushMetaItem(secondaryItems, '<i class="ph ph-warning"></i> 疑似卡住', 'warning');
     }
-
-    if (task.status === 'completed') {
-        pushInlineItem(`大小 ${escapeA2TDHtml(task.file_size || task.total_text || '--')}`);
-    } else if (isUploadStage) {
-        pushInlineItem(`已确认 ${escapeA2TDHtml(transferredText)}`);
-    } else {
-        pushInlineItem(escapeA2TDHtml(transferredText));
-        if (task.status === 'downloading' && speedText && speedText !== '--') {
-            pushInlineItem(`速度 ${escapeA2TDHtml(speedText)}`);
-        }
-        if ((task.status === 'downloading' || task.status === 'paused') && connectionText !== '--') {
-            pushInlineItem(`连接 ${escapeA2TDHtml(connectionText)}`);
-        }
-        if (task.status === 'downloading' && etaText && etaText !== '--') {
-            pushInlineItem(`剩余 ${escapeA2TDHtml(etaText)}`);
-        }
-    }
-
-    pushInlineItem(`最近活动 ${escapeA2TDHtml(activityText)}`);
 
     const uploadNote = task.upload_note
         ? `<div class="task-note ${task.upload_note_level === 'error' ? 'error' : 'warning'}"><i class="ph ${task.upload_note_level === 'error' ? 'ph-warning-circle' : 'ph-arrow-clockwise'}"></i><span>${escapeA2TDHtml(task.upload_note)}</span></div>`
@@ -1199,7 +1224,8 @@ function buildA2TDTaskCardContent(task) {
         filenameText,
         iconClass,
         actionsHtml,
-        inlineHtml: inlineItems.join(''),
+        primaryRowHtml: primaryItems.join(''),
+        secondaryRowHtml: secondaryItems.join(''),
         barClass,
         progressWidth: `${progress}%`,
         notesHtml: `${uploadNote}${errorNote}${stalledNote}`
@@ -1225,7 +1251,10 @@ function createA2TDTaskCardElement(task, view) {
             </div>
             <div class="progress-header-actions" data-role="actions"></div>
         </div>
-        <div class="task-inline-row" data-role="inline"></div>
+        <div class="task-meta-rows">
+            <div class="task-meta-row primary" data-role="row-primary"></div>
+            <div class="task-meta-row secondary" data-role="row-secondary"></div>
+        </div>
         <div class="progress-bar-track">
             <div class="progress-bar-fill" data-role="bar"></div>
         </div>
@@ -1242,7 +1271,8 @@ function patchA2TDTaskCardElement(card, view) {
     const iconEl = card.querySelector('[data-role="icon"]');
     const nameEl = card.querySelector('[data-role="name"]');
     const actionsEl = card.querySelector('[data-role="actions"]');
-    const inlineEl = card.querySelector('[data-role="inline"]');
+    const primaryRowEl = card.querySelector('[data-role="row-primary"]');
+    const secondaryRowEl = card.querySelector('[data-role="row-secondary"]');
     const barEl = card.querySelector('[data-role="bar"]');
     const notesEl = card.querySelector('[data-role="notes"]');
 
@@ -1250,7 +1280,9 @@ function patchA2TDTaskCardElement(card, view) {
     if (iconEl && iconEl.className !== nextIconClass) iconEl.className = nextIconClass;
     if (nameEl && nameEl.textContent !== view.filenameText) nameEl.textContent = view.filenameText;
     setA2TDHtmlIfChanged(actionsEl, view.actionsHtml);
-    setA2TDHtmlIfChanged(inlineEl, view.inlineHtml);
+    setA2TDHtmlIfChanged(primaryRowEl, view.primaryRowHtml);
+    setA2TDHtmlIfChanged(secondaryRowEl, view.secondaryRowHtml);
+    if (secondaryRowEl) secondaryRowEl.style.display = view.secondaryRowHtml ? 'flex' : 'none';
     if (barEl && barEl.className !== view.barClass) barEl.className = view.barClass;
     if (barEl && barEl.style.width !== view.progressWidth) barEl.style.width = view.progressWidth;
     setA2TDHtmlIfChanged(notesEl, view.notesHtml);
@@ -1262,19 +1294,30 @@ function renderA2TDTasks(tasks) {
     const placeholder = document.getElementById('a2tdEmptyPlaceholder');
     if (!container || !barsEl || !placeholder) return;
 
-    if (!Array.isArray(tasks) || tasks.length === 0) {
+    const sourceTasks = Array.isArray(tasks) ? tasks : [];
+    const visibleTasks = sourceTasks.filter(matchesA2TDTaskFilter);
+
+    if (sourceTasks.length === 0) {
         barsEl.innerHTML = '';
         container.style.display = 'none';
         placeholder.style.display = 'block';
+        placeholder.innerHTML = '<i class="ph ph-tray"></i> 队列空闲中';
+        return;
+    }
+
+    if (visibleTasks.length === 0) {
+        barsEl.innerHTML = '';
+        container.style.display = 'none';
+        placeholder.style.display = 'block';
+        placeholder.innerHTML = `<i class="ph ph-funnel"></i> 当前筛选“${escapeA2TDHtml(A2TD_TASK_FILTER_LABELS[a2tdTaskFilter] || '全部')}”下暂无任务`;
         return;
     }
 
     container.style.display = 'block';
     placeholder.style.display = 'none';
 
-
     const activeIds = new Set();
-    tasks.forEach((task, index) => {
+    visibleTasks.forEach((task, index) => {
         const cardId = getA2TDTaskCardId(task);
         const view = buildA2TDTaskCardContent(task);
         let card = document.getElementById(cardId);
@@ -1295,6 +1338,7 @@ function renderA2TDTasks(tasks) {
         if (!activeIds.has(card.id)) card.remove();
     });
 }
+
 
 
 
