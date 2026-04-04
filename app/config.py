@@ -49,6 +49,7 @@ DEFAULTS: dict[str, Any] = {
         "rpc_url": "http://127.0.0.1",
         "rpc_port": 6822,
         "rpc_secret": "",
+        "allow_remote_access": False,
         "max_concurrent": 3,
         "split": 8,
         "max_connection_per_server": 8,
@@ -164,6 +165,8 @@ def _normalize_config(merged: dict, raw: dict | None = None) -> dict:
     aria2_cfg["download_dir"] = FIXED_DOWNLOAD_DIR
     aria2_cfg["rpc_url"] = "http://127.0.0.1"
     aria2_cfg["rpc_port"] = int(aria2_cfg.get("rpc_port") or 6822)
+    aria2_cfg["rpc_secret"] = str(aria2_cfg.get("rpc_secret") or "").strip()
+    aria2_cfg["allow_remote_access"] = bool(aria2_cfg.get("allow_remote_access", False))
     aria2_cfg["max_concurrent"] = max(1, int(aria2_cfg.get("max_concurrent") or 3))
     aria2_cfg["split"] = max(1, int(aria2_cfg.get("split") or 8))
     aria2_cfg["max_connection_per_server"] = max(1, int(aria2_cfg.get("max_connection_per_server") or 8))

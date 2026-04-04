@@ -1111,15 +1111,21 @@
                                 </div>
                                 <div class="field-grid">
                                     <div class="form-group"><label>RPC 端口</label><input class="form-input" type="number" id="cfgAria2Port" min="1" max="65535" placeholder="6800"></div>
-                                    <div class="form-group"><label>RPC Secret</label><input class="form-input" type="password" id="cfgAria2Secret" placeholder="首次安装后会自动生成"></div>
+                                    <div class="form-group"><label>aria2 RPC 密码</label><input class="form-input" type="password" id="cfgAria2Secret" placeholder="首次安装后会自动生成，建议外部访问时必填"></div>
                                     <div class="form-group"><label>最大并发下载</label><input class="form-input" type="number" id="cfgAria2MaxConcurrent" min="1" max="32" placeholder="3"></div>
                                     <div class="form-group"><label>单任务分块数</label><input class="form-input" type="number" id="cfgAria2Split" min="1" max="64" placeholder="8"></div>
                                     <div class="form-group"><label>单服务器最大连接数</label><input class="form-input" type="number" id="cfgAria2MaxConnPerServer" min="1" max="64" placeholder="8"></div>
                                     <div class="form-group"><label>最小分块大小 (MB)</label><input class="form-input" type="number" id="cfgAria2MinSplitSize" min="1" max="1024" placeholder="5"></div>
                                 </div>
                                 <div class="field-grid cols-1">
-                                    <div class="form-group"><label>RPC 地址</label><input class="form-input" type="text" id="cfgAria2Url" placeholder="http://127.0.0.1" readonly></div>
+                                    <label class="toggle-row" style="justify-content:space-between">
+                                        允许外部设备访问 aria2 RPC
+                                        <div class="toggle-switch"><input type="checkbox" id="cfgAria2AllowRemoteAccess"><span class="toggle-slider"></span></div>
+                                    </label>
+                                    <div class="wizard-note">开启后 aria2 将监听全部网卡地址。外部客户端请使用当前主机 IP + 上方端口连接，并强烈建议同时设置 RPC 密码。</div>
+                                    <div class="form-group"><label>RPC 地址（程序内部固定使用）</label><input class="form-input" type="text" id="cfgAria2Url" placeholder="http://127.0.0.1" readonly></div>
                                 </div>
+
                             </div>
                         </div>
 
@@ -1314,7 +1320,7 @@
 
             <!-- Step 3: Aria2 Params -->
             <div class="wizard-step" id="wStep3">
-                <div class="wizard-note" style="margin-bottom:8px;">aria2 下载目录已固定为程序目录下的 <code>downloads</code>，这里只需要配置下载参数。</div>
+                <div class="wizard-note" style="margin-bottom:8px;">aria2 下载目录已固定为程序目录下的 <code>downloads</code>，这里只需要配置下载参数、外部访问策略和 RPC 密码。</div>
                 <div class="field-grid">
                     <div class="form-group">
                         <label>最大并发下载</label>
@@ -1333,7 +1339,19 @@
                         <input class="form-input" type="number" id="wAria2MinSplitSize" min="1" max="1024" placeholder="5">
                     </div>
                 </div>
+                <div class="field-grid cols-1" style="margin-top:12px;">
+                    <div class="form-group">
+                        <label>aria2 RPC 密码</label>
+                        <input class="form-input" type="password" id="wAria2Secret" placeholder="首次安装后会自动生成，建议外部访问时必填">
+                    </div>
+                    <label class="toggle-row" style="justify-content:space-between">
+                        允许外部设备访问 aria2 RPC
+                        <div class="toggle-switch"><input type="checkbox" id="wAria2AllowRemoteAccess"><span class="toggle-slider"></span></div>
+                    </label>
+                    <div class="wizard-note">开启后 aria2 会监听全部网卡地址。外部客户端请使用当前设备 IP + RPC 端口连接，建议务必设置上面的 RPC 密码。</div>
+                </div>
                 <div class="wizard-footer">
+
                     <button class="btn btn-ghost" onclick="wizardNext(3, 2, this)"><i class="ph ph-arrow-left"></i> 上一步</button>
                     <button class="btn btn-primary" onclick="wizardNext(3, 4)">下一步 <i class="ph ph-arrow-right"></i></button>
                 </div>

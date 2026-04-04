@@ -267,30 +267,42 @@ function fillWizardInputs(data = {}) {
         document.getElementById('wDbUser').value = data.telegram_db?.user || 'postgres';
         updateWizardAria2Os(data.aria2?.os_type || document.getElementById('wAria2Os')?.value || '');
         document.getElementById('wAria2MaxConcurrent').value = data.aria2?.max_concurrent || 3;
-
         document.getElementById('wAria2Split').value = data.aria2?.split || 8;
         document.getElementById('wAria2MaxConnPerServer').value = data.aria2?.max_connection_per_server || 8;
         document.getElementById('wAria2MinSplitSize').value = data.aria2?.min_split_size_mb || 5;
+        document.getElementById('wAria2Secret').value = data.aria2?.rpc_secret || '';
+        document.getElementById('wAria2AllowRemoteAccess').checked = !!data.aria2?.allow_remote_access;
     } catch (e) {
         console.warn('填充向导配置失败', e);
     }
 }
 
 
+function validateAria2AccessConfig(aria2 = {}) {
+    if (aria2.allow_remote_access && !String(aria2.rpc_secret || '').trim()) {
+        throw new Error('开启外部访问时必须设置 aria2 RPC 密码');
+    }
+}
+
+
 function getWizardAria2Config() {
     const existing = window.currentConfig?.aria2 || {};
-    const portInput = document.getElementById('cfgAria2Port');
-    const secretInput = document.getElementById('cfgAria2Secret');
-    return {
-        rpc_port: Math.max(1, parseInt(portInput?.value || existing.rpc_port || '6822', 10) || 6822),
-
+    const wizardPortInput = document.getElementById('wAria2Port');
+    const settingsPortInput = document.getElementById('cfgAria2Port');
+    const secretInput = document.getElementById('wAria2Secret');
+    const aria2 = {
+        rpc_port: Math.max(1, parseInt(wizardPortInput?.value || settingsPortInput?.value || existing.rpc_port || '6822', 10) || 6822),
         rpc_secret: (secretInput?.value ?? existing.rpc_secret ?? '').trim(),
+        allow_remote_access: !!document.getElementById('wAria2AllowRemoteAccess')?.checked,
         max_concurrent: Math.max(1, parseInt(document.getElementById('wAria2MaxConcurrent').value, 10) || existing.max_concurrent || 3),
         split: Math.max(1, parseInt(document.getElementById('wAria2Split').value, 10) || existing.split || 8),
         max_connection_per_server: Math.max(1, parseInt(document.getElementById('wAria2MaxConnPerServer').value, 10) || existing.max_connection_per_server || 8),
         min_split_size_mb: Math.max(1, parseInt(document.getElementById('wAria2MinSplitSize').value, 10) || existing.min_split_size_mb || 5),
     };
+    validateAria2AccessConfig(aria2);
+    return aria2;
 }
+
 
 
 function setStatusBadge(el, status, text) {
@@ -1948,11 +1960,13 @@ function collectSettingsConfig() {
             rpc_url: document.getElementById('cfgAria2Url').value || currentAria2.rpc_url || 'http://127.0.0.1',
             rpc_port: Math.max(1, parseInt(document.getElementById('cfgAria2Port').value, 10) || currentAria2.rpc_port || 6800),
             rpc_secret: document.getElementById('cfgAria2Secret').value.trim(),
+            allow_remote_access: !!document.getElementById('cfgAria2AllowRemoteAccess').checked,
             max_concurrent: Math.max(1, parseInt(document.getElementById('cfgAria2MaxConcurrent').value, 10) || currentAria2.max_concurrent || 3),
             split: Math.max(1, parseInt(document.getElementById('cfgAria2Split').value, 10) || currentAria2.split || 8),
             max_connection_per_server: Math.max(1, parseInt(document.getElementById('cfgAria2MaxConnPerServer').value, 10) || currentAria2.max_connection_per_server || 8),
             min_split_size_mb: Math.max(1, parseInt(document.getElementById('cfgAria2MinSplitSize').value, 10) || currentAria2.min_split_size_mb || 5),
         },
+
         teldrive: {
             api_host: document.getElementById('cfgTeldriveHost').value,
             access_token: document.getElementById('cfgTeldriveToken').value,
@@ -2004,11 +2018,13 @@ async function loadConfig() {
         document.getElementById('cfgAria2Url').value = cfg.aria2?.rpc_url || 'http://127.0.0.1';
         document.getElementById('cfgAria2Port').value = cfg.aria2?.rpc_port || 6800;
         document.getElementById('cfgAria2Secret').value = cfg.aria2?.rpc_secret || '';
+        document.getElementById('cfgAria2AllowRemoteAccess').checked = !!cfg.aria2?.allow_remote_access;
         document.getElementById('cfgAria2MaxConcurrent').value = cfg.aria2?.max_concurrent || 3;
         document.getElementById('cfgAria2Split').value = cfg.aria2?.split || 8;
         document.getElementById('cfgAria2MaxConnPerServer').value = cfg.aria2?.max_connection_per_server || 8;
         document.getElementById('cfgAria2MinSplitSize').value = cfg.aria2?.min_split_size_mb || 5;
         document.getElementById('cfgAria2BinaryPath').textContent = cfg.aria2?.binary_path || '--';
+
         document.getElementById('cfgAria2DownloadDirText').textContent = cfg.aria2?.download_dir || '--';
 
         document.getElementById('cfgTeldriveHost').value = cfg.teldrive?.api_host || '';
@@ -2045,6 +2061,8 @@ async function saveConfig() {
     
 
     try {
+        validateAria2AccessConfig(cfg.aria2);
+
         const resp = await fetch('/api/settings', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(cfg) });
         if (resp.ok) { 
             const msg = document.getElementById('saveMsg'); 

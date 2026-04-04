@@ -154,11 +154,13 @@ class Aria2Service:
             "binary_path",
             "rpc_port",
             "rpc_secret",
+            "allow_remote_access",
             "max_concurrent",
             "split",
             "max_connection_per_server",
             "min_split_size_mb",
         }
+
         changed = any(prev_aria2.get(key) != curr_aria2.get(key) for key in keys)
         if not self.is_installed(current):
             return
@@ -186,8 +188,9 @@ class Aria2Service:
         command = [
             str(binary_path),
             "--enable-rpc=true",
-            "--rpc-listen-all=false",
+            f"--rpc-listen-all={'true' if aria2_cfg.get('allow_remote_access') else 'false'}",
             "--rpc-allow-origin-all=true",
+
             f"--rpc-listen-port={int(aria2_cfg.get('rpc_port') or 6800)}",
             f"--dir={FIXED_DOWNLOAD_DIR}",
             f"--max-concurrent-downloads={int(aria2_cfg.get('max_concurrent') or 3)}",
@@ -446,7 +449,9 @@ class Aria2Service:
                 "rpc_url": "http://127.0.0.1",
                 "rpc_port": int(aria2_cfg.get("rpc_port") or 6800),
                 "rpc_secret": secret,
+                "allow_remote_access": bool(aria2_cfg.get("allow_remote_access", False)),
                 "download_dir": FIXED_DOWNLOAD_DIR,
+
                 "max_concurrent": int(aria2_cfg.get("max_concurrent") or 3),
                 "split": int(aria2_cfg.get("split") or 8),
                 "max_connection_per_server": int(aria2_cfg.get("max_connection_per_server") or 8),
