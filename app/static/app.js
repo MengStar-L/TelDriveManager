@@ -1854,6 +1854,8 @@ function appendT2TDLog(log) {
 
 let magnetCurrentFileId = null;
 let magnetFileData = [];
+let magnetDownloadSubmitting = false;
+
 
 // === Magnet Parsing ===
 async function parseMagnet() {
@@ -1928,7 +1930,8 @@ function toggleMagnetSelectAll() {
 }
 
 async function downloadMagnetFiles() {
-    if (!magnetCurrentFileId) return;
+    if (!magnetCurrentFileId || magnetDownloadSubmitting) return;
+
     const checkboxes = document.querySelectorAll('#magnetFileList input[type="checkbox"]:checked');
     const selectedIds = Array.from(checkboxes).map(cb => cb.value);
     
@@ -1938,8 +1941,11 @@ async function downloadMagnetFiles() {
 
     const keepStructure = document.getElementById('magnetKeepStructure').checked;
     const btn = document.getElementById('magnetDownloadBtn');
+    if(!btn) return;
+    magnetDownloadSubmitting = true;
     btn.disabled = true;
     btn.innerHTML = '<span class="spinner"></span> 提交中...';
+
 
     try {
         const resp = await fetch('/api/pikpak/magnet/download', {
@@ -1958,10 +1964,9 @@ async function downloadMagnetFiles() {
     } catch(e) {
         alert(e.message);
     } finally {
+        magnetDownloadSubmitting = false;
         btn.disabled = false;
         btn.innerHTML = '<i class="ph ph-download-simple"></i> 推送下载链接';
-
-
     }
 }
 
@@ -1969,8 +1974,10 @@ async function downloadMagnetFiles() {
 // === Share Parsing ===
 let shareCurrentData = null;
 let shareFileData = [];
+let shareDownloadSubmitting = false;
 
 async function parseShareLink() {
+
     const shareLink = document.getElementById('shareLink').value.trim();
     const passCode = document.getElementById('sharePassCode').value.trim();
     if (!shareLink) return alert('请输入 分享链接');
@@ -2015,7 +2022,7 @@ function reRenderShareFileList() {
 }
 
 async function downloadShareFiles() {
-    if (!shareCurrentData) return;
+    if (!shareCurrentData || shareDownloadSubmitting) return;
     const checkboxes = document.querySelectorAll('#fileList input[type="checkbox"]:checked');
     const selectedIds = Array.from(checkboxes).map(cb => cb.value);
     
@@ -2032,6 +2039,7 @@ async function downloadShareFiles() {
     const btn = document.getElementById('downloadShareBtn');
 
     if(!btn) return;
+    shareDownloadSubmitting = true;
     btn.disabled = true;
     btn.innerHTML = '<span class="spinner"></span> 同步中...';
 
@@ -2056,14 +2064,17 @@ async function downloadShareFiles() {
     } catch(e) {
         alert(e.message);
     } finally {
+        shareDownloadSubmitting = false;
         btn.disabled = false;
         btn.innerHTML = '<i class="ph ph-cloud-arrow-down"></i> 执行下载';
 
     }
 }
 
+
 // === RSS Parsing ===
 let rssFileData = [];
+let rssDownloadSubmitting = false;
 
 async function parseRSS() {
     const url = document.getElementById('rssUrl').value.trim();
@@ -2105,6 +2116,7 @@ function toggleRssSelectAll() {
 }
 
 async function downloadRssItems() {
+    if (rssDownloadSubmitting) return;
     const checkboxes = document.querySelectorAll('#rssList input[type="checkbox"]:checked');
     const selectedUrls = Array.from(checkboxes).map(cb => cb.value);
     
@@ -2112,10 +2124,12 @@ async function downloadRssItems() {
 
     const btn = document.getElementById('rssDownloadBtn');
     if(!btn) return;
+    rssDownloadSubmitting = true;
     btn.disabled = true;
     btn.innerHTML = '<span class="spinner"></span> 提交中...';
 
     try {
+
         const resp = await fetch('/api/pikpak/rss/download', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -2128,9 +2142,9 @@ async function downloadRssItems() {
     } catch(e) {
         alert(e.message);
     } finally {
+        rssDownloadSubmitting = false;
         btn.disabled = false;
         btn.innerHTML = '<i class="ph ph-download-simple"></i> 执行订阅下载';
-
     }
 }
 

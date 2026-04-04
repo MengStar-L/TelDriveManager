@@ -26,6 +26,8 @@ router = APIRouter(prefix="/api/pikpak")
 _pikpak: Optional[PikPakClient] = None
 _aria2: Optional[Aria2Client] = None
 _ws_clients: Set[WebSocket] = set()
+_active_share_download_jobs: Set[str] = set()
+_share_download_jobs_lock = asyncio.Lock()
 
 
 def _format_size(size: int) -> str:
@@ -109,6 +111,68 @@ def _get_log_size(file_info: Dict[str, str]) -> str:
 
 def _get_push_target_label(engine: str) -> str:
     return "内置下载队列" if engine == "builtin" else "下载链接接收端"
+
+
+def _normalize_selected_ids(file_ids: List[str]) -> List[str]:
+    normalized: List[str] = []
+    seen: Set[str] = set()
+    for file_id in file_ids or []:
+        value = str(file_id or "").strip()
+        if not value or value in seen:
+            continue
+        seen.add(value)
+        normalized.append(value)
+    return normalized
+
+
+def _build_file_dedupe_key(file_info: Dict[str, str]) -> tuple:
+    file_id = str(file_info.get("file_id") or "").strip()
+    url = str(file_info.get("url") or "").strip()
+    path = str(file_info.get("path") or "").strip()
+    name = str(file_info.get("name") or "").strip()
+    size = str(file_info.get("size") or "").strip()
+    if file_id:
+        return ("file_id", file_id)
+    if url:
+        return ("url", url)
+    if path:
+        return ("path", path)
+    return ("name", name, size)
+
+
+def _dedupe_file_entries(files: List[dict]) -> List[dict]:
+    deduped: List[dict] = []
+    seen: Set[tuple] = set()
+    for file_info in files or []:
+        if not file_info:
+            continue
+        key = _build_file_dedupe_key(file_info)
+        if key in seen:
+            logger.warning(f"检测到重复文件条目，已跳过: {file_info.get('path') or file_info.get('name') or '未知文件'}")
+            continue
+        seen.add(key)
+        deduped.append(file_info)
+    return deduped
+
+
+def _make_share_download_job_key(share_id: str, file_ids: List[str]) -> str:
+    normalized_ids = sorted(_normalize_selected_ids(file_ids))
+    return f"{share_id}:{'|'.join(normalized_ids)}"
+
+
+async def _register_share_download_job(job_key: str) -> bool:
+    async with _share_download_jobs_lock:
+        if job_key in _active_share_download_jobs:
+            return False
+        _active_share_download_jobs.add(job_key)
+        return True
+
+
+async def _release_share_download_job(job_key: str):
+    if not job_key:
+        return
+    async with _share_download_jobs_lock:
+        _active_share_download_jobs.discard(job_key)
 
 
 async def _broadcast_resolved_files(index: int, files: List[dict]):
@@ -379,16 +443,25 @@ async def api_share_list(request: Request):
 async def api_share_download(request: Request):
     try:
         body = await request.json()
-        share_id = body.get("share_id", "")
-        file_ids = body.get("file_ids", [])
+        share_id = str(body.get("share_id", "") or "").strip()
+        file_ids = _normalize_selected_ids(body.get("file_ids", []))
         pass_code_token = body.get("pass_code_token", "")
         keep_structure = body.get("keep_structure", True)
         file_paths = body.get("file_paths", {})
         rename_by_folder = body.get("rename_by_folder", False)
         if not share_id or not file_ids:
             return JSONResponse({"error": "缺少参数"}, status_code=400)
-        asyncio.create_task(_process_share_download(
-            share_id, file_ids, pass_code_token, keep_structure, file_paths, rename_by_folder))
+
+        job_key = _make_share_download_job_key(share_id, file_ids)
+        if not await _register_share_download_job(job_key):
+            return JSONResponse({"error": "相同分享文件任务正在处理中，请勿重复提交"}, status_code=409)
+
+        try:
+            asyncio.create_task(_process_share_download(
+                share_id, file_ids, pass_code_token, keep_structure, file_paths, rename_by_folder, job_key=job_key))
+        except Exception:
+            await _release_share_download_job(job_key)
+            raise
         return {"message": f"开始处理 {len(file_ids)} 个文件"}
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
@@ -780,10 +853,11 @@ async def _process_magnet_selected(root_file_id: str, selected_ids: List[str],
 
 async def _process_share_download(share_id: str, file_ids: List[str], pass_code_token: str,
                                    keep_structure: bool = True, file_paths: Dict[str, str] = None,
-                                   rename_by_folder: bool = False):
+                                   rename_by_folder: bool = False, job_key: str = ""):
     saved_ids: List[str] = []
     try:
         await _ensure_clients()
+        file_ids = _normalize_selected_ids(file_ids)
         total = len(file_ids)
         cfg = load_config()
         engine = _get_engine()
@@ -795,7 +869,7 @@ async def _process_share_download(share_id: str, file_ids: List[str], pass_code_
                           "magnet": f"分享文件 ({total} 个)"})
         await _broadcast({"type": "task_status", "index": 1,
                           "status": "正在保存分享内容到 PikPak 网盘..."})
-        saved_ids = await _pikpak.save_share_files(share_id, file_ids, pass_code_token)
+        saved_ids = _normalize_selected_ids(await _pikpak.save_share_files(share_id, file_ids, pass_code_token))
         if not saved_ids:
             await _broadcast({"type": "task_error", "index": 1, "message": "保存失败，未获取到文件"})
             return
@@ -834,6 +908,7 @@ async def _process_share_download(share_id: str, file_ids: List[str], pass_code_
             await _broadcast_resolved_files(i, urls)
             all_urls.extend(urls)
 
+        all_urls = _dedupe_file_entries(all_urls)
         if not all_urls:
             await _broadcast({"type": "error", "message": "所有文件链接获取失败"})
             return
@@ -894,3 +969,5 @@ async def _process_share_download(share_id: str, file_ids: List[str], pass_code_
         await _broadcast({"type": "all_done", "total": total})
     except Exception as e:
         await _broadcast({"type": "error", "message": f"分享下载失败: {e}"})
+    finally:
+        await _release_share_download_job(job_key)

@@ -254,13 +254,97 @@ class TaskManager:
         task = downloader.get_task(task_id)
         if not task:
             return {}
+        task_dict = task.to_dict()
         total_size = int(task.total_size or 0)
         progress = round(task.downloaded / total_size * 100, 1) if total_size > 0 else 0
         return {
+            "url": task.url,
+            "filename": task.filename,
+            "status": task.status.value,
             "download_progress": progress,
-            "file_size": task.to_dict()["total_str"],
-            "download_speed": task.to_dict()["speed_str"] if task.status == TaskStatus.DOWNLOADING else "",
+            "file_size": task_dict["total_str"],
+            "download_speed": task_dict["speed_str"] if task.status == TaskStatus.DOWNLOADING else "",
+            "local_path": str(task.dest_path),
+            "error": task.error or None,
         }
+
+
+    @staticmethod
+    def _task_field_changed(current_value, next_value) -> bool:
+        if isinstance(next_value, float):
+            try:
+                return abs(float(current_value or 0) - next_value) >= 0.1
+            except (TypeError, ValueError):
+                return True
+        return current_value != next_value
+
+    async def _sync_single_builtin_task_into_db(self, task_id: str, existing_task: Optional[dict] = None) -> Optional[dict]:
+        snapshot = self._get_builtin_task_snapshot(task_id)
+        if not snapshot:
+            return existing_task
+
+        task = existing_task or await db.get_task(task_id)
+        if not task:
+            await db.add_task(
+                task_id,
+                snapshot.get("url", "") or "",
+                snapshot.get("filename"),
+                self.config["teldrive"].get("target_path", "/")
+            )
+            task = await db.get_task(task_id)
+
+        if not task:
+            task = {
+                "task_id": task_id,
+                "url": snapshot.get("url", "") or "",
+                "filename": snapshot.get("filename"),
+                "status": "pending",
+                "download_progress": 0.0,
+                "upload_progress": 0.0,
+                "download_speed": "",
+                "upload_speed": "",
+                "file_size": "",
+                "error": None,
+                "teldrive_path": self.config["teldrive"].get("target_path", "/"),
+                "aria2_gid": None,
+                "local_path": snapshot.get("local_path"),
+                "created_at": None,
+                "updated_at": None,
+            }
+
+        persisted_fields = (
+            "url",
+            "filename",
+            "status",
+            "download_progress",
+            "download_speed",
+            "file_size",
+            "local_path",
+            "error",
+        )
+        update_data = {}
+        for key in persisted_fields:
+            value = snapshot.get(key)
+            if self._task_field_changed(task.get(key), value):
+                update_data[key] = value
+
+        if update_data:
+            await db.update_task(task_id, **update_data)
+            task = {**task, **update_data}
+
+        return {**task, **snapshot}
+
+    async def _sync_builtin_cache_into_db(self):
+        for builtin_task in downloader.get_all_tasks():
+            await self._sync_single_builtin_task_into_db(builtin_task.task_id)
+
+    async def _merge_builtin_task_snapshot(self, task: Optional[dict]) -> Optional[dict]:
+        if not task:
+            return None
+        if self._is_builtin_task_record(task):
+            task = await self._sync_single_builtin_task_into_db(task["task_id"], task)
+        return self._merge_runtime_task_fields(task)
+
 
     def _set_runtime_task_fields(self, task_id: str, **kwargs):
         task_id = str(task_id or "")
@@ -1551,12 +1635,26 @@ class TaskManager:
 
     async def get_all_tasks(self) -> list:
         """获取所有任务"""
+        await self._sync_builtin_cache_into_db()
         tasks = await db.get_all_tasks()
-        return [self._merge_runtime_task_fields(task) for task in tasks]
+        result = []
+        for task in tasks:
+            merged_task = await self._merge_builtin_task_snapshot(task)
+            if merged_task:
+                result.append(merged_task)
+        return result
 
     async def get_task(self, task_id: str) -> Optional[dict]:
         """获取单个任务"""
-        return self._merge_runtime_task_fields(await db.get_task(task_id))
+        task = await db.get_task(task_id)
+        if task:
+            return await self._merge_builtin_task_snapshot(task)
+
+        synced_task = await self._sync_single_builtin_task_into_db(task_id)
+        if synced_task:
+            return self._merge_runtime_task_fields(synced_task)
+        return None
+
 
 
 
