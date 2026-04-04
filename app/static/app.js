@@ -324,9 +324,10 @@ function switchPage(name, options = {}) {
             pageSwitchCleanupTimer = null;
             pageContent.classList.remove('page-switching');
             targetPage.classList.remove('page-enter', 'page-enter-active');
-        }, 420);
-    }, 140);
+        }, 480);
+    }, 180);
 }
+
 
 
 function scheduleGuidedPageSwitch(name, message = '', delay = 620) {

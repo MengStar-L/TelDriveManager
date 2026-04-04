@@ -677,8 +677,25 @@ class TaskManager:
         self._active_uploads = max(0, self._active_uploads - 1)
         self._upload_slot_event.set()
 
+    async def upload_local_with_slot(self, task_id: str, local_path: str,
+                                     teldrive_path: str = "/",
+                                     auto_delete_local: bool = False):
+        """供内置下载链路复用：上传前统一占用全局上传槽位。"""
+        await self._wait_upload_slot()
+        try:
+            if os.path.isdir(local_path):
+                await self._upload_directory(task_id, local_path, teldrive_path)
+            else:
+                await self._upload(task_id, local_path, teldrive_path)
+
+            if auto_delete_local:
+                await self._auto_delete_local(task_id, local_path)
+        finally:
+            self._release_upload_slot()
+
     @staticmethod
     def _calc_upload_timeout(file_size: int) -> int:
+
         """根据文件大小动态计算上传超时（秒）。
 
         保底 600s (10分钟) + 每 GB 额外 600s (10分钟)。

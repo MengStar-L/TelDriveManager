@@ -76,26 +76,41 @@
         /* ── Pages ── */
         .page-content { flex: 1; min-height: 0; overflow-y: auto; padding-bottom: 20px; scrollbar-width: none; position: relative; }
         .page-content::-webkit-scrollbar { display: none; }
-        .page { display: none; transform-origin: top center; }
+        .page { display: none; transform-origin: top center; will-change: opacity, transform, filter; }
         .page.active { display: block; }
 
-        .page.page-exit { animation: pageExit 0.16s ease forwards; }
-        .page.page-enter.page-enter-active { animation: pageEnterSmooth 0.42s cubic-bezier(0.16, 1, 0.3, 1) forwards; }
+        .page.page-exit { animation: pageExit 0.28s cubic-bezier(0.4, 0, 0.2, 1) forwards; }
+        .page.page-enter.page-enter-active { animation: pageEnterSmooth 0.48s cubic-bezier(0.16, 1, 0.3, 1) forwards; }
+        .page-content.page-switching::before,
         .page-content.page-switching::after {
             content: '';
             position: absolute;
             inset: 0;
             border-radius: 24px;
             pointer-events: none;
-            background: linear-gradient(180deg, rgba(255,255,255,0.18), rgba(255,255,255,0.42));
-            backdrop-filter: blur(4px);
-            -webkit-backdrop-filter: blur(4px);
-            animation: pageSwitchMask 0.42s ease;
+        }
+        .page-content.page-switching::before {
+            background: radial-gradient(circle at top, rgba(255,255,255,0.26), transparent 58%);
+            animation: pageSwitchGlow 0.48s ease forwards;
+        }
+        .page-content.page-switching::after {
+            background: linear-gradient(180deg, rgba(255,255,255,0.12), rgba(255,255,255,0.3));
+            backdrop-filter: blur(8px);
+            -webkit-backdrop-filter: blur(8px);
+            animation: pageSwitchMask 0.48s ease forwards;
         }
         @keyframes slideUp { from { opacity: 0; transform: translateY(16px); } to { opacity: 1; transform: translateY(0); } }
-        @keyframes pageExit { from { opacity: 1; transform: translateY(0) scale(1); } to { opacity: 0; transform: translateY(-10px) scale(0.985); } }
-        @keyframes pageEnterSmooth { from { opacity: 0; transform: translateY(18px) scale(0.985); filter: blur(6px); } to { opacity: 1; transform: translateY(0) scale(1); filter: blur(0); } }
-        @keyframes pageSwitchMask { from { opacity: 0; } 40% { opacity: 1; } to { opacity: 0; } }
+        @keyframes pageExit {
+            from { opacity: 1; transform: translateY(0) scale(1); filter: blur(0); }
+            to { opacity: 0; transform: translateY(-12px) scale(0.988); filter: blur(10px); }
+        }
+        @keyframes pageEnterSmooth {
+            from { opacity: 0; transform: translateY(18px) scale(0.988); filter: blur(12px); }
+            to { opacity: 1; transform: translateY(0) scale(1); filter: blur(0); }
+        }
+        @keyframes pageSwitchMask { from { opacity: 0; } 35% { opacity: 1; } to { opacity: 0; } }
+        @keyframes pageSwitchGlow { from { opacity: 0; } 50% { opacity: 0.9; } to { opacity: 0; } }
+
 
 
         /* ── Card ── */
@@ -532,43 +547,45 @@
         <nav class="sidebar">
             <div class="sidebar-logo"><i class="ph-fill ph-rocket"></i></div>
             
-                        <div class="nav-item active" data-page="magnet" data-tooltip="磁链解析" onclick="switchPage('magnet')">
+                        <div class="nav-item active" data-page="magnet" data-tooltip="磁链解析" onclick="switchPage('magnet', { animated: true, source: 'user' })">
                 <i class="ph ph-link"></i>
             </div>
-            <div class="nav-item" data-page="share" data-tooltip="Pik分享" onclick="switchPage('share')">
+            <div class="nav-item" data-page="share" data-tooltip="Pik分享" onclick="switchPage('share', { animated: true, source: 'user' })">
                 <i class="ph ph-share-network"></i>
             </div>
-            <div class="nav-item" data-page="rss" data-tooltip="RSS订阅" onclick="switchPage('rss')">
+            <div class="nav-item" data-page="rss" data-tooltip="RSS订阅" onclick="switchPage('rss', { animated: true, source: 'user' })">
                 <i class="ph ph-rss"></i>
             </div>
-            <div class="nav-item" data-page="tasks" data-tooltip="Pik离线任务" onclick="switchPage('tasks')">
+            <div class="nav-item" data-page="tasks" data-tooltip="Pik离线任务" onclick="switchPage('tasks', { animated: true, source: 'user' })">
                 <i class="ph ph-cloud-arrow-down"></i>
             </div>
-            <div class="nav-item" data-page="progress" data-tooltip="下载链接推送" onclick="switchPage('progress')">
+            <div class="nav-item" data-page="progress" data-tooltip="下载链接推送" onclick="switchPage('progress', { animated: true, source: 'user' })">
 
                 <i class="ph ph-list-dashes"></i>
             </div>
 
             <!-- Aria2TelDrive -->
-            <div class="nav-item" data-page="aria2teldrive" data-tooltip="下载与上传监控" onclick="switchPage('aria2teldrive')">
+            <div class="nav-item" data-page="aria2teldrive" data-tooltip="下载与上传监控" onclick="switchPage('aria2teldrive', { animated: true, source: 'user' })">
 
                 <i class="ph ph-hard-drives"></i>
             </div>
 
             <!-- Tel2TelDrive -->
-            <div class="nav-item" data-page="tel2teldrive" data-tooltip="Telegram监听推送" onclick="switchPage('tel2teldrive')">
+            <div class="nav-item" data-page="tel2teldrive" data-tooltip="Telegram监听推送" onclick="switchPage('tel2teldrive', { animated: true, source: 'user' })">
                 <i class="ph ph-telegram-logo"></i>
             </div>
 
-            <div class="nav-item" data-page="test" data-tooltip="连接自检" onclick="switchPage('test')">
+            <div class="nav-item" data-page="test" data-tooltip="连接自检" onclick="switchPage('test', { animated: true, source: 'user' })">
                 <i class="ph ph-plugs-connected"></i>
             </div>
+
             
             <div style="flex:1"></div>
             
-            <div class="nav-item" data-page="settings" data-tooltip="全局配置" onclick="switchPage('settings')">
+            <div class="nav-item" data-page="settings" data-tooltip="全局配置" onclick="switchPage('settings', { animated: true, source: 'user' })">
                 <i class="ph ph-gear-six"></i>
             </div>
+
             
             <div class="nav-item" style="cursor:default" id="serviceStatusWrapper" data-tooltip="云端环境探测中...">
                 <i class="ph ph-hard-drives" id="serviceStatusIcon" style="color:var(--text-dim); transition:color 0.3s"></i>

@@ -235,15 +235,18 @@ class TelDriveClient:
                                     chunk_offset: int,
                                     chunk_size: int,
                                     part_no: int, filename: str,
-                                    total_parts: int,
-                                    progress_callback: Optional[Callable] = None,
-                                    file_size: int = 0) -> Dict:
+                                    total_parts: int) -> Dict:
         """上传单个 chunk，流式从文件读取+发送，不将整块一次性读入内存。
+
+        注意：这里不再按“本地已发送字节”上报进度；
+        进度统一由上层在单个 part 被 TelDrive 确认成功后累计，
+        这样更接近真实的远端上传完成度。
 
         相比旧版 bytes 模式：
         - 内存占用从 chunk_size(~500MB) 降低到 STREAM_BLOCK(1MB)
         - 使用 memoryview 避免切片时额外内存复制
         """
+
         retry_count = 0
         # 流式发送粒度：1MB — 同一时刻只有 1 个 buffer 在内存中
         STREAM_BLOCK = 1024 * 1024
@@ -253,9 +256,8 @@ class TelDriveClient:
             existing = await self._check_part_exists(session, upload_id, part_no)
             if existing and existing.get("name"):
                 logger.info(f"  块 {part_no}/{total_parts} 已存在，跳过上传")
-                if progress_callback and file_size > 0:
-                    await progress_callback(chunk_offset + chunk_size, file_size)
                 return existing
+
 
             part_name = self._get_part_name(filename, part_no, total_parts)
 
@@ -298,8 +300,7 @@ class TelDriveClient:
                             break
                         yield block
                         sent += len(block)
-                        if progress_callback and file_size > 0:
-                            await progress_callback(_chunk_offset + sent, file_size)
+
 
                 # 使用动态超时，大 chunk 给更多时间
                 timeout = self._chunk_timeout(_chunk_size)
@@ -385,10 +386,11 @@ class TelDriveClient:
                                  filename: str, file_size: int,
                                  total_parts: int,
                                  progress_callback: Optional[Callable]) -> List[Dict]:
-        """串行逐块上传 — 流式读取，每次只有 1MB 在内存中"""
+        """串行逐块上传，按 TelDrive 已确认的 part 累计进度。"""
         parts = []
         offset = 0
         part_no = 1
+        confirmed_bytes = 0
 
         while offset < file_size:
             cur_chunk_size = min(self.chunk_size, file_size - offset)
@@ -399,15 +401,17 @@ class TelDriveClient:
                 chunk_offset=offset,
                 chunk_size=cur_chunk_size,
                 part_no=part_no, filename=filename, total_parts=total_parts,
-                progress_callback=progress_callback,
-                file_size=file_size
             )
             parts.append(part_result)
+            confirmed_bytes += cur_chunk_size
+            if progress_callback:
+                await progress_callback(min(confirmed_bytes, file_size), file_size)
 
             offset += cur_chunk_size
             part_no += 1
 
         return parts
+
 
     # ===========================================
     # 并发上传 — 对标 upload.go 的 doMultiUpload
@@ -418,13 +422,14 @@ class TelDriveClient:
                                 filename: str, file_size: int,
                                 total_parts: int,
                                 progress_callback: Optional[Callable]) -> List[Dict]:
-        """并发分块上传 — 流式读取文件，不再将 chunk 读入内存。
+        """并发分块上传，按 TelDrive 已确认的 part 累计进度。
 
         内存占用: upload_concurrency × STREAM_BLOCK(1MB) ≈ 4MB（而非旧版 ~2GB）
         """
         sem = asyncio.Semaphore(self.upload_concurrency)
         results: Dict[int, Dict] = {}
         lock = asyncio.Lock()
+        confirmed_bytes = 0
 
         # 构建 chunk 描述表（仅偏移量+大小，不读文件）
         chunks_info = []
@@ -437,28 +442,20 @@ class TelDriveClient:
             part_no += 1
 
         async def upload_chunk(p_no: int, p_offset: int, p_size: int):
+            nonlocal confirmed_bytes
             async with sem:
-                # 并发上传时，进度通过 lock 累加已发送字节
-                async def concurrent_progress(sent_total: int, _total: int):
-                    chunk_sent = sent_total - p_offset
-                    async with lock:
-                        current_total = sum(
-                            ci[2] for ci in chunks_info
-                            if ci[0] in results  # 已完成的块
-                        ) + chunk_sent
-                        if progress_callback:
-                            await progress_callback(current_total, file_size)
-
                 logger.info(f"  并发上传块 {p_no}/{total_parts} ({p_size} bytes)")
                 part_result = await self._upload_single_chunk(
                     session, upload_id, file_path,
                     chunk_offset=p_offset,
                     chunk_size=p_size,
                     part_no=p_no, filename=filename, total_parts=total_parts,
-                    progress_callback=concurrent_progress,
-                    file_size=file_size
                 )
-                results[p_no] = part_result
+                async with lock:
+                    results[p_no] = part_result
+                    confirmed_bytes += p_size
+                    if progress_callback:
+                        await progress_callback(min(confirmed_bytes, file_size), file_size)
 
         # 创建所有上传任务
         tasks = [
@@ -481,6 +478,7 @@ class TelDriveClient:
         sorted_parts = [results[k] for k in sorted(results.keys())]
         return sorted_parts
 
+
     # ===========================================
     # 主上传入口 — 对标 driver.go 的 Put 方法
     # ===========================================
@@ -502,7 +500,8 @@ class TelDriveClient:
         Args:
             file_path: 本地文件路径
             teldrive_path: TelDrive 目标路径
-            progress_callback: 进度回调函数 (uploaded_bytes, total_bytes)
+            progress_callback: 进度回调函数 (confirmed_uploaded_bytes, total_bytes)
+
 
         Returns:
             上传结果 dict

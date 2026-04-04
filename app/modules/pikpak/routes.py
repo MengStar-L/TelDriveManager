@@ -543,13 +543,12 @@ async def _builtin_download_and_upload(files: List[dict], index: int, delete_pik
             local_path = dl_task.dest_path
             await db.update_task(task_db_id, local_path=str(local_path))
 
-            if os.path.isdir(local_path):
-                await task_manager._upload_directory(task_db_id, local_path, target_path)
-            else:
-                await task_manager._upload(task_db_id, local_path, target_path)
-
-            if auto_delete:
-                await task_manager._auto_delete_local(task_db_id, local_path)
+            await task_manager.upload_local_with_slot(
+                task_db_id,
+                str(local_path),
+                target_path,
+                auto_delete_local=auto_delete,
+            )
 
             await _broadcast({"type": "upload_done", "task_id": task_db_id, "index": file_index,
                               "filename": name})
