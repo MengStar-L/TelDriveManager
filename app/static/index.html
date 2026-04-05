@@ -945,6 +945,11 @@
                         </div>
                     </div>
 
+                    <div id="diskProtectNotice" style="display:none; align-items:center; gap:10px; margin:-8px 0 24px; padding:12px 16px; border-radius:12px; border:1px solid rgba(245,158,11,0.24); background:rgba(245,158,11,0.10); color:#92400e; font-size:14px; font-weight:600;">
+                        <i class="ph-fill ph-warning-circle" style="font-size:18px;"></i>
+                        <span id="diskProtectNoticeText">磁盘不足，已自动保护</span>
+                    </div>
+
                     <div class="card">
                         <div class="card-header" style="flex-wrap: wrap; gap: 12px; align-items: center;">
                             <div class="a2td-header-main">
@@ -1163,10 +1168,12 @@
                                     <div class="form-group"><label>RPC 端口</label><input class="form-input" type="number" id="cfgAria2Port" min="1" max="65535" placeholder="6800"></div>
                                     <div class="form-group"><label>aria2 RPC 密码</label><input class="form-input" type="password" id="cfgAria2Secret" placeholder="首次安装后会自动生成，建议外部访问时必填"></div>
                                     <div class="form-group"><label>最大并发下载</label><input class="form-input" type="number" id="cfgAria2MaxConcurrent" min="1" max="32" placeholder="3"></div>
+                                    <div class="form-group"><label>磁盘保护阈值 (GB)</label><input class="form-input" type="number" id="cfgAria2DiskProtectionThreshold" min="1" max="102400" placeholder="5"></div>
                                     <div class="form-group"><label>单任务分块数</label><input class="form-input" type="number" id="cfgAria2Split" min="1" max="64" placeholder="8"></div>
                                     <div class="form-group"><label>单服务器最大连接数</label><input class="form-input" type="number" id="cfgAria2MaxConnPerServer" min="1" max="64" placeholder="8"></div>
                                     <div class="form-group"><label>最小分块大小 (MB)</label><input class="form-input" type="number" id="cfgAria2MinSplitSize" min="1" max="1024" placeholder="5"></div>
                                 </div>
+                                <div class="wizard-note" style="margin-top:12px;">当下载目录所在磁盘剩余空间低于该阈值时，将自动保护并暂停 aria2 新下载；恢复阈值固定为该值 + 1 GB。</div>
                                 <div class="field-grid cols-1">
                                     <label class="toggle-row" style="justify-content:space-between">
                                         允许外部设备访问 aria2 RPC

@@ -36,6 +36,7 @@ max_concurrent = 3                   # 最大同时下载任务数
 split = 8                            # 单任务分块数
 max_connection_per_server = 8        # 单服务器最大连接数
 min_split_size_mb = 5                # 最小分块大小（MB）
+disk_protection_threshold_gb = 5     # 剩余空间低于该值时自动保护并暂停 aria2 新下载
 download_dir = "./downloads"        # 固定由程序托管到项目 downloads 目录
 
 # ─── TelDrive 云盘（共享） ───

@@ -72,6 +72,17 @@ class TaskManager:
         self._disk_usage_info: dict = {}  # 缓存磁盘使用信息
         self._cpu_info: dict = {}
         self._last_download_speed: int = 0  # 缓存最近的 aria2 下载速度
+        self._disk_protection_active: bool = False
+        self._disk_protection_applied_max_downloads: int = self._get_user_max_concurrent_downloads()
+        self._disk_protection_info: dict = {
+            "active": False,
+            "message": "",
+            "threshold_bytes": self._get_disk_protection_threshold_bytes(),
+            "resume_threshold_bytes": self._get_disk_protection_resume_bytes(),
+            "configured_max_concurrent": self._get_user_max_concurrent_downloads(),
+            "applied_max_concurrent": self._get_user_max_concurrent_downloads(),
+        }
+
 
 
     def _init_clients(self):
@@ -141,13 +152,31 @@ class TaskManager:
         logger.info(f"[路径映射-文件名] {local_path} -> {mapped}")
         return mapped
 
+    def _get_user_max_concurrent_downloads(self) -> int:
+        return max(1, int(self.config.get("aria2", {}).get("max_concurrent") or 3))
+
+    def _get_disk_protection_threshold_gb(self) -> int:
+        return max(1, int(self.config.get("aria2", {}).get("disk_protection_threshold_gb") or 5))
+
+    def _get_disk_protection_threshold_bytes(self) -> int:
+        return self._get_disk_protection_threshold_gb() * 1024 ** 3
+
+    def _get_disk_protection_resume_bytes(self) -> int:
+        return (self._get_disk_protection_threshold_gb() + 1) * 1024 ** 3
+
+
+    def _get_effective_max_concurrent_downloads(self) -> int:
+        if self._disk_protection_active:
+            return max(1, int(self._disk_protection_applied_max_downloads or 1))
+        return self._get_user_max_concurrent_downloads()
+
     async def _apply_aria2_options(self):
         """将本地配置同步到远端 aria2"""
         try:
             cfg = self.config
             aria2_cfg = cfg["aria2"]
             options = {
-                "max-concurrent-downloads": str(aria2_cfg.get("max_concurrent", 3)),
+                "max-concurrent-downloads": str(self._get_effective_max_concurrent_downloads()),
                 "split": str(aria2_cfg.get("split", 8)),
                 "max-connection-per-server": str(aria2_cfg.get("max_connection_per_server", 8)),
                 "min-split-size": f"{int(aria2_cfg.get('min_split_size_mb', 5))}M",
@@ -157,6 +186,60 @@ class TaskManager:
             await self.aria2.change_global_option(options)
         except Exception:
             pass
+
+    async def _sync_disk_space_download_protection(self, active_download_count: int):
+        if not self.aria2:
+            return
+
+        disk_info = self._disk_usage_info or {}
+        if "free" not in disk_info:
+            return
+
+        free_bytes = max(0, int(disk_info.get("free") or 0))
+        threshold_bytes = self._get_disk_protection_threshold_bytes()
+        resume_threshold_bytes = self._get_disk_protection_resume_bytes()
+        configured_max = self._get_user_max_concurrent_downloads()
+        active_download_count = max(0, int(active_download_count or 0))
+        was_active = self._disk_protection_active
+        should_protect = free_bytes < (resume_threshold_bytes if was_active else threshold_bytes)
+        target_max = configured_max if not should_protect else max(1, active_download_count)
+        should_apply = (
+            target_max != self._disk_protection_applied_max_downloads
+            or should_protect != was_active
+        )
+
+        if should_apply:
+            try:
+                await self.aria2.change_global_option({
+                    "max-concurrent-downloads": str(target_max),
+                })
+            except Exception as e:
+                logger.warning(f"同步磁盘保护状态到 aria2 失败: {e}")
+                return
+
+        self._disk_protection_active = should_protect
+        self._disk_protection_applied_max_downloads = target_max
+        self._disk_protection_info = {
+            "active": should_protect,
+            "message": "磁盘不足，已自动保护" if should_protect else "",
+            "free_bytes": free_bytes,
+            "threshold_bytes": threshold_bytes,
+            "resume_threshold_bytes": resume_threshold_bytes,
+            "configured_max_concurrent": configured_max,
+            "applied_max_concurrent": target_max,
+        }
+
+        if should_protect and (not was_active or should_apply):
+            logger.warning(
+                f"磁盘剩余空间不足，已自动保护 aria2 新下载: free={free_bytes}, "
+                f"threshold={threshold_bytes}, max_concurrent={target_max}/{configured_max}"
+            )
+        elif was_active and not should_protect:
+            logger.info(
+                f"磁盘空间已恢复，已解除 aria2 自动保护: free={free_bytes}, "
+                f"restore_max_concurrent={configured_max}"
+            )
+
 
 
     async def start(self):
@@ -387,7 +470,10 @@ class TaskManager:
             data["disk"] = self._disk_usage_info
         if self._cpu_info:
             data["cpu"] = self._cpu_info
+        if self._disk_protection_info:
+            data["download_protection"] = self._disk_protection_info
         return data
+
 
 
 
@@ -525,8 +611,14 @@ class TaskManager:
             logger.debug(f"aria2 轮询失败: {e}")
             return
 
+        try:
+            await self._sync_disk_space_download_protection(len(active))
+        except Exception as e:
+            logger.debug(f"同步磁盘保护状态失败: {e}")
+
         all_aria2_tasks = active + waiting + stopped
         tracked_download_speed = 0
+
 
         for item in all_aria2_tasks:
 

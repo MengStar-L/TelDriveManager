@@ -54,6 +54,7 @@ DEFAULTS: dict[str, Any] = {
         "split": 8,
         "max_connection_per_server": 8,
         "min_split_size_mb": 5,
+        "disk_protection_threshold_gb": 5,
         "download_dir": FIXED_DOWNLOAD_DIR,
     },
     "teldrive": {
@@ -171,6 +172,7 @@ def _normalize_config(merged: dict, raw: dict | None = None) -> dict:
     aria2_cfg["split"] = max(1, int(aria2_cfg.get("split") or 8))
     aria2_cfg["max_connection_per_server"] = max(1, int(aria2_cfg.get("max_connection_per_server") or 8))
     aria2_cfg["min_split_size_mb"] = max(1, int(aria2_cfg.get("min_split_size_mb") or 5))
+    aria2_cfg["disk_protection_threshold_gb"] = max(1, int(aria2_cfg.get("disk_protection_threshold_gb") or 5))
     aria2_cfg["binary_path"] = str(aria2_cfg.get("binary_path") or "").strip()
     aria2_cfg["os_type"] = str(aria2_cfg.get("os_type") or "").strip().lower()
 
