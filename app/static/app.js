@@ -771,6 +771,7 @@ function runPageSideEffects(name) {
     if (name === 'aria2teldrive') loadA2TDTasks();
     if (name === 'tel2teldrive') loadT2TDState();
     if (name === 'settings') loadConfig();
+    if (name === 'progress') loadParseWorkspaceSnapshot();
 }
 
 
@@ -949,7 +950,9 @@ function connectWS() {
         const dot = document.getElementById('wsDot');
         if (dot) dot.classList.add('connected');
         refreshA2TDMonitorIfNeeded(true);
+        loadParseWorkspaceSnapshot(true);
     };
+
 
     ws.onclose = () => {
         console.log('[WS] Disconnected, reconnecting in 3s...');
@@ -989,6 +992,10 @@ function handleWSMessage(msg) {
     }
     if (msg.type === "task_deleted") {
         removeA2TDTask(msg.data && msg.data.task_id);
+        return;
+    }
+    if (msg.type === 'parse_job_state') {
+        applyParseJobState(msg.job || null);
         return;
     }
 
@@ -1036,12 +1043,12 @@ function handleWSMessage(msg) {
         return;
     }
 
-    const logEntry = buildProgressLogEntry(msg);
-    if (logEntry) addLogEntry(logEntry.icon, logEntry.text);
+    appendProgressLogMessage(msg);
 
-    if (!document.getElementById('page-progress').classList.contains('active') && msg.type === 'task_start') {
+    if (!document.getElementById('page-progress').classList.contains('active') && msg.type === 'task_start' && msg.auto_open_progress === true) {
         switchPage('progress', { animated: true });
     }
+
 }
 
 
@@ -1501,23 +1508,217 @@ function buildProgressLogEntry(msg) {
     return text ? { icon, text } : null;
 }
 
-function addLogEntry(icon, text) {
+const progressLogSeenIds = new Set();
+let progressSnapshotPending = false;
+let activeParseJob = null;
 
+const PARSE_BUTTON_CONFIG = {
+    magnet: {
+        buttonId: 'magnetParseBtn',
+        idleHtml: '<i class="ph ph-magnifying-glass"></i> 解析后选择',
+        busyHtml: '<span class="spinner"></span> 解析中...'
+    },
+    share: {
+        buttonId: 'shareParseBtn',
+        idleHtml: '<i class="ph ph-magnifying-glass"></i> 解析',
+        busyHtml: '<span class="spinner"></span> 解析中...'
+    },
+    rss: {
+        buttonId: 'rssParseBtn',
+        idleHtml: '<i class="ph ph-radar"></i> 扫描提取',
+        busyHtml: '<span class="spinner"></span> 扫描中...'
+    }
+};
+
+function formatProgressLogTime(value) {
+    if (!value) return new Date().toLocaleTimeString('zh-CN', { hour12: false });
+    const normalized = String(value).includes(' ') ? String(value).replace(' ', 'T') : String(value);
+    const date = new Date(normalized);
+    if (Number.isNaN(date.getTime())) {
+        const parts = String(value).split(' ');
+        return parts[1] || String(value);
+    }
+    return date.toLocaleTimeString('zh-CN', { hour12: false });
+}
+
+function resetProgressLogView(emptyText = '系统处于空闲状态...') {
     const container = document.getElementById('logContainer');
-    if(!container) return;
+    if (!container) return;
+    progressLogSeenIds.clear();
+    container.innerHTML = `<div class="log-empty" id="logEmpty"><i class="ph ph-ghost"></i> ${escapeA2TDHtml(emptyText)}</div>`;
+}
+
+function addLogEntry(icon, text, options = {}) {
+    const container = document.getElementById('logContainer');
+    if (!container) return;
+
+    const normalizedLogId = options.logId !== undefined && options.logId !== null
+        ? String(options.logId)
+        : '';
+    if (normalizedLogId) {
+        if (progressLogSeenIds.has(normalizedLogId)) return;
+        progressLogSeenIds.add(normalizedLogId);
+    }
+
     const empty = document.getElementById('logEmpty');
     if (empty) empty.remove();
-    const now = new Date().toLocaleTimeString('zh-CN', { hour12: false });
+
     const entry = document.createElement('div');
     entry.className = 'log-entry';
-    entry.innerHTML = `<span class="log-icon">${icon}</span><span class="log-text">${text}</span><span class="log-time">${now}</span>`;
+    if (normalizedLogId) entry.dataset.logId = normalizedLogId;
+    entry.innerHTML = `<span class="log-icon">${icon}</span><span class="log-text">${text}</span><span class="log-time">${options.timeText || new Date().toLocaleTimeString('zh-CN', { hour12: false })}</span>`;
     container.appendChild(entry);
     container.scrollTop = container.scrollHeight;
 }
 
-function clearLog() {
-    const el = document.getElementById('logContainer');
-    if (el) el.innerHTML = '<div class="log-empty" id="logEmpty">系统处于空闲状态...</div>';
+function normalizeProgressLogMessage(record = {}) {
+    const payload = record && typeof record.payload === 'object' && record.payload !== null
+        ? { ...record.payload }
+        : { ...(record || {}) };
+    const logId = payload.log_id ?? record.id ?? record.log_id ?? null;
+    const createdAt = payload.created_at || record.created_at || '';
+    const jobId = payload.job_id || payload.parse_job_id || record.job_id || null;
+    return {
+        ...payload,
+        type: payload.type || record.message_type || record.type || 'info',
+        log_id: logId,
+        created_at: createdAt,
+        job_id: jobId,
+        parse_job_id: payload.parse_job_id || jobId,
+    };
+}
+
+function appendProgressLogMessage(msg) {
+    const normalized = normalizeProgressLogMessage(msg);
+    const entry = buildProgressLogEntry(normalized);
+    if (!entry) return;
+    addLogEntry(entry.icon, entry.text, {
+        logId: normalized.log_id,
+        timeText: formatProgressLogTime(normalized.created_at),
+    });
+}
+
+function getParseButtonConfig(jobType = '') {
+    return PARSE_BUTTON_CONFIG[String(jobType || '').trim().toLowerCase()] || null;
+}
+
+function setParseButtonsState(job = activeParseJob) {
+    activeParseJob = job && typeof job === 'object' ? job : null;
+    const activeType = String(activeParseJob?.job_type || '').trim().toLowerCase();
+    const hasActive = !!(activeParseJob && ['pending', 'running'].includes(String(activeParseJob.status || '').trim().toLowerCase()));
+
+    Object.entries(PARSE_BUTTON_CONFIG).forEach(([jobType, cfg]) => {
+        const btn = document.getElementById(cfg.buttonId);
+        if (!btn) return;
+        btn.disabled = hasActive;
+        btn.innerHTML = hasActive && jobType === activeType ? cfg.busyHtml : cfg.idleHtml;
+        btn.title = hasActive && jobType !== activeType ? '当前已有解析任务正在执行' : '';
+        btn.classList.toggle('is-loading', hasActive && jobType === activeType);
+    });
+}
+
+function renderMagnetParseResult(result = {}) {
+    if (!result || typeof result !== 'object') return;
+    magnetCurrentFileId = result.file_id || null;
+    magnetFileData = sortPickerItemsByName(result.files || []);
+    const titleEl = document.getElementById('magnetFileName');
+    if (titleEl) {
+        titleEl.innerHTML = `<i class="ph-fill ph-folder-open"></i> ${escapeA2TDHtml(result.file_name || '文件树状图')}`;
+    }
+    renderPickerTree('magnetFileList', magnetFileData, 'magnet');
+    const area = document.getElementById('magnetFileArea');
+    if (area) area.style.display = 'block';
+    const selectAll = document.getElementById('magnetSelectAll');
+    if (selectAll) selectAll.checked = true;
+    updatePickerSelection('magnet');
+}
+
+function renderShareParseResult(result = {}) {
+    if (!result || typeof result !== 'object') return;
+    shareCurrentData = { ...(shareCurrentData || {}), ...result };
+    shareFileData = sortPickerItemsByName(result.files || []);
+    renderPickerTree('fileList', shareFileData, 'share');
+    const area = document.getElementById('shareFileArea');
+    area?.classList.add('visible');
+    const selectAll = document.getElementById('selectAll');
+    if (selectAll) selectAll.checked = true;
+    updatePickerSelection('share');
+}
+
+function renderRssParseResult(result = {}) {
+    if (!result || typeof result !== 'object') return;
+    rssFileData = sortPickerItemsByName(result.items || []);
+    const titleEl = document.getElementById('rssFeedTitle');
+    if (titleEl) {
+        titleEl.innerHTML = `<i class="ph ph-feed"></i> ${escapeA2TDHtml(result.title || 'RSS Feed')} (${escapeA2TDHtml(result.count ?? rssFileData.length) } 项)`;
+    }
+    renderPickerTree('rssList', rssFileData, 'rss');
+    const area = document.getElementById('rssResultArea');
+    if (area) area.style.display = 'block';
+    const selectAll = document.getElementById('rssSelectAll');
+    if (selectAll) selectAll.checked = true;
+    updatePickerSelection('rss');
+}
+
+function restoreParseJobResult(job) {
+    if (!job || String(job.status || '').toLowerCase() !== 'completed' || !job.result_payload) return;
+    if (job.job_type === 'magnet') {
+        renderMagnetParseResult(job.result_payload);
+        return;
+    }
+    if (job.job_type === 'share') {
+        renderShareParseResult(job.result_payload);
+        return;
+    }
+    if (job.job_type === 'rss') {
+        renderRssParseResult(job.result_payload);
+    }
+}
+
+function restoreParseResultsFromSnapshot(snapshot = {}) {
+    const latestJobs = snapshot.latest_jobs || {};
+    ['magnet', 'share', 'rss'].forEach(jobType => restoreParseJobResult(latestJobs[jobType]));
+}
+
+function applyParseJobState(job) {
+    const normalizedJob = job && typeof job === 'object' ? job : null;
+    if (normalizedJob && String(normalizedJob.status || '').toLowerCase() === 'completed') {
+        restoreParseJobResult(normalizedJob);
+    }
+    setParseButtonsState(normalizedJob && ['pending', 'running'].includes(String(normalizedJob.status || '').toLowerCase()) ? normalizedJob : null);
+}
+
+async function loadParseWorkspaceSnapshot(force = false) {
+    if (progressSnapshotPending && !force) return;
+    try {
+        progressSnapshotPending = true;
+        const resp = await fetch('/api/pikpak/progress/snapshot', { cache: 'no-store' });
+        const data = await readJsonSafe(resp);
+        if (!resp.ok) throw new Error(data.detail || data.message || data.error || '读取进度快照失败');
+
+        resetProgressLogView(data.active_job ? '后台任务运行中，日志会持续写入...' : '系统处于空闲状态...');
+        if (Array.isArray(data.logs)) {
+            data.logs.forEach(item => appendProgressLogMessage(item));
+        }
+        restoreParseResultsFromSnapshot(data);
+        applyParseJobState(data.active_job || null);
+    } catch (e) {
+        console.warn('加载解析快照失败:', e);
+        setParseButtonsState(activeParseJob);
+    } finally {
+        progressSnapshotPending = false;
+    }
+}
+
+async function clearLog() {
+    try {
+        const resp = await fetch('/api/pikpak/progress/logs', { method: 'DELETE' });
+        const data = await readJsonSafe(resp);
+        if (!resp.ok || data.success === false) throw new Error(data.detail || data.message || data.error || '清理日志失败');
+        resetProgressLogView(activeParseJob ? '日志已清空，后台任务仍在继续...' : '系统处于空闲状态...');
+    } catch (e) {
+        alert(e.message || '清理日志失败');
+    }
 }
 
 // ── PikPak Magnet Logic ──
@@ -2099,6 +2300,9 @@ function collectSettingsConfig() {
             user: document.getElementById('cfgDbUser').value,
             password: document.getElementById('cfgDbPassword').value,
             name: document.getElementById('cfgDbName').value || 'postgres'
+        },
+        log: {
+            buffer_size: Math.max(50, parseInt(document.getElementById('cfgLogBufferSize').value, 10) || window.currentConfig?.log?.buffer_size || 400)
         }
     };
 }
@@ -2154,6 +2358,7 @@ async function loadConfig() {
         document.getElementById('cfgDbUser').value = cfg.telegram_db?.user || '';
         document.getElementById('cfgDbPassword').value = cfg.telegram_db?.password || '';
         document.getElementById('cfgDbName').value = cfg.telegram_db?.name || 'postgres';
+        document.getElementById('cfgLogBufferSize').value = cfg.log?.buffer_size || 400;
 
         fillWizardInputs(cfg);
         await refreshAria2RuntimeStatus();
@@ -2449,10 +2654,12 @@ let magnetDownloadSubmitting = false;
 async function parseMagnet() {
     const input = document.getElementById('magnetInput').value.trim();
     if (!input) return alert('请输入磁力链接');
-    const parseBtn = document.getElementById('magnetParseBtn');
-    parseBtn.disabled = true;
-    parseBtn.innerHTML = '<span class="spinner"></span> 解析中...';
+    if (activeParseJob) return alert('当前已有解析任务正在执行，请等待完成后再试');
+
+    magnetCurrentFileId = null;
+    magnetFileData = [];
     document.getElementById('magnetFileArea').style.display = 'none';
+    setParseButtonsState({ job_type: 'magnet', status: 'running' });
 
     try {
         const resp = await fetch('/api/pikpak/magnet/parse', {
@@ -2460,25 +2667,21 @@ async function parseMagnet() {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ magnet: input.split('\n')[0] })
         });
-        const data = await resp.json();
-        
-        if (!resp.ok) {
-            throw new Error(data.error || '解析失败');
+        const data = await readJsonSafe(resp);
+        if (resp.status === 409 && data.active_job) {
+            applyParseJobState(data.active_job);
+        }
+        if (!resp.ok || data.success === false) {
+            throw new Error(data.error || data.message || '解析失败');
         }
 
-        magnetCurrentFileId = data.file_id;
-        document.getElementById('magnetFileName').innerHTML = `<i class="ph-fill ph-folder-open"></i> ${data.file_name}`;
-        
-        magnetFileData = data.files || [];
-        renderPickerTree('magnetFileList', magnetFileData, 'magnet');
-        
-        document.getElementById('magnetFileArea').style.display = 'block';
-        updatePickerSelection('magnet');
-    } catch(e) {
-        alert(e.message);
-    } finally {
-        parseBtn.disabled = false;
-        parseBtn.innerHTML = '<i class="ph ph-magnifying-glass"></i> 解析后选择';
+        applyParseJobState(data.job || { job_type: 'magnet', status: 'running' });
+        if (typeof showA2TDToast === 'function') {
+            showA2TDToast(data.message || '磁链解析任务已提交，正在后台执行', 'info');
+        }
+    } catch (e) {
+        if (!activeParseJob) setParseButtonsState(null);
+        alert(e.message || '解析失败');
     }
 }
 
@@ -2563,41 +2766,45 @@ async function downloadMagnetFiles() {
 let shareCurrentData = null;
 let shareFileData = [];
 let shareDownloadSubmitting = false;
-const shareNameCollator = new Intl.Collator('zh-CN', { numeric: true, sensitivity: 'base' });
+const pickerNameCollator = new Intl.Collator('zh-CN', { numeric: true, sensitivity: 'base' });
 
-function getShareFileName(item = {}) {
+function getPickerItemName(item = {}) {
     return String(item.name || item.title || '').trim();
 }
 
-function getShareFilePath(item = {}) {
-    return String(item.path || getShareFileName(item)).trim();
+function getPickerItemPath(item = {}) {
+    return String(item.path || getPickerItemName(item)).trim();
 }
 
-function compareShareFilesByName(a = {}, b = {}) {
-    const nameDiff = shareNameCollator.compare(getShareFileName(a), getShareFileName(b));
+function getPickerItemIdentity(item = {}) {
+    return String(item.id || item.file_id || item.download_url || item.url || item.link || '').trim();
+}
+
+function comparePickerItemsByName(a = {}, b = {}) {
+    const nameDiff = pickerNameCollator.compare(getPickerItemName(a), getPickerItemName(b));
     if (nameDiff !== 0) return nameDiff;
 
-    const pathDiff = shareNameCollator.compare(getShareFilePath(a), getShareFilePath(b));
+    const pathDiff = pickerNameCollator.compare(getPickerItemPath(a), getPickerItemPath(b));
     if (pathDiff !== 0) return pathDiff;
 
-    return String(a.id || a.file_id || '').localeCompare(String(b.id || b.file_id || ''));
+    return getPickerItemIdentity(a).localeCompare(getPickerItemIdentity(b));
 }
 
-function sortShareFilesByName(files = []) {
-    return Array.isArray(files) ? [...files].sort(compareShareFilesByName) : [];
+function sortPickerItemsByName(files = []) {
+    return Array.isArray(files) ? [...files].sort(comparePickerItemsByName) : [];
 }
+
 
 async function parseShareLink() {
-
     const shareLink = document.getElementById('shareLink').value.trim();
     const passCode = document.getElementById('sharePassCode').value.trim();
-    if (!shareLink) return alert('请输入 分享链接');
+    if (!shareLink) return alert('请输入分享链接');
+    if (activeParseJob) return alert('当前已有解析任务正在执行，请等待完成后再试');
 
-    const parseBtn = document.getElementById('shareParseBtn');
-    const shareFileArea = document.getElementById('shareFileArea');
-    parseBtn.disabled = true;
-    parseBtn.innerHTML = '<span class="spinner"></span> 解析中...';
-    shareFileArea?.classList.remove('visible');
+    shareCurrentData = null;
+    shareFileData = [];
+    document.getElementById('shareFileArea')?.classList.remove('visible');
+    setParseButtonsState({ job_type: 'share', status: 'running' });
 
     try {
         const resp = await fetch('/api/pikpak/share/list', {
@@ -2605,20 +2812,19 @@ async function parseShareLink() {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ share_link: shareLink, pass_code: passCode })
         });
-        const data = await resp.json();
-        if (!resp.ok) throw new Error(data.error || '解析失败');
+        const data = await readJsonSafe(resp);
+        if (resp.status === 409 && data.active_job) {
+            applyParseJobState(data.active_job);
+        }
+        if (!resp.ok || data.success === false) throw new Error(data.error || data.message || '解析失败');
 
-        shareCurrentData = data;
-        shareFileData = sortShareFilesByName(data.files || []);
-        renderPickerTree('fileList', shareFileData, 'share');
-        
-        shareFileArea?.classList.add('visible');
-        updatePickerSelection('share');
-    } catch(e) {
-        alert(e.message);
-    } finally {
-        parseBtn.disabled = false;
-        parseBtn.innerHTML = '<i class="ph ph-magnifying-glass"></i> 解析';
+        applyParseJobState(data.job || { job_type: 'share', status: 'running' });
+        if (typeof showA2TDToast === 'function') {
+            showA2TDToast(data.message || '分享解析任务已提交，正在后台执行', 'info');
+        }
+    } catch (e) {
+        if (!activeParseJob) setParseButtonsState(null);
+        alert(e.message || '解析失败');
     }
 }
 
@@ -2630,9 +2836,10 @@ function toggleSelectAll() {
 }
 
 function reRenderShareFileList() {
-    shareFileData = sortShareFilesByName(shareFileData);
+    shareFileData = sortPickerItemsByName(shareFileData);
     renderPickerTree('fileList', shareFileData, 'share');
 }
+
 
 async function downloadShareFiles() {
     if (!shareCurrentData || shareDownloadSubmitting) return;
@@ -2692,32 +2899,31 @@ let rssDownloadSubmitting = false;
 async function parseRSS() {
     const url = document.getElementById('rssUrl').value.trim();
     if (!url) return alert('请输入 RSS 地址');
+    if (activeParseJob) return alert('当前已有解析任务正在执行，请等待完成后再试');
 
-    const parseBtn = document.getElementById('rssParseBtn');
-    parseBtn.disabled = true;
-    parseBtn.innerHTML = '<span class="spinner"></span> 扫描中...';
+    rssFileData = [];
     document.getElementById('rssResultArea').style.display = 'none';
+    setParseButtonsState({ job_type: 'rss', status: 'running' });
 
     try {
         const resp = await fetch('/api/pikpak/rss/parse', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ url: url })
+            body: JSON.stringify({ url })
         });
-        const data = await resp.json();
-        if (!resp.ok) throw new Error(data.error || '扫描失败');
+        const data = await readJsonSafe(resp);
+        if (resp.status === 409 && data.active_job) {
+            applyParseJobState(data.active_job);
+        }
+        if (!resp.ok || data.success === false) throw new Error(data.error || data.message || '扫描失败');
 
-        document.getElementById('rssFeedTitle').innerHTML = `<i class="ph ph-feed"></i> ${data.title} (${data.count} 项)`;
-        rssFileData = data.items || [];
-        renderPickerTree('rssList', rssFileData, 'rss');
-        
-        document.getElementById('rssResultArea').style.display = 'block';
-        updatePickerSelection('rss');
-    } catch(e) {
-        alert(e.message);
-    } finally {
-        parseBtn.disabled = false;
-        parseBtn.innerHTML = '<i class="ph ph-radar"></i> 扫描提取';
+        applyParseJobState(data.job || { job_type: 'rss', status: 'running' });
+        if (typeof showA2TDToast === 'function') {
+            showA2TDToast(data.message || 'RSS 解析任务已提交，正在后台执行', 'info');
+        }
+    } catch (e) {
+        if (!activeParseJob) setParseButtonsState(null);
+        alert(e.message || '扫描失败');
     }
 }
 

@@ -1172,6 +1172,7 @@
                                     <div class="form-group"><label>单任务分块数</label><input class="form-input" type="number" id="cfgAria2Split" min="1" max="64" placeholder="8"></div>
                                     <div class="form-group"><label>单服务器最大连接数</label><input class="form-input" type="number" id="cfgAria2MaxConnPerServer" min="1" max="64" placeholder="8"></div>
                                     <div class="form-group"><label>最小分块大小 (MB)</label><input class="form-input" type="number" id="cfgAria2MinSplitSize" min="1" max="1024" placeholder="5"></div>
+                                    <div class="form-group"><label>前端日志最大保留条数</label><input class="form-input" type="number" id="cfgLogBufferSize" min="50" max="5000" placeholder="400"></div>
                                 </div>
                                 <div class="wizard-note" style="margin-top:12px;">当下载目录所在磁盘剩余空间低于该阈值时，将自动保护并暂停 aria2 新下载；恢复阈值固定为该值 + 1 GB。</div>
                                 <div class="field-grid cols-1">
@@ -1253,7 +1254,7 @@
 
     <div id="a2tdToastContainer" class="app-toast-container"></div>
 
-    <script src="/static/app.js?v=20260404b"></script>
+    <script src="/static/app.js?v=20260405a"></script>
 
 
 

@@ -8,6 +8,7 @@ from fastapi import APIRouter, Body, File, Form, UploadFile
 from app.aria2_client import Aria2Client
 from app.aria2_service import ARIA2_TMP_DIR, aria2_service
 from app.config import load_config, needs_setup, reload_config, save_config
+from app import database as db
 from app.modules.aria2teldrive.task_manager import task_manager
 from app.modules.aria2teldrive.teldrive_client import TelDriveClient
 from app.modules.pikpak import routes as pikpak_routes
@@ -44,7 +45,9 @@ async def update_settings(request_body: dict):
     await aria2_service.handle_config_update(previous, current)
     await task_manager.reload_config()
     await pikpak_routes.reset_clients()
+    await db.prune_progress_logs(current.get("log", {}).get("buffer_size", 400), stream="pikpak")
     return {"success": True, "message": "设置已保存"}
+
 
 
 

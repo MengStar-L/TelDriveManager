@@ -4,6 +4,7 @@ import asyncio
 import os
 import posixpath
 import re
+import uuid
 import logging
 from typing import Dict, List, Optional, Set
 
@@ -13,6 +14,7 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Request
 from fastapi.responses import JSONResponse
 
 from app.config import load_config
+from app import database as db
 from app.modules.pikpak.client import PikPakClient
 from app.aria2_client import Aria2Client
 
@@ -26,6 +28,9 @@ _aria2: Optional[Aria2Client] = None
 _ws_clients: Set[WebSocket] = set()
 _active_share_download_jobs: Set[str] = set()
 _share_download_jobs_lock = asyncio.Lock()
+_parse_job_lock = asyncio.Lock()
+_active_parse_job_id: Optional[str] = None
+_PARSE_JOB_TYPES = ("magnet", "share", "rss")
 
 
 def _format_size(size: int) -> str:
@@ -51,8 +56,15 @@ def _sort_file_entries_by_name(files: List[Dict]) -> List[Dict]:
         files or [],
         key=lambda item: (
             _natural_sort_key(item.get("name") or item.get("title") or ""),
-            _natural_sort_key(item.get("path") or item.get("name") or ""),
-            str(item.get("id") or item.get("file_id") or item.get("url") or ""),
+            _natural_sort_key(item.get("path") or item.get("name") or item.get("title") or ""),
+            str(
+                item.get("id")
+                or item.get("file_id")
+                or item.get("download_url")
+                or item.get("url")
+                or item.get("link")
+                or ""
+            ),
         ),
     )
 
@@ -96,11 +108,26 @@ async def reset_clients():
         await old_aria2.close()
 
 
-async def _broadcast(msg: dict):
+async def _broadcast(msg: dict, persist: bool = True):
     import json
-    import logging
     dead = set()
-    data = json.dumps(msg, ensure_ascii=False)
+    payload = dict(msg or {})
+    if persist:
+        try:
+            log_limit = int(load_config().get("log", {}).get("buffer_size", 400) or 400)
+            saved = await db.add_progress_log(
+                payload.get("type") or "info",
+                payload,
+                stream="pikpak",
+                job_id=str(payload.get("parse_job_id") or payload.get("job_id") or "").strip() or None,
+                limit=log_limit,
+            )
+            if saved:
+                payload["log_id"] = saved.get("id")
+                payload["created_at"] = saved.get("created_at")
+        except Exception as e:
+            logger.warning(f"记录 PikPak 进度日志失败: {e}")
+    data = json.dumps(payload, ensure_ascii=False)
     for ws in list(_ws_clients):
         try:
             await ws.send_text(data)
@@ -197,8 +224,9 @@ async def _release_share_download_job(job_key: str):
         _active_share_download_jobs.discard(job_key)
 
 
-async def _broadcast_resolved_files(index: int, files: List[dict]):
+async def _broadcast_resolved_files(index: int, files: List[dict], extra: Dict | None = None):
     total = len(files)
+    extra_payload = dict(extra or {})
     for sequence, file_info in enumerate(files, 1):
         await _broadcast({
             "type": "file_resolved",
@@ -208,11 +236,12 @@ async def _broadcast_resolved_files(index: int, files: List[dict]):
             "file_name": file_info.get("name", "未知文件"),
             "file_path": _normalize_log_path(file_info),
             "file_size": _get_log_size(file_info),
+            **extra_payload,
         })
 
 
 async def _broadcast_link_pushed(index: int, file_info: Dict[str, str], sequence: int,
-                                 total_files: int, target: str):
+                                 total_files: int, target: str, extra: Dict | None = None):
     await _broadcast({
         "type": "link_pushed",
         "index": index,
@@ -222,7 +251,326 @@ async def _broadcast_link_pushed(index: int, file_info: Dict[str, str], sequence
         "file_path": _normalize_log_path(file_info),
         "file_size": _get_log_size(file_info),
         "target": target,
+        **dict(extra or {}),
     })
+
+
+def _is_parse_job_active(job: Optional[dict]) -> bool:
+    return bool(job and job.get("status") in {"pending", "running"})
+
+
+def _summarize_parse_request(job_type: str, request_payload: dict | None = None) -> str:
+    payload = request_payload or {}
+    if job_type == "magnet":
+        source = str(payload.get("magnet") or "").strip()
+    elif job_type == "share":
+        source = str(payload.get("share_link") or "").strip()
+    else:
+        source = str(payload.get("url") or "").strip()
+    return source[:120] + ("..." if len(source) > 120 else "")
+
+
+def _serialize_parse_job(job: Optional[dict]) -> Optional[dict]:
+    if not job:
+        return None
+    item = dict(job)
+    item["request_payload"] = dict(item.get("request_payload") or {})
+    result_payload = item.get("result_payload")
+    item["input_summary"] = _summarize_parse_request(str(item.get("job_type") or ""), item["request_payload"])
+    if isinstance(result_payload, dict):
+        if item.get("job_type") in {"magnet", "share"}:
+            item["result_count"] = len(result_payload.get("files", []))
+        elif item.get("job_type") == "rss":
+            item["result_count"] = len(result_payload.get("items", []))
+        else:
+            item["result_count"] = 0
+    else:
+        item["result_count"] = 0
+    return item
+
+
+async def init_runtime_state():
+    global _active_parse_job_id
+    _active_parse_job_id = None
+    await db.fail_active_parse_jobs("服务重启，后台解析任务已中断")
+
+
+async def _get_active_parse_job() -> Optional[dict]:
+    global _active_parse_job_id
+    if _active_parse_job_id:
+        job = await db.get_parse_job(_active_parse_job_id)
+        if _is_parse_job_active(job):
+            return job
+        _active_parse_job_id = None
+
+    job = await db.get_active_parse_job()
+    if _is_parse_job_active(job):
+        _active_parse_job_id = str(job.get("job_id") or "") or None
+        return job
+    return None
+
+
+async def _broadcast_parse_job_state(job: Optional[dict]):
+    await _broadcast({"type": "parse_job_state", "job": _serialize_parse_job(job)}, persist=False)
+
+
+async def _finish_parse_job(job_id: str, status: str, *, result_payload: dict | None = None,
+                            error: str | None = None) -> Optional[dict]:
+    global _active_parse_job_id
+    job = await db.update_parse_job(
+        job_id,
+        status=status,
+        result_payload=result_payload,
+        error=(error or None),
+    )
+    if _active_parse_job_id == job_id:
+        _active_parse_job_id = None
+    await _broadcast_parse_job_state(job)
+    return job
+
+
+async def _create_parse_job(job_type: str, request_payload: dict) -> tuple[Optional[dict], Optional[dict]]:
+    global _active_parse_job_id
+    async with _parse_job_lock:
+        active_job = await _get_active_parse_job()
+        if _is_parse_job_active(active_job):
+            return None, active_job
+        job_id = uuid.uuid4().hex
+        job = await db.create_parse_job(job_id, job_type, request_payload, status="running")
+        _active_parse_job_id = job_id
+    await _broadcast_parse_job_state(job)
+    return job, None
+
+
+async def _build_parse_snapshot() -> dict:
+    log_limit = max(1, int(load_config().get("log", {}).get("buffer_size", 400) or 400))
+    latest_jobs = {}
+    for job_type in _PARSE_JOB_TYPES:
+        latest_jobs[job_type] = _serialize_parse_job(await db.get_latest_parse_job(job_type))
+    return {
+        "logs": await db.get_progress_logs(stream="pikpak", limit=log_limit),
+        "active_job": _serialize_parse_job(await _get_active_parse_job()),
+        "latest_jobs": latest_jobs,
+    }
+
+
+async def _run_magnet_parse_job(job_id: str, magnet: str):
+    from pikpakapi.enums import DownloadStatus
+    import time
+
+    magnet_summary = magnet[:80] + ("..." if len(magnet) > 80 else "")
+    cfg = load_config()
+    poll_interval = cfg.get("pikpak", {}).get("poll_interval", 3)
+    max_wait_time = cfg.get("pikpak", {}).get("max_wait_time", 3600)
+
+    await _broadcast({
+        "type": "task_start",
+        "index": 1,
+        "total": 1,
+        "magnet": magnet_summary,
+        "parse_job_id": job_id,
+        "workflow": "parse",
+    })
+    try:
+        pikpak, _ = await _ensure_clients()
+        task_info = await pikpak.add_offline_task(magnet)
+        task_id = task_info["task_id"]
+        file_id = task_info["file_id"]
+        file_name = task_info["file_name"]
+        if not task_id:
+            raise RuntimeError("添加离线任务失败")
+
+        await _broadcast({
+            "type": "task_added",
+            "index": 1,
+            "file_name": file_name,
+            "task_id": task_id,
+            "parse_job_id": job_id,
+        })
+        await _broadcast({
+            "type": "task_status",
+            "index": 1,
+            "status": "PikPak 离线任务已创建，等待云端完成缓存...",
+            "parse_job_id": job_id,
+        })
+
+        start_time = time.time()
+        while True:
+            if time.time() - start_time > max_wait_time:
+                raise TimeoutError(f"等待超时 ({max_wait_time}s)")
+            try:
+                status = await pikpak.client.get_task_status(task_id, file_id)
+            except Exception:
+                await asyncio.sleep(poll_interval)
+                continue
+            if status == DownloadStatus.done:
+                break
+            if status in (DownloadStatus.error, DownloadStatus.not_found):
+                raise RuntimeError(f"离线失败 ({status.value})")
+            await asyncio.sleep(poll_interval)
+
+        file_tree = await pikpak.list_file_tree(file_id)
+        for item in file_tree:
+            item["size_str"] = _format_size(item.get("size", 0))
+        file_tree = _sort_file_entries_by_name(file_tree)
+        await _broadcast({
+            "type": "files_found",
+            "index": 1,
+            "files": [item.get("name", "未知文件") for item in file_tree],
+            "parse_job_id": job_id,
+        })
+        await _broadcast_resolved_files(1, file_tree, {"parse_job_id": job_id})
+        await _broadcast({
+            "type": "task_done",
+            "index": 1,
+            "file_name": file_name,
+            "parse_job_id": job_id,
+        })
+        await _broadcast({"type": "all_done", "total": 1, "parse_job_id": job_id})
+        await _finish_parse_job(
+            job_id,
+            "completed",
+            result_payload={"file_id": file_id, "file_name": file_name, "files": file_tree},
+        )
+    except Exception as e:
+        await _broadcast({"type": "error", "message": f"磁链解析失败: {e}", "parse_job_id": job_id})
+        await _finish_parse_job(job_id, "failed", error=str(e))
+
+
+async def _run_share_parse_job(job_id: str, share_link: str, pass_code: str):
+    share_summary = share_link[:80] + ("..." if len(share_link) > 80 else "")
+    await _broadcast({
+        "type": "task_start",
+        "index": 1,
+        "total": 1,
+        "magnet": share_summary,
+        "parse_job_id": job_id,
+        "workflow": "parse",
+    })
+    try:
+        await _ensure_clients()
+        await _broadcast({
+            "type": "task_status",
+            "index": 1,
+            "status": "正在读取分享内容并递归解析文件列表...",
+            "parse_job_id": job_id,
+        })
+        result = await _pikpak.get_share_file_list(share_link, pass_code)
+        for item in result.get("files", []):
+            item["size_str"] = _format_size(item.get("size", 0))
+        result["files"] = _sort_file_entries_by_name(result.get("files", []))
+        await _broadcast({
+            "type": "files_found",
+            "index": 1,
+            "files": [item.get("name", "未知文件") for item in result.get("files", [])],
+            "parse_job_id": job_id,
+        })
+        await _broadcast_resolved_files(1, result.get("files", []), {"parse_job_id": job_id})
+        await _broadcast({"type": "task_done", "index": 1, "file_name": "分享解析完成", "parse_job_id": job_id})
+        await _broadcast({"type": "all_done", "total": 1, "parse_job_id": job_id})
+        await _finish_parse_job(job_id, "completed", result_payload=result)
+    except Exception as e:
+        await _broadcast({"type": "error", "message": f"分享解析失败: {e}", "parse_job_id": job_id})
+        await _finish_parse_job(job_id, "failed", error=str(e))
+
+
+async def _run_rss_parse_job(job_id: str, rss_url: str):
+    await _broadcast({
+        "type": "task_start",
+        "index": 1,
+        "total": 1,
+        "magnet": rss_url[:80] + ("..." if len(rss_url) > 80 else ""),
+        "parse_job_id": job_id,
+        "workflow": "parse",
+    })
+    try:
+        await _broadcast({
+            "type": "task_status",
+            "index": 1,
+            "status": "正在下载 RSS 源并提取可用链接...",
+            "parse_job_id": job_id,
+        })
+        async with httpx.AsyncClient(follow_redirects=True, timeout=15.0) as client:
+            resp = await client.get(rss_url, headers={"User-Agent": "TelDriveManager/1.0"})
+            resp.raise_for_status()
+            raw = resp.text
+        feed = feedparser.parse(raw)
+        if feed.bozo and not feed.entries:
+            raise RuntimeError(f"RSS 解析失败: {feed.bozo_exception}")
+
+        items = []
+        magnet_re = re.compile(r"magnet:\?xt=urn:[^\s\"'<>]+", re.IGNORECASE)
+        for entry in feed.entries:
+            title = entry.get("title", "未知")
+            published = entry.get("published", entry.get("updated", ""))
+            link = entry.get("link", "")
+            magnet = ""
+            torrent = ""
+            for enc in entry.get("enclosures", []):
+                href = enc.get("href", "")
+                if href.startswith("magnet:"):
+                    magnet = href
+                    break
+                if href.endswith(".torrent"):
+                    torrent = href
+            if not magnet and link.startswith("magnet:"):
+                magnet = link
+            elif not torrent and link.endswith(".torrent"):
+                torrent = link
+            if not magnet:
+                for lnk in entry.get("links", []):
+                    href = lnk.get("href", "")
+                    if href.startswith("magnet:"):
+                        magnet = href
+                        break
+                    if href.endswith(".torrent") and not torrent:
+                        torrent = href
+            if not magnet:
+                content = entry.get("summary", "") + entry.get("description", "")
+                match = magnet_re.search(content)
+                if match:
+                    magnet = match.group(0)
+            download_url = magnet or torrent
+            if not download_url:
+                continue
+            items.append({
+                "title": title,
+                "download_url": download_url,
+                "type": "magnet" if magnet else "torrent",
+                "published": published,
+                "link": link if not link.startswith("magnet:") else "",
+            })
+
+        items = _sort_file_entries_by_name(items)
+        await _broadcast({
+            "type": "files_found",
+            "index": 1,
+            "files": [item.get("title", "未命名订阅") for item in items],
+            "parse_job_id": job_id,
+        })
+        await _broadcast_resolved_files(
+            1,
+            [{"name": item.get("title", "未命名订阅"), "path": item.get("link") or item.get("download_url") or "", "size": 0} for item in items],
+            {"parse_job_id": job_id},
+        )
+        result = {"title": feed.feed.get("title", "RSS Feed"), "count": len(items), "items": items}
+        await _broadcast({"type": "task_done", "index": 1, "file_name": result["title"], "parse_job_id": job_id})
+        await _broadcast({"type": "all_done", "total": 1, "parse_job_id": job_id})
+        await _finish_parse_job(job_id, "completed", result_payload=result)
+    except Exception as e:
+        await _broadcast({"type": "error", "message": f"RSS 解析失败: {e}", "parse_job_id": job_id})
+        await _finish_parse_job(job_id, "failed", error=str(e))
+
+
+@router.get("/progress/snapshot")
+async def api_progress_snapshot():
+    return await _build_parse_snapshot()
+
+
+@router.delete("/progress/logs")
+async def api_clear_progress_logs():
+    cleared = await db.clear_progress_logs(stream="pikpak")
+    return {"success": True, "count": cleared}
 
 
 # ── 磁链 API ──
@@ -241,47 +589,24 @@ async def api_add(request: Request):
 
 @router.post("/magnet/parse")
 async def api_magnet_parse(request: Request):
-    try:
-        body = await request.json()
-        magnet = body.get("magnet", "").strip()
-        if not magnet:
-            return JSONResponse({"error": "请输入磁力链接"}, status_code=400)
-        pikpak, _ = await _ensure_clients()
+    body = await request.json()
+    magnet = body.get("magnet", "").strip()
+    if not magnet:
+        return JSONResponse({"error": "请输入磁力链接"}, status_code=400)
 
-        task_info = await pikpak.add_offline_task(magnet)
-        task_id = task_info["task_id"]
-        file_id = task_info["file_id"]
-        file_name = task_info["file_name"]
-        if not task_id:
-            return JSONResponse({"error": "添加离线任务失败"}, status_code=500)
+    job, active_job = await _create_parse_job("magnet", {"magnet": magnet})
+    if not job:
+        return JSONResponse({
+            "error": "当前已有解析任务正在执行，请等待完成后再发起新的解析",
+            "active_job": _serialize_parse_job(active_job),
+        }, status_code=409)
 
-        from pikpakapi.enums import DownloadStatus
-        import time
-        cfg = load_config()
-        poll_interval = cfg.get("pikpak", {}).get("poll_interval", 3)
-        max_wait_time = cfg.get("pikpak", {}).get("max_wait_time", 3600)
-        start_time = time.time()
-
-        while True:
-            if time.time() - start_time > max_wait_time:
-                return JSONResponse({"error": f"等待超时 ({max_wait_time}s)"}, status_code=408)
-            try:
-                status = await pikpak.client.get_task_status(task_id, file_id)
-            except Exception:
-                await asyncio.sleep(poll_interval)
-                continue
-            if status == DownloadStatus.done:
-                break
-            elif status in (DownloadStatus.error, DownloadStatus.not_found):
-                return JSONResponse({"error": f"离线失败 ({status.value})"}, status_code=500)
-            await asyncio.sleep(poll_interval)
-
-        file_tree = await pikpak.list_file_tree(file_id)
-        for f in file_tree:
-            f["size_str"] = _format_size(f.get("size", 0))
-        return {"file_id": file_id, "file_name": file_name, "files": file_tree}
-    except Exception as e:
-        return JSONResponse({"error": str(e)}, status_code=500)
+    asyncio.create_task(_run_magnet_parse_job(job["job_id"], magnet))
+    return JSONResponse({
+        "success": True,
+        "message": "磁链解析任务已提交，正在后台执行",
+        "job": _serialize_parse_job(job),
+    }, status_code=202)
 
 
 @router.post("/magnet/download")
@@ -379,60 +704,24 @@ async def api_vip_info():
 
 @router.post("/rss/parse")
 async def api_rss_parse(request: Request):
-    try:
-        body = await request.json()
-        rss_url = body.get("url", "").strip()
-        if not rss_url:
-            return JSONResponse({"error": "请输入 RSS 链接"}, status_code=400)
-        async with httpx.AsyncClient(follow_redirects=True, timeout=15.0) as client:
-            resp = await client.get(rss_url, headers={"User-Agent": "TelDriveManager/1.0"})
-            resp.raise_for_status()
-            raw = resp.text
-        feed = feedparser.parse(raw)
-        if feed.bozo and not feed.entries:
-            return JSONResponse({"error": f"RSS 解析失败: {feed.bozo_exception}"}, status_code=400)
-        items = []
-        magnet_re = re.compile(r"magnet:\?xt=urn:[^\s\"'<>]+", re.IGNORECASE)
-        for entry in feed.entries:
-            title = entry.get("title", "未知")
-            published = entry.get("published", entry.get("updated", ""))
-            link = entry.get("link", "")
-            magnet = ""
-            torrent = ""
-            for enc in entry.get("enclosures", []):
-                href = enc.get("href", "")
-                if href.startswith("magnet:"):
-                    magnet = href; break
-                elif href.endswith(".torrent"):
-                    torrent = href
-            if not magnet and link.startswith("magnet:"):
-                magnet = link
-            elif not torrent and link.endswith(".torrent"):
-                torrent = link
-            if not magnet:
-                for lnk in entry.get("links", []):
-                    href = lnk.get("href", "")
-                    if href.startswith("magnet:"):
-                        magnet = href; break
-                    elif href.endswith(".torrent") and not torrent:
-                        torrent = href
-            if not magnet:
-                content = entry.get("summary", "") + entry.get("description", "")
-                m = magnet_re.search(content)
-                if m:
-                    magnet = m.group(0)
-            download_url = magnet or torrent
-            if not download_url:
-                continue
-            items.append({"title": title, "download_url": download_url,
-                          "type": "magnet" if magnet else "torrent",
-                          "published": published,
-                          "link": link if not link.startswith("magnet:") else ""})
-        return {"title": feed.feed.get("title", "RSS Feed"), "count": len(items), "items": items}
-    except httpx.HTTPError as e:
-        return JSONResponse({"error": f"下载 RSS 失败: {e}"}, status_code=400)
-    except Exception as e:
-        return JSONResponse({"error": str(e)}, status_code=500)
+    body = await request.json()
+    rss_url = body.get("url", "").strip()
+    if not rss_url:
+        return JSONResponse({"error": "请输入 RSS 链接"}, status_code=400)
+
+    job, active_job = await _create_parse_job("rss", {"url": rss_url})
+    if not job:
+        return JSONResponse({
+            "error": "当前已有解析任务正在执行，请等待完成后再发起新的解析",
+            "active_job": _serialize_parse_job(active_job),
+        }, status_code=409)
+
+    asyncio.create_task(_run_rss_parse_job(job["job_id"], rss_url))
+    return JSONResponse({
+        "success": True,
+        "message": "RSS 解析任务已提交，正在后台执行",
+        "job": _serialize_parse_job(job),
+    }, status_code=202)
 
 
 @router.post("/rss/download")
@@ -452,22 +741,25 @@ async def api_rss_download(request: Request):
 
 @router.post("/share/list")
 async def api_share_list(request: Request):
-    try:
-        body = await request.json()
-        share_link = body.get("share_link", "").strip()
-        pass_code = body.get("pass_code", "").strip()
-        if not share_link:
-            return JSONResponse({"error": "请输入分享链接"}, status_code=400)
-        await _ensure_clients()
-        result = await _pikpak.get_share_file_list(share_link, pass_code)
-        for f in result.get("files", []):
-            f["size_str"] = _format_size(f.get("size", 0))
-        result["files"] = _sort_file_entries_by_name(result.get("files", []))
-        return result
-    except ValueError as e:
-        return JSONResponse({"error": str(e)}, status_code=400)
-    except Exception as e:
-        return JSONResponse({"error": str(e)}, status_code=500)
+    body = await request.json()
+    share_link = body.get("share_link", "").strip()
+    pass_code = body.get("pass_code", "").strip()
+    if not share_link:
+        return JSONResponse({"error": "请输入分享链接"}, status_code=400)
+
+    job, active_job = await _create_parse_job("share", {"share_link": share_link, "pass_code": pass_code})
+    if not job:
+        return JSONResponse({
+            "error": "当前已有解析任务正在执行，请等待完成后再发起新的解析",
+            "active_job": _serialize_parse_job(active_job),
+        }, status_code=409)
+
+    asyncio.create_task(_run_share_parse_job(job["job_id"], share_link, pass_code))
+    return JSONResponse({
+        "success": True,
+        "message": "分享解析任务已提交，正在后台执行",
+        "job": _serialize_parse_job(job),
+    }, status_code=202)
 
 
 @router.post("/share/download")

@@ -143,6 +143,7 @@ def _normalize_config(merged: dict, raw: dict | None = None) -> dict:
     raw = raw or {}
     pikpak_cfg = merged.setdefault("pikpak", {})
     aria2_cfg = merged.setdefault("aria2", {})
+    log_cfg = merged.setdefault("log", {})
 
     raw_aria2 = raw.get("aria2") if isinstance(raw.get("aria2"), dict) else {}
     raw_pikpak = raw.get("pikpak") if isinstance(raw.get("pikpak"), dict) else {}
@@ -178,6 +179,9 @@ def _normalize_config(merged: dict, raw: dict | None = None) -> dict:
 
     for deprecated_key in ("download_engine", "max_concurrent_downloads", "connections_per_task"):
         pikpak_cfg.pop(deprecated_key, None)
+
+    log_cfg["buffer_size"] = max(50, int(log_cfg.get("buffer_size") or 400))
+    log_cfg["file"] = str(log_cfg.get("file") or "runtime.log").strip() or "runtime.log"
 
     return merged
 
