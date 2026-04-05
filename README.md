@@ -31,35 +31,14 @@ pip install -r requirements.txt
 ```
 
 ### 2. 配置 Systemd 服务
-创建服务配置文件：
+仓库已自带服务文件 `deploy/teldrive-manager.service`，不需要手动新建。
+
+如果你就是按本文档安装到 `/opt/TelDriveManager`，直接执行：
 ```bash
-sudo nano /etc/systemd/system/teldrive-manager.service
+sudo cp /opt/TelDriveManager/deploy/teldrive-manager.service /etc/systemd/system/teldrive-manager.service
 ```
 
-在文件中粘贴以下内容：
-```ini
-[Unit]
-Description=TelDriveManager Web Service
-After=network.target
-
-[Service]
-Type=simple
-# 如果有特定非 root 用户，可在此更改
-User=root
-WorkingDirectory=/opt/TelDriveManager
-
-# 默认使用虚拟环境内的 Python 启动 (推荐)
-ExecStart=/opt/TelDriveManager/venv/bin/python main.py
-
-# 如果在全系统安装了相关包，可以换用下方全局解释器启动：
-# ExecStart=/usr/bin/python3 main.py
-
-Restart=always
-RestartSec=5
-
-[Install]
-WantedBy=multi-user.target
-```
+如果你的安装目录不是 `/opt/TelDriveManager`，先编辑 `deploy/teldrive-manager.service` 里的路径，再复制到系统目录。
 
 ### 3. 启用并启动服务
 ```bash

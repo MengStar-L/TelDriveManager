@@ -1,0 +1,14 @@
+[Unit]
+Description=TelDriveManager Web Service
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/TelDriveManager
+ExecStart=/opt/TelDriveManager/venv/bin/python /opt/TelDriveManager/main.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
