@@ -109,8 +109,7 @@ async def auth_middleware(request: Request, call_next):
     # 未认证
     if path.startswith("/api/") or path == "/ws":
         return JSONResponse({"error": "未登录"}, status_code=401)
-    else:
-        return FileResponse(STATIC_DIR / "login.html")
+    return RedirectResponse(url="/login", status_code=303)
 
 
 # 注册路由
