@@ -1654,7 +1654,7 @@ function renderRssParseResult(result = {}) {
     }
     renderPickerTree('rssList', rssFileData, 'rss');
     const area = document.getElementById('rssResultArea');
-    if (area) area.style.display = 'block';
+    area?.classList.add('visible');
     const selectAll = document.getElementById('rssSelectAll');
     if (selectAll) selectAll.checked = true;
     updatePickerSelection('rss');
@@ -2902,7 +2902,7 @@ async function parseRSS() {
     if (activeParseJob) return alert('当前已有解析任务正在执行，请等待完成后再试');
 
     rssFileData = [];
-    document.getElementById('rssResultArea').style.display = 'none';
+    document.getElementById('rssResultArea')?.classList.remove('visible');
     setParseButtonsState({ job_type: 'rss', status: 'running' });
 
     try {

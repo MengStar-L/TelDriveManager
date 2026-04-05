@@ -83,7 +83,7 @@
         .ws-dot.connected { background: var(--success); }
 
         /* ── Main Area ── */
-        .main-wrapper { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
+        .main-wrapper { flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; overflow: hidden; border-radius: 40px; }
         
         
         /* ── Setup Wizard ── */
@@ -126,12 +126,12 @@
 
         /* ── Pages ── */
 
-        .page-content { flex: 1; min-height: 0; overflow-y: auto; padding-bottom: 20px; scrollbar-width: none; position: relative; }
+        .page-content { flex: 1; min-height: 0; overflow-y: auto; scrollbar-width: none; position: relative; border-radius: inherit; }
         .page-content::-webkit-scrollbar { display: none; }
-        .page { display: none; transform-origin: top center; will-change: opacity, transform, filter; }
+        .page { display: none; min-height: calc(100% - 20px); padding-bottom: 20px; transform-origin: top center; will-change: opacity, transform, filter; }
         .page.active { display: block; }
-        .page.page-fill { width: 100%; height: calc(100% - 20px); }
-        .page.page-fill.active { display: flex; width: 100%; }
+        .page.page-fill { width: 100%; min-height: 100%; height: 100%; padding-bottom: 0; }
+        .page.page-fill.active { display: flex; flex-direction: column; width: 100%; min-height: 100%; height: 100%; }
 
         .page.page-exit { animation: pageExit 0.28s cubic-bezier(0.4, 0, 0.2, 1) forwards; }
         .page.page-enter.page-enter-active { animation: pageEnterSmooth 0.48s cubic-bezier(0.16, 1, 0.3, 1) forwards; }
@@ -176,9 +176,13 @@
         .card-body { padding: 24px; }
         .page-fill-card { width: 100%; height: 100%; display: flex; flex-direction: column; margin-bottom: 0; }
         .page-fill-card > .card-body { flex: 1; min-height: 0; display: flex; flex-direction: column; }
-        .share-toolbar { display: flex; gap: 12px; margin-bottom: 24px; flex-shrink: 0; }
-        .share-file-panel { display: none; flex: 1; min-height: 0; border: 1px solid var(--border); border-radius: var(--radius-lg); background: linear-gradient(180deg, rgba(248,250,252,0.82), rgba(255,255,255,0.98)); overflow: hidden; }
-        .share-file-panel.visible { display: flex; flex-direction: column; }
+        .page-fill-card .log-container.log-container-expanded { flex: 1; min-height: 0; height: 100%; max-height: none; }
+        .share-toolbar,
+        .rss-toolbar { display: flex; gap: 12px; margin-bottom: 24px; flex-shrink: 0; }
+        .share-file-panel,
+        .rss-result-panel { display: none; flex: 1; min-height: 0; border: 1px solid var(--border); border-radius: var(--radius-lg); background: linear-gradient(180deg, rgba(248,250,252,0.82), rgba(255,255,255,0.98)); overflow: hidden; }
+        .share-file-panel.visible,
+        .rss-result-panel.visible { display: flex; flex-direction: column; }
 
         /* ── Buttons ── */
         .btn { padding: 10px 20px; border: none; border-radius: 100px; font-family: inherit; font-size: 14px; font-weight: 600; cursor: pointer; transition: all 0.2s; display: inline-flex; align-items: center; justify-content: center; gap: 8px; line-height: 1; white-space: nowrap; flex-shrink: 0; }
@@ -870,15 +874,15 @@
                 </div>
 
                 <!-- RSS -->
-                <div class="page" id="page-rss">
-                    <div class="card">
+                <div class="page page-fill" id="page-rss">
+                    <div class="card page-fill-card">
                         <div class="card-body">
-                            <div style="display:flex; gap:12px; margin-bottom: 24px;">
+                            <div class="rss-toolbar">
                                 <input class="form-input" type="text" id="rssUrl" placeholder="输入目标 RSS 订阅源...">
                                 <button class="btn btn-primary" id="rssParseBtn" onclick="parseRSS()"><i class="ph ph-radar"></i> 扫描提取</button>
                             </div>
                             
-                            <div id="rssResultArea" style="display:none; border:1px solid var(--border); border-radius:var(--radius-lg);">
+                            <div id="rssResultArea" class="rss-result-panel">
                                 <div class="card-header"><h3 id="rssFeedTitle"><i class="ph ph-feed"></i> RSS 流信息</h3></div>
                                 <div class="file-list-header">
                                     <label><input type="checkbox" id="rssSelectAll" onchange="toggleRssSelectAll()"> 订阅全部</label>
@@ -895,9 +899,9 @@
                 </div>
 
                 <!-- Progress -->
-                <div class="page" id="page-progress">
+                <div class="page page-fill" id="page-progress">
 
-                    <div class="card">
+                    <div class="card page-fill-card">
                         <div class="card-header">
                             <h3><i class="ph ph-terminal-window"></i> 实时控制台诊断</h3>
                             <button class="btn btn-ghost btn-sm" onclick="clearLog()"><i class="ph ph-trash"></i> 清理终端</button>
@@ -1255,7 +1259,7 @@
 
     <div id="a2tdToastContainer" class="app-toast-container"></div>
 
-    <script src="/static/app.js?v=20260405a"></script>
+    <script src="/static/app.js?v=20260405b"></script>
 
 
 
