@@ -36,6 +36,7 @@ from app.modules.tel2teldrive.routes import router as t2td_router
 logger = logging.getLogger(__name__)
 
 STATIC_DIR = Path(__file__).parent / "static"
+FAVICON_PATH = ROOT_DIR / "image.png"
 
 
 @asynccontextmanager
@@ -96,7 +97,7 @@ async def auth_middleware(request: Request, call_next):
     # 放行：静态资源、登录、认证检查
     if (path in ("/login", "/api/login", "/api/auth/check")
             or path.startswith("/static/")
-            or path == "/favicon.ico"):
+            or path in {"/favicon.ico", "/favicon.png"}):
         return await call_next(request)
 
     # 未启用认证则放行
@@ -140,6 +141,12 @@ async def login_page(auth_token: str | None = Cookie(None)):
     if auth_token and verify_token(auth_token):
         return RedirectResponse("/")
     return FileResponse(STATIC_DIR / "login.html")
+
+
+@app.get("/favicon.png", include_in_schema=False)
+@app.get("/favicon.ico", include_in_schema=False)
+async def favicon():
+    return FileResponse(FAVICON_PATH, media_type="image/png")
 
 if __name__ == "__main__":
     import uvicorn
