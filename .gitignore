@@ -26,5 +26,15 @@ fix*.py
 # Temp history exports
 history_*.md
 
+# Root scratch/debug files
+/apdata.txt
+/cf.py
+/pikpak.txt
+/r.txt
+/stop.txt
+/stop2.txt
+/task.py
+
 # Downloads dir
 downloads/
+
