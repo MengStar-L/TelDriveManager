@@ -69,6 +69,37 @@ def _sort_file_entries_by_name(files: List[Dict]) -> List[Dict]:
     )
 
 
+def _normalize_teldrive_path(path: str) -> str:
+    value = str(path or "").strip().replace("\\", "/")
+    if not value:
+        return "/"
+    if not value.startswith("/"):
+        value = "/" + value
+    while "//" in value:
+        value = value.replace("//", "/")
+    return value.rstrip("/") or "/"
+
+
+def _join_teldrive_path(base_path: str, sub_path: str = "") -> str:
+    base = _normalize_teldrive_path(base_path)
+    child = str(sub_path or "").strip().replace("\\", "/").strip("/")
+    if not child:
+        return base
+    if base == "/":
+        return _normalize_teldrive_path(f"/{child}")
+    return _normalize_teldrive_path(f"{base}/{child}")
+
+
+async def _register_aria2_task(gid: str, url: str, filename: str, teldrive_path: str):
+    await task_manager.register_external_task(
+        gid,
+        url,
+        filename,
+        teldrive_path=_normalize_teldrive_path(teldrive_path),
+        status="pending",
+    )
+
+
 def _create_clients():
     cfg = load_config()
     pikpak_cfg = cfg.get("pikpak", {})
@@ -616,9 +647,10 @@ async def api_magnet_download(request: Request):
         file_id = body.get("file_id", "")
         selected_ids = body.get("selected_ids", [])
         keep_structure = body.get("keep_structure", True)
+        teldrive_path = body.get("teldrive_path", "/")
         if not file_id:
             return JSONResponse({"error": "缺少 file_id"}, status_code=400)
-        asyncio.create_task(_process_magnet_selected(file_id, selected_ids, keep_structure))
+        asyncio.create_task(_process_magnet_selected(file_id, selected_ids, keep_structure, teldrive_path))
         return {"message": f"开始下载 {len(selected_ids)} 个文件"}
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
@@ -772,6 +804,7 @@ async def api_share_download(request: Request):
         keep_structure = body.get("keep_structure", True)
         file_paths = body.get("file_paths", {})
         rename_by_folder = body.get("rename_by_folder", False)
+        teldrive_path = body.get("teldrive_path", "/")
         if not share_id or not file_ids:
             return JSONResponse({"error": "缺少参数"}, status_code=400)
 
@@ -781,7 +814,15 @@ async def api_share_download(request: Request):
 
         try:
             asyncio.create_task(_process_share_download(
-                share_id, file_ids, pass_code_token, keep_structure, file_paths, rename_by_folder, job_key=job_key))
+                share_id,
+                file_ids,
+                pass_code_token,
+                keep_structure,
+                file_paths,
+                rename_by_folder,
+                teldrive_path=teldrive_path,
+                job_key=job_key,
+            ))
         except Exception:
             await _release_share_download_job(job_key)
             raise
@@ -807,20 +848,33 @@ def _maybe_rename_by_folder(url_info: dict, rename: bool, original_path: str = "
     return name
 
 
-async def _aria2_push_only(files: List[dict], index: int, delete_pikpak_ids: List[str] = None):
+async def _aria2_push_only(files: List[dict], index: int, delete_pikpak_ids: List[str] = None,
+                           keep_structure: bool = True, teldrive_path: str = "/"):
     """外部接收端模式：仅推送下载链接，不触发 TelDrive 上传"""
     try:
         _, aria2 = await _ensure_clients()
         cfg = load_config()
         aria2_cfg = cfg.get("aria2", {})
         push_target = _get_push_target_label("aria2")
+        base_teldrive_path = _normalize_teldrive_path(teldrive_path)
 
         tasks_to_add = []
+        task_contexts = []
         for f in files:
-            path = f.get("path", f["name"])
-            parent_dir = posixpath.dirname(path)
-            tasks_to_add.append({"url": f["url"], "name": f["name"],
-                                 "subdir": parent_dir if parent_dir else None})
+            path = str(f.get("path", f.get("name", "")) or "")
+            parent_dir = posixpath.dirname(path).strip("/.")
+            aria2_subdir = parent_dir if keep_structure and parent_dir else None
+            task_teldrive_path = _join_teldrive_path(base_teldrive_path, parent_dir) if keep_structure and parent_dir else base_teldrive_path
+            tasks_to_add.append({
+                "url": f["url"],
+                "name": f["name"],
+                "subdir": aria2_subdir,
+            })
+            task_contexts.append({
+                "url": f["url"],
+                "name": f["name"],
+                "teldrive_path": task_teldrive_path,
+            })
 
         await _broadcast({
             "type": "task_status",
@@ -829,10 +883,15 @@ async def _aria2_push_only(files: List[dict], index: int, delete_pikpak_ids: Lis
         })
         download_dir = aria2_cfg.get("download_dir", "")
         gids = await aria2.add_uris_batch(tasks_to_add, base_dir=download_dir)
-        for sequence, file_info in enumerate(files, 1):
+        success_count = 0
+        for sequence, (gid, file_info, task_ctx) in enumerate(zip(gids, files, task_contexts), 1):
+            if not gid:
+                continue
+            await _register_aria2_task(gid, task_ctx["url"], task_ctx["name"], task_ctx["teldrive_path"])
+            success_count += 1
             await _broadcast_link_pushed(index, file_info, sequence, len(files), push_target)
         await _broadcast({"type": "push_done", "index": index,
-                          "success_count": len(gids), "total_count": len(files),
+                          "success_count": success_count, "total_count": len(files),
                           "target": push_target})
     except Exception as e:
         await _broadcast({"type": "task_error", "index": index,
@@ -848,7 +907,7 @@ async def _aria2_push_only(files: List[dict], index: int, delete_pikpak_ids: Lis
             pass
 
 
-async def _process_magnets(magnets: List[str]):
+async def _process_magnets(magnets: List[str], teldrive_path: Optional[str] = None):
     from pikpakapi.enums import DownloadStatus
     import time
 
@@ -857,6 +916,9 @@ async def _process_magnets(magnets: List[str]):
     poll_interval = pikpak_cfg.get("poll_interval", 3)
     max_wait_time = pikpak_cfg.get("max_wait_time", 3600)
     delete_after = pikpak_cfg.get("delete_after_download", False)
+    resolved_teldrive_path = _normalize_teldrive_path(
+        cfg.get("teldrive", {}).get("target_path", "/") if teldrive_path is None else teldrive_path
+    )
 
     try:
         pikpak, _ = await _ensure_clients()
@@ -932,7 +994,13 @@ async def _process_magnets(magnets: List[str]):
         push_target = _get_push_target_label("aria2")
         await _broadcast({"type": "task_status", "index": i,
                           "status": f"解析完成，共 {len(files)} 个文件，开始推送下载链接到{push_target}..."})
-        await _aria2_push_only(files, i, delete_pikpak_ids=delete_ids)
+        await _aria2_push_only(
+            files,
+            i,
+            delete_pikpak_ids=delete_ids,
+            keep_structure=True,
+            teldrive_path=resolved_teldrive_path,
+        )
 
         await _broadcast({"type": "task_done", "index": i, "file_name": file_name})
 
@@ -940,7 +1008,7 @@ async def _process_magnets(magnets: List[str]):
 
 
 async def _process_magnet_selected(root_file_id: str, selected_ids: List[str],
-                                    keep_structure: bool = True):
+                                    keep_structure: bool = True, teldrive_path: Optional[str] = None):
     try:
         pikpak, _ = await _ensure_clients()
         cfg = load_config()
@@ -969,7 +1037,16 @@ async def _process_magnet_selected(root_file_id: str, selected_ids: List[str],
                           "status": f"解析完成，共 {len(files)} 个文件，开始推送下载链接到{push_target}..."})
 
         delete_ids = [root_file_id] if delete_after else None
-        await _aria2_push_only(files, 1, delete_pikpak_ids=delete_ids)
+        resolved_teldrive_path = _normalize_teldrive_path(
+            cfg.get("teldrive", {}).get("target_path", "/") if teldrive_path is None else teldrive_path
+        )
+        await _aria2_push_only(
+            files,
+            1,
+            delete_pikpak_ids=delete_ids,
+            keep_structure=keep_structure,
+            teldrive_path=resolved_teldrive_path,
+        )
 
         await _broadcast({"type": "all_done", "total": 1})
     except Exception as e:
@@ -978,7 +1055,8 @@ async def _process_magnet_selected(root_file_id: str, selected_ids: List[str],
 
 async def _process_share_download(share_id: str, file_ids: List[str], pass_code_token: str,
                                    keep_structure: bool = True, file_paths: Dict[str, str] = None,
-                                   rename_by_folder: bool = False, job_key: str = ""):
+                                   rename_by_folder: bool = False, teldrive_path: Optional[str] = None,
+                                   job_key: str = ""):
     saved_ids: List[str] = []
     try:
         await _ensure_clients()
@@ -988,6 +1066,9 @@ async def _process_share_download(share_id: str, file_ids: List[str], pass_code_
         pikpak_cfg = cfg.get("pikpak", {})
         share_url_timeout = float(pikpak_cfg.get("share_download_url_timeout", 60))
         share_poll_interval = float(pikpak_cfg.get("share_download_url_poll_interval", 3))
+        base_teldrive_path = _normalize_teldrive_path(
+            cfg.get("teldrive", {}).get("target_path", "/") if teldrive_path is None else teldrive_path
+        )
 
         await _broadcast({"type": "task_start", "index": 1, "total": total,
                           "magnet": f"分享文件 ({total} 个)"})
@@ -1048,6 +1129,7 @@ async def _process_share_download(share_id: str, file_ids: List[str], pass_code_
         for sequence, url_info in enumerate(all_urls, 1):
             try:
                 opts = {}
+                subdir = ""
                 if download_dir:
                     if keep_structure:
                         path = url_info.get("path", "")
@@ -1072,6 +1154,10 @@ async def _process_share_download(share_id: str, file_ids: List[str], pass_code_
 
                 gid = await _aria2.add_uri(url_info["url"], opts)
                 if gid:
+                    task_teldrive_path = base_teldrive_path
+                    if keep_structure:
+                        task_teldrive_path = _join_teldrive_path(base_teldrive_path, subdir)
+                    await _register_aria2_task(gid, url_info["url"], display_info.get("name") or url_info.get("name") or "", task_teldrive_path)
                     success_count += 1
                     await _broadcast_link_pushed(1, display_info, sequence, len(all_urls), push_target)
             except Exception as e:

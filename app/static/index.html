@@ -229,8 +229,11 @@
         .folder-row:hover { background: #e0f2fe; }
         .folder-row .file-icon { color: var(--accent); }
 
-        .share-actions { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 16px 24px; flex-shrink: 0;}
+        .share-actions { display: flex; align-items: flex-end; justify-content: space-between; gap: 16px; padding: 16px 24px; flex-shrink: 0; flex-wrap: wrap; }
         .selected-info { font-size: 13px; color: var(--text-secondary); font-weight: 500; }
+        .target-folder-field { display: flex; flex-direction: column; gap: 6px; min-width: min(260px, 100%); max-width: 360px; flex: 1 1 280px; }
+        .target-folder-label { font-size: 12px; color: var(--text-secondary); font-weight: 600; }
+        .target-folder-input { min-width: 0; }
         
         /* ── Log Container ── */
         .log-container { max-height: 450px; overflow-y: auto; scrollbar-width: thin; scrollbar-color: #cbd5e1 transparent; background: #1e293b; color: #f8fafc; border-radius: var(--radius-md); padding: 16px 24px; font-family: 'Cascadia Code', monospace; box-shadow: inset 0 4px 12px rgba(0,0,0,0.1); }
@@ -824,12 +827,16 @@
                             </div>
                             <div class="file-list" id="magnetFileList"></div>
                             <div class="share-actions">
-                                <div style="display:flex;align-items:center;gap:20px">
+                                <div style="display:flex;align-items:flex-end;gap:20px;flex-wrap:wrap;flex:1 1 auto;min-width:0;">
                                     <span class="selected-info" id="magnetSelectedInfo">已选 0 个对象</span>
                                     <label class="toggle-row">
                                         <div class="toggle-switch"><input type="checkbox" id="magnetKeepStructure" checked><span class="toggle-slider"></span></div>
                                         维持目录结构映射
                                     </label>
+                                    <div class="target-folder-field">
+                                        <label class="target-folder-label" for="magnetTeldrivePath">TelDrive 保存目录</label>
+                                        <input class="form-input target-folder-input" type="text" id="magnetTeldrivePath" placeholder="留空则保存到根目录 /">
+                                    </div>
                                 </div>
                                 <button class="btn btn-primary" id="magnetDownloadBtn" onclick="downloadMagnetFiles()"><i class="ph ph-download-simple"></i> 推送下载链接</button>
 
@@ -855,7 +862,7 @@
                                 </div>
                                 <div class="file-list" id="fileList"></div>
                                 <div class="share-actions">
-                                    <div style="display:flex;align-items:center;gap:20px;flex-wrap:wrap">
+                                    <div style="display:flex;align-items:flex-end;gap:20px;flex-wrap:wrap;flex:1 1 auto;min-width:0;">
                                         <span class="selected-info" id="selectedInfo">已选 0 个文件</span>
                                         <label class="toggle-row">
                                             <div class="toggle-switch"><input type="checkbox" id="shareKeepStructure" checked><span class="toggle-slider"></span></div>
@@ -865,6 +872,10 @@
                                             <div class="toggle-switch"><input type="checkbox" id="shareRenameByFolder" onchange="reRenderShareFileList()"><span class="toggle-slider"></span></div>
                                             层级重命名
                                         </label>
+                                        <div class="target-folder-field">
+                                            <label class="target-folder-label" for="shareTeldrivePath">TelDrive 保存目录</label>
+                                            <input class="form-input target-folder-input" type="text" id="shareTeldrivePath" placeholder="留空则保存到根目录 /">
+                                        </div>
                                     </div>
                                     <button class="btn btn-primary" id="downloadShareBtn" onclick="downloadShareFiles()"><i class="ph ph-cloud-arrow-down"></i> 执行下载</button>
                                 </div>
@@ -890,7 +901,13 @@
                                 </div>
                                 <div class="file-list" id="rssList"></div>
                                 <div class="share-actions">
-                                    <span class="selected-info" id="rssSelectedInfo">准备好下载项目</span>
+                                    <div style="display:flex;align-items:flex-end;gap:20px;flex-wrap:wrap;flex:1 1 auto;min-width:0;">
+                                        <span class="selected-info" id="rssSelectedInfo">准备好下载项目</span>
+                                        <div class="target-folder-field">
+                                            <label class="target-folder-label" for="rssTeldrivePath">TelDrive 保存目录</label>
+                                            <input class="form-input target-folder-input" type="text" id="rssTeldrivePath" placeholder="留空则保存到根目录 /">
+                                        </div>
+                                    </div>
                                     <button class="btn btn-primary" id="rssDownloadBtn" onclick="downloadRssItems()"><i class="ph ph-download-simple"></i> 执行订阅下载</button>
                                 </div>
                             </div>
@@ -1259,7 +1276,7 @@
 
     <div id="a2tdToastContainer" class="app-toast-container"></div>
 
-    <script src="/static/app.js?v=20260405b"></script>
+    <script src="/static/app.js?v=20260405c"></script>
 
 
 

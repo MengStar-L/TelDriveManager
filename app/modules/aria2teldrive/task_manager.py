@@ -1294,6 +1294,20 @@ class TaskManager:
     # 手动添加任务（通过面板）
     # ===========================================
 
+    async def register_external_task(self, gid: str, url: str, filename: str = None,
+                                     teldrive_path: str = "/", status: str = "pending") -> Optional[dict]:
+        """为外部提交到 aria2 的任务注册 TelDrive 目标目录。"""
+        gid = str(gid or "").strip()
+        if not gid:
+            return None
+
+        normalized_path = self._normalize_teldrive_path(teldrive_path)
+        await db.add_task(gid, url, filename, normalized_path)
+        await db.update_task(gid, status=status, aria2_gid=gid, teldrive_path=normalized_path)
+        self._known_gids.add(gid)
+        await self._broadcast_task_update(gid)
+        return await db.get_task(gid)
+
     async def add_task(self, url: str, filename: str = None,
                        teldrive_path: str = "/") -> dict:
         """通过面板手动添加下载+上传任务"""
@@ -1302,16 +1316,12 @@ class TaskManager:
         if filename:
             options["out"] = filename
 
-        # 提交给 aria2
         gid = await self.aria2.add_uri(url, options)
+        task = await self.register_external_task(
+            gid, url, filename, teldrive_path=teldrive_path, status="downloading"
+        )
+        return task or await db.get_task(gid)
 
-        # 入库（用 GID 作为 task_id）
-        task = await db.add_task(gid, url, filename, teldrive_path)
-        await db.update_task(gid, status="downloading", aria2_gid=gid)
-        self._known_gids.add(gid)
-
-        await self._broadcast_task_update(gid)
-        return await db.get_task(gid)
 
     # ===========================================
     # 任务操作

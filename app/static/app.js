@@ -2731,6 +2731,7 @@ async function downloadMagnetFiles() {
     }
 
     const keepStructure = document.getElementById('magnetKeepStructure').checked;
+    const teldrivePath = getTelDriveTargetPath('magnetTeldrivePath');
     const btn = document.getElementById('magnetDownloadBtn');
     if(!btn) return;
     magnetDownloadSubmitting = true;
@@ -2745,7 +2746,8 @@ async function downloadMagnetFiles() {
             body: JSON.stringify({
                 file_id: magnetCurrentFileId,
                 selected_ids: selectedIds,
-                keep_structure: keepStructure
+                keep_structure: keepStructure,
+                teldrive_path: teldrivePath
             })
         });
         const data = await resp.json();
@@ -2792,6 +2794,10 @@ function comparePickerItemsByName(a = {}, b = {}) {
 
 function sortPickerItemsByName(files = []) {
     return Array.isArray(files) ? [...files].sort(comparePickerItemsByName) : [];
+}
+
+function getTelDriveTargetPath(inputId) {
+    return (document.getElementById(inputId)?.value || '').trim() || '/';
 }
 
 
@@ -2852,6 +2858,7 @@ async function downloadShareFiles() {
 
     const keepStructure = document.getElementById('shareKeepStructure').checked;
     const renameByFolder = document.getElementById('shareRenameByFolder').checked;
+    const teldrivePath = getTelDriveTargetPath('shareTeldrivePath');
     const filePaths = Object.fromEntries(
         orderedSelectedItems.map(item => [item.id, item.path || item.name || ''])
     );
@@ -2873,7 +2880,8 @@ async function downloadShareFiles() {
                 pass_code_token: shareCurrentData.pass_code_token,
                 keep_structure: keepStructure,
                 file_paths: filePaths,
-                rename_by_folder: renameByFolder
+                rename_by_folder: renameByFolder,
+                teldrive_path: teldrivePath
             })
 
         });
@@ -2941,6 +2949,7 @@ async function downloadRssItems() {
     
     if (!selectedUrls.length) return alert('请先选择需要订阅的项目');
 
+    const teldrivePath = getTelDriveTargetPath('rssTeldrivePath');
     const btn = document.getElementById('rssDownloadBtn');
     if(!btn) return;
     rssDownloadSubmitting = true;
@@ -2952,7 +2961,7 @@ async function downloadRssItems() {
         const resp = await fetch('/api/pikpak/rss/download', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ urls: selectedUrls })
+            body: JSON.stringify({ urls: selectedUrls, teldrive_path: teldrivePath })
         });
         const data = await resp.json();
         if(!resp.ok) throw new Error(data.error || '提交失败');
