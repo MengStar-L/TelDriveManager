@@ -17,6 +17,7 @@ from app.config import load_config
 from app import database as db
 from app.modules.pikpak.client import PikPakClient
 from app.aria2_client import Aria2Client
+from app.modules.aria2teldrive.task_manager import task_manager
 
 logger = logging.getLogger(__name__)
 
