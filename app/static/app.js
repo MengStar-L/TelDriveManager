@@ -1622,8 +1622,12 @@ function renderMagnetParseResult(result = {}) {
     magnetCurrentFileId = result.file_id || null;
     magnetFileData = sortPickerItemsByName(result.files || []);
     const titleEl = document.getElementById('magnetFileName');
+    const metaEl = document.getElementById('magnetPanelMeta');
     if (titleEl) {
-        titleEl.innerHTML = `<i class="ph-fill ph-folder-open"></i> ${escapeA2TDHtml(result.file_name || '文件树状图')}`;
+        titleEl.innerHTML = `<i class="ph ph-folder-open"></i> ${escapeA2TDHtml(result.file_name || '磁链文件列表')}`;
+    }
+    if (metaEl) {
+        metaEl.textContent = `已解析 ${magnetFileData.length} 项，可筛选节点并推送下载链接`;
     }
     renderPickerTree('magnetFileList', magnetFileData, 'magnet');
     const area = document.getElementById('magnetFileArea');
@@ -1637,6 +1641,10 @@ function renderShareParseResult(result = {}) {
     if (!result || typeof result !== 'object') return;
     shareCurrentData = { ...(shareCurrentData || {}), ...result };
     shareFileData = sortPickerItemsByName(result.files || []);
+    const shareMetaEl = document.getElementById('sharePanelMeta');
+    if (shareMetaEl) {
+        shareMetaEl.textContent = `已解析 ${shareFileData.length} 项，可筛选节点并执行同步下载`;
+    }
     renderPickerTree('fileList', shareFileData, 'share');
     const area = document.getElementById('shareFileArea');
     area?.classList.add('visible');
@@ -1648,9 +1656,14 @@ function renderShareParseResult(result = {}) {
 function renderRssParseResult(result = {}) {
     if (!result || typeof result !== 'object') return;
     rssFileData = sortPickerItemsByName(result.items || []);
+    const total = Number(result.count ?? rssFileData.length) || rssFileData.length;
     const titleEl = document.getElementById('rssFeedTitle');
+    const metaEl = document.getElementById('rssPanelMeta');
     if (titleEl) {
-        titleEl.innerHTML = `<i class="ph ph-feed"></i> ${escapeA2TDHtml(result.title || 'RSS Feed')} (${escapeA2TDHtml(result.count ?? rssFileData.length) } 项)`;
+        titleEl.innerHTML = `<i class="ph ph-feed"></i> ${escapeA2TDHtml(result.title || 'RSS Feed')}`;
+    }
+    if (metaEl) {
+        metaEl.textContent = `已扫描 ${total} 项，可批量选择订阅项并执行下载`;
     }
     renderPickerTree('rssList', rssFileData, 'rss');
     const area = document.getElementById('rssResultArea');
@@ -3278,7 +3291,15 @@ function updatePickerSelection(prefix) {
 
     if (!cbList.length) {
         if (countSpan) countSpan.textContent = '共 0 项';
-        if (selectedInfoSpan) selectedInfoSpan.textContent = prefix === 'rss' ? '已选 0 项准备下载' : '已选 0 个对象';
+        if (selectedInfoSpan) {
+            if (prefix === 'magnet') {
+                selectedInfoSpan.textContent = '已选 0 项待推送';
+            } else if (['share', 'rss'].includes(prefix)) {
+                selectedInfoSpan.textContent = '已选 0 项待下载';
+            } else {
+                selectedInfoSpan.textContent = '已选 0 个对象';
+            }
+        }
         syncPickerSelectAll(prefix);
         return;
     }
@@ -3290,8 +3311,10 @@ function updatePickerSelection(prefix) {
 
     if (countSpan) countSpan.textContent = `共 ${total} 项`;
     if (selectedInfoSpan) {
-        if (prefix === 'rss') {
-            selectedInfoSpan.textContent = `已选 ${checkedCount} 项准备下载`;
+        if (prefix === 'magnet') {
+            selectedInfoSpan.textContent = `已选 ${checkedCount} 项待推送`;
+        } else if (['share', 'rss'].includes(prefix)) {
+            selectedInfoSpan.textContent = `已选 ${checkedCount} 项待下载`;
         } else {
             selectedInfoSpan.textContent = `已选 ${checkedCount} 个对象`;
         }

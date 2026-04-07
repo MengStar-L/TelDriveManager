@@ -180,11 +180,22 @@
 
         .page-fill-card .log-container.log-container-expanded { flex: 1; min-height: 0; height: 100%; max-height: none; }
         .share-toolbar,
-        .rss-toolbar { display: flex; gap: 12px; margin-bottom: 24px; flex-shrink: 0; }
+        .rss-toolbar { display: flex; align-items: stretch; gap: 12px; margin-bottom: 24px; flex-shrink: 0; flex-wrap: wrap; }
+        .toolbar-input-primary { flex: 1 1 360px; min-width: 240px; }
+        .toolbar-input-secondary { flex: 0 0 180px; }
+        .toolbar-action { min-width: 132px; }
         .share-file-panel,
         .rss-result-panel { display: none; flex: 1; min-height: 0; border: 1px solid var(--border); border-radius: var(--radius-lg); background: linear-gradient(180deg, rgba(248,250,252,0.82), rgba(255,255,255,0.98)); overflow: hidden; }
         .share-file-panel.visible,
-        .rss-result-panel.visible { display: flex; flex-direction: column; }
+        .rss-result-panel.visible { display: grid; grid-template-rows: auto auto minmax(0, 1fr) auto; }
+        .picker-panel-header { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 18px 24px 16px; border-bottom: 1px solid rgba(226, 232, 240, 0.88); background: linear-gradient(180deg, rgba(255,255,255,0.98), rgba(248,250,252,0.9)); }
+        .picker-panel-title-group { min-width: 0; display: flex; flex-direction: column; gap: 6px; }
+        .picker-panel-title { display: flex; align-items: center; gap: 10px; margin: 0; font-size: 15px; font-weight: 600; color: var(--text-primary); }
+        .picker-panel-title i { font-size: 18px; color: var(--accent); }
+        .picker-panel-subtitle { margin: 0; font-size: 13px; color: var(--text-secondary); }
+        .share-file-panel .file-list-header,
+        .rss-result-panel .file-list-header { border-radius: 0; }
+
 
         /* ── Buttons ── */
         .btn { padding: 10px 20px; border: none; border-radius: 100px; font-family: inherit; font-size: 14px; font-weight: 600; cursor: pointer; transition: all 0.2s; display: inline-flex; align-items: center; justify-content: center; gap: 8px; line-height: 1; white-space: nowrap; flex-shrink: 0; }
@@ -242,7 +253,8 @@
         .picker-folder-toggle.is-collapsed i { transform: rotate(-90deg); }
         .file-check-spacer { width: 24px; height: 24px; flex-shrink: 0; }
 
-        .share-actions { position: sticky; bottom: 0; z-index: 8; display: grid; grid-template-columns: minmax(0, 1fr) minmax(280px, 400px) auto; align-items: center; gap: 16px 18px; padding: 18px 24px; margin-top: auto; flex-shrink: 0; border-top: 1px solid rgba(226, 232, 240, 0.9); background: linear-gradient(180deg, rgba(248,250,252,0.9), rgba(255,255,255,0.98)); box-shadow: 0 -12px 28px rgba(15, 23, 42, 0.08); backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px); }
+        .share-actions { position: sticky; bottom: 0; z-index: 8; display: grid; grid-template-columns: minmax(0, 1fr) minmax(280px, 400px) auto; align-items: center; gap: 16px 18px; padding: 18px 24px; flex-shrink: 0; border-top: 1px solid rgba(226, 232, 240, 0.9); background: linear-gradient(180deg, rgba(248,250,252,0.9), rgba(255,255,255,0.98)); box-shadow: 0 -12px 28px rgba(15, 23, 42, 0.08); backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px); }
+
 
 
         .action-meta { display: flex; align-items: center; gap: 18px; flex-wrap: wrap; min-width: 0; }
@@ -259,11 +271,14 @@
         .page.page-stack > .card { margin-bottom: 0; }
         .magnet-input-card { flex-shrink: 0; }
         .magnet-result-card { flex: 1; min-height: 0; }
-        .magnet-result-card > .card-body { flex: 1; min-height: 0; display: flex; flex-direction: column; padding: 0; overflow: hidden; }
+        .magnet-result-card > .card-body { flex: 1; min-height: 0; display: grid; grid-template-rows: auto auto minmax(0, 1fr) auto; padding: 0; overflow: hidden; }
+        .magnet-result-card .file-list-header { border-radius: 0; }
 
         .magnet-result-card .file-list,
         .share-file-panel .file-list,
-        .rss-result-panel .file-list { max-height: none; padding-bottom: 112px; scroll-padding-bottom: 112px; }
+        .rss-result-panel .file-list { height: auto; max-height: none; padding-bottom: 112px; scroll-padding-bottom: 112px; }
+        .magnet-result-card .share-actions { margin-top: 0; }
+
 
         
         /* ── Log Container ── */
@@ -901,18 +916,21 @@
                     </div>
                     
                     <div class="card page-fill-card magnet-result-card" id="magnetFileArea" style="display:none">
-                        <div class="card-header">
-                            <h3 id="magnetFileName"><i class="ph-fill ph-folder-open"></i> 文件树状图</h3>
-                        </div>
                         <div class="card-body" style="padding:0">
+                            <div class="picker-panel-header">
+                                <div class="picker-panel-title-group">
+                                    <h3 class="picker-panel-title" id="magnetFileName"><i class="ph ph-folder-open"></i> 磁链文件列表</h3>
+                                    <p class="picker-panel-subtitle" id="magnetPanelMeta">解析后可筛选节点并推送下载链接</p>
+                                </div>
+                            </div>
                             <div class="file-list-header">
-                                <label><input type="checkbox" id="magnetSelectAll" onchange="toggleMagnetSelectAll()"> 选中所有节点</label>
+                                <label><input type="checkbox" id="magnetSelectAll" onchange="toggleMagnetSelectAll()"> 全选节点</label>
                                 <span class="file-count" id="magnetFileCount"></span>
                             </div>
                             <div class="file-list" id="magnetFileList"></div>
                             <div class="share-actions">
                                 <div class="action-meta">
-                                    <span class="selected-info" id="magnetSelectedInfo"><i class="ph ph-check-circle"></i> 已选 0 个对象</span>
+                                    <span class="selected-info" id="magnetSelectedInfo"><i class="ph ph-check-circle"></i> 已选 0 项待推送</span>
                                     <label class="toggle-row">
                                         <div class="toggle-switch"><input type="checkbox" id="magnetKeepStructure" checked><span class="toggle-slider"></span></div>
                                         维持目录结构映射
@@ -936,12 +954,18 @@
                     <div class="card page-fill-card">
                         <div class="card-body">
                             <div class="share-toolbar">
-                                <input class="form-input" type="text" id="shareLink" placeholder="输入 PikPak 分享链接...">
-                                <input class="form-input" style="width:180px" type="text" id="sharePassCode" placeholder="提取码">
-                                <button class="btn btn-primary" id="shareParseBtn" onclick="parseShareLink()"><i class="ph ph-magnifying-glass"></i> 解析</button>
+                                <input class="form-input toolbar-input-primary" type="text" id="shareLink" placeholder="输入 PikPak 分享链接...">
+                                <input class="form-input toolbar-input-secondary" type="text" id="sharePassCode" placeholder="提取码">
+                                <button class="btn btn-primary toolbar-action" id="shareParseBtn" onclick="parseShareLink()"><i class="ph ph-magnifying-glass"></i> 解析</button>
                             </div>
                             
                             <div id="shareFileArea" class="share-file-panel">
+                                <div class="picker-panel-header">
+                                    <div class="picker-panel-title-group">
+                                        <h3 class="picker-panel-title" id="sharePanelTitle"><i class="ph ph-share-network"></i> 分享文件列表</h3>
+                                        <p class="picker-panel-subtitle" id="sharePanelMeta">解析后可筛选节点并执行同步下载</p>
+                                    </div>
+                                </div>
                                 <div class="file-list-header">
                                     <label><input type="checkbox" id="selectAll" onchange="toggleSelectAll()"> 全选节点</label>
                                     <span class="file-count" id="fileCount"></span>
@@ -949,7 +973,7 @@
                                 <div class="file-list" id="fileList"></div>
                                 <div class="share-actions">
                                     <div class="action-meta">
-                                        <span class="selected-info" id="selectedInfo"><i class="ph ph-check-circle"></i> 已选 0 个文件</span>
+                                        <span class="selected-info" id="selectedInfo"><i class="ph ph-check-circle"></i> 已选 0 项待下载</span>
                                         <label class="toggle-row">
                                             <div class="toggle-switch"><input type="checkbox" id="shareKeepStructure" checked><span class="toggle-slider"></span></div>
                                             结构映射
@@ -979,12 +1003,17 @@
                     <div class="card page-fill-card">
                         <div class="card-body">
                             <div class="rss-toolbar">
-                                <input class="form-input" type="text" id="rssUrl" placeholder="输入目标 RSS 订阅源...">
-                                <button class="btn btn-primary" id="rssParseBtn" onclick="parseRSS()"><i class="ph ph-radar"></i> 扫描提取</button>
+                                <input class="form-input toolbar-input-primary" type="text" id="rssUrl" placeholder="输入目标 RSS 订阅源...">
+                                <button class="btn btn-primary toolbar-action" id="rssParseBtn" onclick="parseRSS()"><i class="ph ph-radar"></i> 扫描提取</button>
                             </div>
                             
                             <div id="rssResultArea" class="rss-result-panel">
-                                <div class="card-header"><h3 id="rssFeedTitle"><i class="ph ph-feed"></i> RSS 流信息</h3></div>
+                                <div class="picker-panel-header">
+                                    <div class="picker-panel-title-group">
+                                        <h3 class="picker-panel-title" id="rssFeedTitle"><i class="ph ph-feed"></i> RSS 订阅内容</h3>
+                                        <p class="picker-panel-subtitle" id="rssPanelMeta">扫描后可批量选择订阅项并执行下载</p>
+                                    </div>
+                                </div>
                                 <div class="file-list-header">
                                     <label><input type="checkbox" id="rssSelectAll" onchange="toggleRssSelectAll()"> 订阅全部</label>
                                     <span class="file-count" id="rssCount"></span>
@@ -992,7 +1021,7 @@
                                 <div class="file-list" id="rssList"></div>
                                 <div class="share-actions">
                                     <div class="action-meta">
-                                        <span class="selected-info" id="rssSelectedInfo"><i class="ph ph-check-circle"></i> 准备好下载项目</span>
+                                        <span class="selected-info" id="rssSelectedInfo"><i class="ph ph-check-circle"></i> 已选 0 项待下载</span>
                                     </div>
                                     <div class="target-folder-field">
                                         <label class="target-folder-label" for="rssTeldrivePath"><i class="ph ph-folder-simple-dashed"></i> 保存到</label>
@@ -1001,7 +1030,7 @@
                                             <input class="form-input target-folder-input" type="text" id="rssTeldrivePath" placeholder="目录，默认 /">
                                         </div>
                                     </div>
-                                    <button class="btn btn-primary" id="rssDownloadBtn" onclick="downloadRssItems()"><i class="ph ph-download-simple"></i> 执行订阅下载</button>
+                                    <button class="btn btn-primary" id="rssDownloadBtn" onclick="downloadRssItems()"><i class="ph ph-download-simple"></i> 执行下载</button>
                                 </div>
                             </div>
                         </div>
