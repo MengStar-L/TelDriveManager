@@ -218,7 +218,8 @@
         .file-list-header label { font-size: 14px; cursor: pointer; display: flex; align-items: center; gap: 8px; font-weight: 500; }
         .file-count { font-size: 13px; color: var(--text-secondary); font-weight: 500; }
 
-        .file-list { flex: 1; min-height: 0; max-height: 400px; overflow-y: auto; scrollbar-width: thin; scrollbar-color: #cbd5e1 transparent; }
+        .file-list { flex: 1 1 auto; min-height: 0; height: 0; max-height: 400px; overflow-y: auto; overscroll-behavior: contain; -webkit-overflow-scrolling: touch; scrollbar-width: thin; scrollbar-color: #cbd5e1 transparent; }
+
         .file-row { display: flex; align-items: center; gap: 12px; padding: 14px 24px; border-bottom: 1px solid rgba(226, 232, 240, 0.8); font-size: 14px; transition: background 0.2s; cursor: pointer; }
         .file-row:hover { background: var(--bg-hover); }
         .file-row:last-child { border-bottom: none; }
@@ -231,9 +232,10 @@
         .folder-row { background: var(--accent-light); color: var(--text-primary); }
         .folder-row:hover { background: #e0f2fe; }
         .folder-row .file-icon { color: var(--accent); }
-        .picker-tree-row { --picker-depth: 0; padding-left: calc(24px + var(--picker-depth) * 20px); }
-        .picker-tree-row.is-hidden { display: none; }
-        .picker-folder-row { cursor: default; }
+        .picker-tree-row { --picker-depth: 0; padding-left: calc(24px + var(--picker-depth) * 20px); max-height: 64px; opacity: 1; overflow: hidden; transform: translateY(0); transform-origin: top center; transition: max-height 0.24s ease, opacity 0.22s ease, transform 0.22s ease, padding-top 0.24s ease, padding-bottom 0.24s ease, border-color 0.18s ease; }
+        .picker-tree-row.is-hidden { max-height: 0; opacity: 0; transform: translateY(-6px); padding-top: 0; padding-bottom: 0; border-bottom-color: transparent; pointer-events: none; }
+        .picker-folder-row { cursor: pointer; user-select: none; }
+
         .picker-folder-toggle { width: 24px; height: 24px; display: inline-flex; align-items: center; justify-content: center; border: none; border-radius: 999px; background: rgba(59, 130, 246, 0.08); color: var(--accent); cursor: pointer; flex-shrink: 0; transition: all 0.2s ease; }
         .picker-folder-toggle:hover { background: rgba(59, 130, 246, 0.14); }
         .picker-folder-toggle i { font-size: 14px; transition: transform 0.2s ease; }
@@ -257,7 +259,8 @@
         .page.page-stack > .card { margin-bottom: 0; }
         .magnet-input-card { flex-shrink: 0; }
         .magnet-result-card { flex: 1; min-height: 0; }
-        .magnet-result-card > .card-body { flex: 1; min-height: 0; display: flex; flex-direction: column; padding: 0; }
+        .magnet-result-card > .card-body { flex: 1; min-height: 0; display: flex; flex-direction: column; padding: 0; overflow: hidden; }
+
         .magnet-result-card .file-list,
         .share-file-panel .file-list,
         .rss-result-panel .file-list { max-height: none; padding-bottom: 112px; scroll-padding-bottom: 112px; }

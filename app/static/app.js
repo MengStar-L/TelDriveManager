@@ -2994,7 +2994,27 @@ function getPickerContainer(prefix) {
     return containerId ? document.getElementById(containerId) : null;
 }
 
+function bindPickerWheelScroll(prefix) {
+    const container = getPickerContainer(prefix);
+    if (!container || container.dataset.wheelBound === 'true') return;
+
+    container.dataset.wheelBound = 'true';
+    container.addEventListener('wheel', (event) => {
+        const maxScrollTop = Math.max(0, container.scrollHeight - container.clientHeight);
+        if (maxScrollTop <= 0) return;
+
+        const delta = event.deltaMode === 1 ? event.deltaY * 16 : event.deltaY;
+        const nextScrollTop = Math.max(0, Math.min(container.scrollTop + delta, maxScrollTop));
+        if (nextScrollTop === container.scrollTop) return;
+
+        container.scrollTop = nextScrollTop;
+        event.preventDefault();
+        event.stopPropagation();
+    }, { passive: false });
+}
+
 function getPickerSelectAllInput(prefix) {
+
     if (prefix === 'magnet') return document.getElementById('magnetSelectAll');
     if (prefix === 'share') return document.getElementById('selectAll');
     if (prefix === 'rss') return document.getElementById('rssSelectAll');
@@ -3112,6 +3132,7 @@ function applyPickerCollapsedState(prefix) {
         const path = String(row.dataset.treePath || '');
         const isHidden = Array.from(collapsedSet).some(collapsedPath => isDescendantPickerPath(path, collapsedPath));
         row.classList.toggle('is-hidden', isHidden);
+        row.setAttribute('aria-hidden', isHidden ? 'true' : 'false');
     });
 
     Array.from(container.querySelectorAll('.picker-folder-toggle')).forEach(toggleBtn => {
@@ -3120,7 +3141,14 @@ function applyPickerCollapsedState(prefix) {
     });
 }
 
+function handlePickerFolderRowClick(event, row) {
+    if (event?.target?.closest('input, button, a')) return;
+    const toggleBtn = row?.querySelector('.picker-folder-toggle');
+    if (toggleBtn) togglePickerFolderCollapsed(toggleBtn);
+}
+
 function togglePickerSelectAll(prefix) {
+
     const isChecked = !!getPickerSelectAllInput(prefix)?.checked;
     getPickerFileCheckboxes(prefix).forEach(cb => {
         cb.checked = isChecked;
@@ -3178,9 +3206,10 @@ function renderPickerTreeRows(node, prefix, depth = 0) {
         const folderCount = escapeA2TDHtml(folder.fileCount > 0 ? `${folder.fileCount} 项` : '空目录');
         const isCollapsed = collapsedSet.has(folderPathRaw);
         html += `
-            <div class="file-row folder-row picker-tree-row picker-folder-row" style="--picker-depth:${depth}" data-tree-path="${folderPath}">
+            <div class="file-row folder-row picker-tree-row picker-folder-row" style="--picker-depth:${depth}" data-tree-path="${folderPath}" onclick="handlePickerFolderRowClick(event, this)">
                 <input type="checkbox" data-role="folder" data-prefix="${prefix}" data-path="${folderPath}" onchange="togglePickerFolderSelection(this)">
                 <button type="button" class="picker-folder-toggle${isCollapsed ? ' is-collapsed' : ''}" data-prefix="${prefix}" data-path="${folderPath}" onclick="togglePickerFolderCollapsed(this)" aria-label="切换目录折叠状态">
+
                     <i class="ph ph-caret-down"></i>
                 </button>
                 <div class="file-icon"><i class="ph-fill ph-folder"></i></div>
@@ -3224,10 +3253,12 @@ function renderPickerTree(containerId, files, prefix) {
     const tree = buildPickerTree(files);
     const html = renderPickerTreeRows(tree, prefix);
     container.innerHTML = html || '<div style="padding:24px;text-align:center;color:var(--text-dim);">没有找到任何内容或空文件夹</div>';
+    bindPickerWheelScroll(prefix);
     syncPickerFolderStates(prefix);
     applyPickerCollapsedState(prefix);
     syncPickerSelectAll(prefix);
 }
+
 
 function updatePickerSelection(prefix) {
     let countSpan = null;
