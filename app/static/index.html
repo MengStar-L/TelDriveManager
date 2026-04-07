@@ -229,17 +229,15 @@
         .folder-row:hover { background: #e0f2fe; }
         .folder-row .file-icon { color: var(--accent); }
 
-        .share-actions { display: grid; grid-template-columns: minmax(0, 1fr) minmax(300px, 420px) auto; align-items: center; gap: 16px 18px; padding: 18px 24px; flex-shrink: 0; border-top: 1px solid rgba(226, 232, 240, 0.9); background: linear-gradient(180deg, rgba(248,250,252,0.76), rgba(255,255,255,0.98)); }
+        .share-actions { display: grid; grid-template-columns: minmax(0, 1fr) minmax(280px, 400px) auto; align-items: center; gap: 16px 18px; padding: 18px 24px; flex-shrink: 0; border-top: 1px solid rgba(226, 232, 240, 0.9); background: linear-gradient(180deg, rgba(248,250,252,0.76), rgba(255,255,255,0.98)); }
         .action-meta { display: flex; align-items: center; gap: 18px; flex-wrap: wrap; min-width: 0; }
         .selected-info { display: inline-flex; align-items: center; gap: 8px; min-height: 40px; padding: 0 14px; border-radius: 999px; background: rgba(59, 130, 246, 0.08); color: #1d4ed8; font-size: 13px; font-weight: 600; }
-        .target-folder-field { display: flex; flex-direction: column; gap: 10px; min-width: 0; padding: 12px 14px; border: 1px solid rgba(203, 213, 225, 0.9); border-radius: 14px; background: linear-gradient(180deg, rgba(255,255,255,0.98), rgba(248,250,252,0.96)); box-shadow: 0 8px 24px rgba(15, 23, 42, 0.04); }
-        .target-folder-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
-        .target-folder-label { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text-secondary); font-weight: 700; letter-spacing: 0.02em; }
-        .target-folder-hint { font-size: 11px; color: var(--text-dim); }
-        .target-folder-input-wrap { display: flex; align-items: center; gap: 10px; padding: 0 12px; border: 1px solid rgba(226, 232, 240, 0.95); border-radius: 12px; background: var(--bg-input); transition: all 0.2s ease; }
+        .target-folder-field { display: flex; align-items: center; gap: 12px; min-width: 0; padding: 10px 14px; border: 1px solid rgba(203, 213, 225, 0.9); border-radius: 999px; background: linear-gradient(180deg, rgba(255,255,255,0.98), rgba(248,250,252,0.96)); box-shadow: 0 8px 24px rgba(15, 23, 42, 0.04); }
+        .target-folder-label { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text-secondary); font-weight: 700; letter-spacing: 0.02em; white-space: nowrap; flex-shrink: 0; }
+        .target-folder-input-wrap { display: flex; align-items: center; gap: 8px; min-width: 0; flex: 1; padding: 0 12px; border: 1px solid rgba(226, 232, 240, 0.95); border-radius: 999px; background: var(--bg-input); transition: all 0.2s ease; }
         .target-folder-input-wrap:focus-within { background: white; border-color: rgba(0, 102, 255, 0.32); box-shadow: 0 0 0 4px rgba(0, 102, 255, 0.08); }
-        .target-folder-prefix { display: inline-flex; align-items: center; justify-content: center; width: 20px; color: var(--accent); font-size: 16px; flex-shrink: 0; }
-        .target-folder-input { min-width: 0; border: none; background: transparent; padding: 10px 0; box-shadow: none; }
+        .target-folder-prefix { display: inline-flex; align-items: center; justify-content: center; width: 18px; color: var(--accent); font-size: 15px; flex-shrink: 0; }
+        .target-folder-input { min-width: 0; border: none; background: transparent; padding: 8px 0; box-shadow: none; }
         .target-folder-input:focus { background: transparent; border-color: transparent; box-shadow: none; }
         .page.page-stack.active { display: flex; flex-direction: column; gap: 20px; width: 100%; min-height: 100%; height: 100%; }
         .page.page-stack > .card { margin-bottom: 0; }
@@ -740,6 +738,14 @@
             }
             .target-folder-field {
                 max-width: none;
+                flex-wrap: wrap;
+                border-radius: 16px;
+            }
+            .target-folder-label {
+                width: 100%;
+            }
+            .target-folder-input-wrap {
+                width: 100%;
             }
             .share-actions .btn {
                 width: 100%;
@@ -860,13 +866,10 @@
                                     </label>
                                 </div>
                                 <div class="target-folder-field">
-                                    <div class="target-folder-head">
-                                        <label class="target-folder-label" for="magnetTeldrivePath"><i class="ph ph-folder-simple-dashed"></i> TelDrive 保存目录</label>
-                                        <span class="target-folder-hint">留空自动保存到根目录 `/`</span>
-                                    </div>
+                                    <label class="target-folder-label" for="magnetTeldrivePath"><i class="ph ph-folder-simple-dashed"></i> 保存到</label>
                                     <div class="target-folder-input-wrap">
                                         <span class="target-folder-prefix"><i class="ph ph-folder-simple"></i></span>
-                                        <input class="form-input target-folder-input" type="text" id="magnetTeldrivePath" placeholder="例如：动画 / 本周新番">
+                                        <input class="form-input target-folder-input" type="text" id="magnetTeldrivePath" placeholder="目录，默认 /">
                                     </div>
                                 </div>
                                 <button class="btn btn-primary" id="magnetDownloadBtn" onclick="downloadMagnetFiles()"><i class="ph ph-download-simple"></i> 推送下载链接</button>
@@ -904,15 +907,13 @@
                                         </label>
                                     </div>
                                     <div class="target-folder-field">
-                                        <div class="target-folder-head">
-                                            <label class="target-folder-label" for="shareTeldrivePath"><i class="ph ph-folder-simple-dashed"></i> TelDrive 保存目录</label>
-                                            <span class="target-folder-hint">留空自动保存到根目录 `/`</span>
-                                        </div>
+                                        <label class="target-folder-label" for="shareTeldrivePath"><i class="ph ph-folder-simple-dashed"></i> 保存到</label>
                                         <div class="target-folder-input-wrap">
                                             <span class="target-folder-prefix"><i class="ph ph-folder-simple"></i></span>
-                                            <input class="form-input target-folder-input" type="text" id="shareTeldrivePath" placeholder="例如：动画 / 分享文件">
+                                            <input class="form-input target-folder-input" type="text" id="shareTeldrivePath" placeholder="目录，默认 /">
                                         </div>
                                     </div>
+
                                     <button class="btn btn-primary" id="downloadShareBtn" onclick="downloadShareFiles()"><i class="ph ph-cloud-arrow-down"></i> 执行下载</button>
                                 </div>
                             </div>
@@ -941,13 +942,10 @@
                                         <span class="selected-info" id="rssSelectedInfo"><i class="ph ph-check-circle"></i> 准备好下载项目</span>
                                     </div>
                                     <div class="target-folder-field">
-                                        <div class="target-folder-head">
-                                            <label class="target-folder-label" for="rssTeldrivePath"><i class="ph ph-folder-simple-dashed"></i> TelDrive 保存目录</label>
-                                            <span class="target-folder-hint">留空自动保存到根目录 `/`</span>
-                                        </div>
+                                        <label class="target-folder-label" for="rssTeldrivePath"><i class="ph ph-folder-simple-dashed"></i> 保存到</label>
                                         <div class="target-folder-input-wrap">
                                             <span class="target-folder-prefix"><i class="ph ph-folder-simple"></i></span>
-                                            <input class="form-input target-folder-input" type="text" id="rssTeldrivePath" placeholder="例如：RSS / 追番">
+                                            <input class="form-input target-folder-input" type="text" id="rssTeldrivePath" placeholder="目录，默认 /">
                                         </div>
                                     </div>
                                     <button class="btn btn-primary" id="rssDownloadBtn" onclick="downloadRssItems()"><i class="ph ph-download-simple"></i> 执行订阅下载</button>
