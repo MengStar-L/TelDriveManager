@@ -1631,7 +1631,7 @@ function renderMagnetParseResult(result = {}) {
     }
     renderPickerTree('magnetFileList', magnetFileData, 'magnet');
     const area = document.getElementById('magnetFileArea');
-    if (area) area.style.display = 'block';
+    if (area) area.style.display = 'flex';
     const selectAll = document.getElementById('magnetSelectAll');
     if (selectAll) selectAll.checked = true;
     updatePickerSelection('magnet');
@@ -3057,7 +3057,12 @@ function isPickerFolder(item = {}) {
     return kind.includes('folder') || mimeType.includes('folder') || (!!item.original_url && Number(item.size || 0) === 0 && !item.extension);
 }
 
-function getPickerPathSegments(item = {}) {
+function getPickerPathSegments(item = {}, prefix = '') {
+    if (prefix === 'rss' && !isPickerFolder(item)) {
+        const title = String(item.title || item.name || item.path || '').trim();
+        return title ? [title] : [];
+    }
+
     const rawPath = String(item.path || item.name || item.title || '').replace(/\\/g, '/').trim();
     return rawPath.split('/').map(part => part.trim()).filter(Boolean);
 }
@@ -3066,12 +3071,13 @@ function createPickerTreeNode(name = '', path = '') {
     return { name, path, folders: new Map(), files: [], fileCount: 0 };
 }
 
-function buildPickerTree(files = []) {
+function buildPickerTree(files = [], prefix = '') {
     const root = createPickerTreeNode();
 
     files.forEach(item => {
-        const segments = getPickerPathSegments(item);
+        const segments = getPickerPathSegments(item, prefix);
         if (!segments.length) return;
+
 
         const folderSegments = isPickerFolder(item) ? segments : segments.slice(0, -1);
         let node = root;
@@ -3263,8 +3269,9 @@ function renderPickerTree(containerId, files, prefix) {
         return;
     }
 
-    const tree = buildPickerTree(files);
+    const tree = buildPickerTree(files, prefix);
     const html = renderPickerTreeRows(tree, prefix);
+
     container.innerHTML = html || '<div style="padding:24px;text-align:center;color:var(--text-dim);">没有找到任何内容或空文件夹</div>';
     bindPickerWheelScroll(prefix);
     syncPickerFolderStates(prefix);
