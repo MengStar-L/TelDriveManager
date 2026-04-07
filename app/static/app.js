@@ -2714,17 +2714,16 @@ async function submitMagnets() {
 
 
 function toggleMagnetSelectAll() {
-    const isChecked = document.getElementById('magnetSelectAll').checked;
-    const checkboxes = document.querySelectorAll('#magnetFileList input[type="checkbox"]');
-    checkboxes.forEach(cb => cb.checked = isChecked);
-    updatePickerSelection('magnet');
+    togglePickerSelectAll('magnet');
 }
+
 
 async function downloadMagnetFiles() {
     if (!magnetCurrentFileId || magnetDownloadSubmitting) return;
 
-    const checkboxes = document.querySelectorAll('#magnetFileList input[type="checkbox"]:checked');
+    const checkboxes = document.querySelectorAll('#magnetFileList input[data-role="file"]:checked');
     const selectedIds = Array.from(checkboxes).map(cb => cb.value);
+
     
     if (!selectedIds.length) {
         return alert('请先选择需要下载的文件');
@@ -2769,6 +2768,12 @@ let shareCurrentData = null;
 let shareFileData = [];
 let shareDownloadSubmitting = false;
 const pickerNameCollator = new Intl.Collator('zh-CN', { numeric: true, sensitivity: 'base' });
+const pickerCollapsedState = {
+    magnet: new Set(),
+    share: new Set(),
+    rss: new Set(),
+};
+
 
 function getPickerItemName(item = {}) {
     return String(item.name || item.title || '').trim();
@@ -2835,11 +2840,9 @@ async function parseShareLink() {
 }
 
 function toggleSelectAll() {
-    const isChecked = document.getElementById('selectAll').checked;
-    const checkboxes = document.querySelectorAll('#fileList input[type="checkbox"]');
-    checkboxes.forEach(cb => cb.checked = isChecked);
-    updatePickerSelection('share');
+    togglePickerSelectAll('share');
 }
+
 
 function reRenderShareFileList() {
     shareFileData = sortPickerItemsByName(shareFileData);
@@ -2849,8 +2852,9 @@ function reRenderShareFileList() {
 
 async function downloadShareFiles() {
     if (!shareCurrentData || shareDownloadSubmitting) return;
-    const checkboxes = document.querySelectorAll('#fileList input[type="checkbox"]:checked');
+    const checkboxes = document.querySelectorAll('#fileList input[data-role="file"]:checked');
     const selectedSet = new Set(Array.from(checkboxes).map(cb => String(cb.value || '')));
+
     const orderedSelectedItems = shareFileData.filter(item => selectedSet.has(String(item.id || '')));
     const selectedIds = orderedSelectedItems.map(item => item.id);
     
@@ -2936,16 +2940,15 @@ async function parseRSS() {
 }
 
 function toggleRssSelectAll() {
-    const isChecked = document.getElementById('rssSelectAll').checked;
-    const checkboxes = document.querySelectorAll('#rssList input[type="checkbox"]');
-    checkboxes.forEach(cb => cb.checked = isChecked);
-    updatePickerSelection('rss');
+    togglePickerSelectAll('rss');
 }
+
 
 async function downloadRssItems() {
     if (rssDownloadSubmitting) return;
-    const checkboxes = document.querySelectorAll('#rssList input[type="checkbox"]:checked');
+    const checkboxes = document.querySelectorAll('#rssList input[data-role="file"]:checked');
     const selectedUrls = Array.from(checkboxes).map(cb => cb.value);
+
     
     if (!selectedUrls.length) return alert('请先选择需要订阅的项目');
 
@@ -2979,65 +2982,280 @@ async function downloadRssItems() {
 
 // === File Picker UI Utils ===
 
-function renderPickerTree(containerId, files, prefix) {
-    const container = document.getElementById(containerId);
-    if (!container) return;
-    
-    if (!files || files.length === 0) {
-        container.innerHTML = '<div style="padding:24px;text-align:center;color:var(--text-dim);">没有找到任何内容或空文件夹</div>';
+function getPickerContainerId(prefix) {
+    if (prefix === 'magnet') return 'magnetFileList';
+    if (prefix === 'share') return 'fileList';
+    if (prefix === 'rss') return 'rssList';
+    return '';
+}
+
+function getPickerContainer(prefix) {
+    const containerId = getPickerContainerId(prefix);
+    return containerId ? document.getElementById(containerId) : null;
+}
+
+function getPickerSelectAllInput(prefix) {
+    if (prefix === 'magnet') return document.getElementById('magnetSelectAll');
+    if (prefix === 'share') return document.getElementById('selectAll');
+    if (prefix === 'rss') return document.getElementById('rssSelectAll');
+    return null;
+}
+
+function getPickerFileCheckboxes(prefix) {
+    return Array.from(getPickerContainer(prefix)?.querySelectorAll('input[data-role="file"]') || []);
+}
+
+function getPickerFolderCheckboxes(prefix) {
+    return Array.from(getPickerContainer(prefix)?.querySelectorAll('input[data-role="folder"]') || []);
+}
+
+function getPickerCollapsedSet(prefix) {
+    if (!pickerCollapsedState[prefix]) pickerCollapsedState[prefix] = new Set();
+    return pickerCollapsedState[prefix];
+}
+
+function isDescendantPickerPath(path = '', parentPath = '') {
+    return !!path && !!parentPath && path !== parentPath && path.startsWith(`${parentPath}/`);
+}
+
+function isPickerFolder(item = {}) {
+    const kind = String(item.kind || item.type || '').toLowerCase();
+    const mimeType = String(item.mime_type || item.file_type || '').toLowerCase();
+    return kind.includes('folder') || mimeType.includes('folder') || (!!item.original_url && Number(item.size || 0) === 0 && !item.extension);
+}
+
+function getPickerPathSegments(item = {}) {
+    const rawPath = String(item.path || item.name || item.title || '').replace(/\\/g, '/').trim();
+    return rawPath.split('/').map(part => part.trim()).filter(Boolean);
+}
+
+function createPickerTreeNode(name = '', path = '') {
+    return { name, path, folders: new Map(), files: [], fileCount: 0 };
+}
+
+function buildPickerTree(files = []) {
+    const root = createPickerTreeNode();
+
+    files.forEach(item => {
+        const segments = getPickerPathSegments(item);
+        if (!segments.length) return;
+
+        const folderSegments = isPickerFolder(item) ? segments : segments.slice(0, -1);
+        let node = root;
+        let currentPath = '';
+
+        folderSegments.forEach(segment => {
+            currentPath = currentPath ? `${currentPath}/${segment}` : segment;
+            if (!node.folders.has(segment)) {
+                node.folders.set(segment, createPickerTreeNode(segment, currentPath));
+            }
+            node = node.folders.get(segment);
+        });
+
+        if (!isPickerFolder(item)) {
+            node.files.push(item);
+        }
+    });
+
+    const countFiles = (node) => {
+        let count = node.files.length;
+        node.files = sortPickerItemsByName(node.files);
+        node.folders.forEach(child => {
+            count += countFiles(child);
+        });
+        node.fileCount = count;
+        return count;
+    };
+
+    countFiles(root);
+    return root;
+}
+
+function syncPickerSelectAll(prefix) {
+    const selectAll = getPickerSelectAllInput(prefix);
+    const fileCheckboxes = getPickerFileCheckboxes(prefix);
+    if (!selectAll) return;
+    if (!fileCheckboxes.length) {
+        selectAll.checked = false;
+        selectAll.indeterminate = false;
         return;
     }
 
+    const checkedCount = fileCheckboxes.filter(cb => cb.checked).length;
+    selectAll.checked = checkedCount === fileCheckboxes.length;
+    selectAll.indeterminate = checkedCount > 0 && checkedCount < fileCheckboxes.length;
+}
+
+function syncPickerFolderStates(prefix) {
+    const fileCheckboxes = getPickerFileCheckboxes(prefix);
+    getPickerFolderCheckboxes(prefix).forEach(folderCheckbox => {
+        const folderPath = String(folderCheckbox.dataset.path || '');
+        const descendants = fileCheckboxes.filter(cb => isDescendantPickerPath(String(cb.dataset.treePath || ''), folderPath));
+        if (!descendants.length) {
+            folderCheckbox.checked = false;
+            folderCheckbox.indeterminate = false;
+            return;
+        }
+        const checkedCount = descendants.filter(cb => cb.checked).length;
+        folderCheckbox.checked = checkedCount === descendants.length;
+        folderCheckbox.indeterminate = checkedCount > 0 && checkedCount < descendants.length;
+    });
+}
+
+function applyPickerCollapsedState(prefix) {
+    const container = getPickerContainer(prefix);
+    if (!container) return;
+
+    const collapsedSet = getPickerCollapsedSet(prefix);
+    const rows = Array.from(container.querySelectorAll('[data-tree-path]'));
+    rows.forEach(row => {
+        const path = String(row.dataset.treePath || '');
+        const isHidden = Array.from(collapsedSet).some(collapsedPath => isDescendantPickerPath(path, collapsedPath));
+        row.classList.toggle('is-hidden', isHidden);
+    });
+
+    Array.from(container.querySelectorAll('.picker-folder-toggle')).forEach(toggleBtn => {
+        const path = String(toggleBtn.dataset.path || '');
+        toggleBtn.classList.toggle('is-collapsed', collapsedSet.has(path));
+    });
+}
+
+function togglePickerSelectAll(prefix) {
+    const isChecked = !!getPickerSelectAllInput(prefix)?.checked;
+    getPickerFileCheckboxes(prefix).forEach(cb => {
+        cb.checked = isChecked;
+    });
+    syncPickerFolderStates(prefix);
+    updatePickerSelection(prefix);
+}
+
+function togglePickerFolderSelection(input) {
+    const prefix = String(input?.dataset?.prefix || '');
+    const folderPath = String(input?.dataset?.path || '');
+    const checked = !!input?.checked;
+    if (!prefix || !folderPath) return;
+
+    getPickerFileCheckboxes(prefix)
+        .filter(cb => isDescendantPickerPath(String(cb.dataset.treePath || ''), folderPath))
+        .forEach(cb => {
+            cb.checked = checked;
+        });
+
+    getPickerFolderCheckboxes(prefix)
+        .filter(cb => String(cb.dataset.path || '') !== folderPath && isDescendantPickerPath(String(cb.dataset.path || ''), folderPath))
+        .forEach(cb => {
+            cb.checked = checked;
+            cb.indeterminate = false;
+        });
+
+    syncPickerFolderStates(prefix);
+    updatePickerSelection(prefix);
+}
+
+function togglePickerFolderCollapsed(button) {
+    const prefix = String(button?.dataset?.prefix || '');
+    const folderPath = String(button?.dataset?.path || '');
+    if (!prefix || !folderPath) return;
+
+    const collapsedSet = getPickerCollapsedSet(prefix);
+    if (collapsedSet.has(folderPath)) {
+        collapsedSet.delete(folderPath);
+    } else {
+        collapsedSet.add(folderPath);
+    }
+    applyPickerCollapsedState(prefix);
+}
+
+function renderPickerTreeRows(node, prefix, depth = 0) {
     let html = '';
-    files.forEach(f => {
-        let isFolder = !!f.original_url && f.size_str === 0 && !f.extension; 
-        if (f.type === 'folder' || f.mime_type === 'application/vnd.google-apps.folder') isFolder = true;
-        
-        let icon = isFolder ? '<i class="ph-fill ph-folder"></i>' : '<i class="ph-fill ph-file"></i>';
-        let rowClass = isFolder ? 'file-row folder-row' : 'file-row';
-        
-        // For RSS, the value is the download_url, for others it's file_id / id
-        let val = f.download_url || f.file_id || f.id;
-        let title = f.name || f.title;
-        let sizeOrTime = f.size_str || f.published || '0 B';
-        
+    const folders = Array.from(node.folders.values()).sort((a, b) => pickerNameCollator.compare(a.name, b.name));
+    const collapsedSet = getPickerCollapsedSet(prefix);
+
+    folders.forEach(folder => {
+        const folderPathRaw = String(folder.path || folder.name || '');
+        const folderPath = escapeA2TDHtml(folderPathRaw);
+        const folderName = escapeA2TDHtml(folder.name || '未命名目录');
+        const folderCount = escapeA2TDHtml(folder.fileCount > 0 ? `${folder.fileCount} 项` : '空目录');
+        const isCollapsed = collapsedSet.has(folderPathRaw);
         html += `
-            <label class="${rowClass}">
-                <input type="checkbox" value="${val}" onchange="updatePickerSelection('${prefix}')" checked>
-                <div class="file-icon">${icon}</div>
-                <div class="file-name" title="${title}">${title}</div>
+            <div class="file-row folder-row picker-tree-row picker-folder-row" style="--picker-depth:${depth}" data-tree-path="${folderPath}">
+                <input type="checkbox" data-role="folder" data-prefix="${prefix}" data-path="${folderPath}" onchange="togglePickerFolderSelection(this)">
+                <button type="button" class="picker-folder-toggle${isCollapsed ? ' is-collapsed' : ''}" data-prefix="${prefix}" data-path="${folderPath}" onclick="togglePickerFolderCollapsed(this)" aria-label="切换目录折叠状态">
+                    <i class="ph ph-caret-down"></i>
+                </button>
+                <div class="file-icon"><i class="ph-fill ph-folder"></i></div>
+                <div class="file-name" title="${folderPath}">${folderName}</div>
+                <div class="file-size">${folderCount}</div>
+            </div>
+        `;
+        html += renderPickerTreeRows(folder, prefix, depth + 1);
+    });
+
+    node.files.forEach(item => {
+        const val = item.download_url || item.file_id || item.id;
+        const title = escapeA2TDHtml(item.name || item.title || '未命名文件');
+        const fullPathRaw = String(item.path || item.name || item.title || '');
+        const fullPath = escapeA2TDHtml(fullPathRaw);
+        const sizeOrTime = escapeA2TDHtml(item.size_str || item.published || '0 B');
+        html += `
+            <label class="file-row picker-tree-row" style="--picker-depth:${depth}" data-tree-path="${fullPath}">
+                <input type="checkbox" data-role="file" data-prefix="${prefix}" data-tree-path="${fullPath}" value="${escapeA2TDHtml(val || '')}" onchange="updatePickerSelection('${prefix}')" checked>
+                <div class="file-check-spacer" aria-hidden="true"></div>
+                <div class="file-icon"><i class="ph-fill ph-file"></i></div>
+                <div class="file-name" title="${fullPath}">${title}</div>
                 <div class="file-size">${sizeOrTime}</div>
             </label>
         `;
     });
-    
-    container.innerHTML = html;
+
+    return html;
+}
+
+function renderPickerTree(containerId, files, prefix) {
+    const container = document.getElementById(containerId);
+    if (!container) return;
+
+    if (!files || files.length === 0) {
+        container.innerHTML = '<div style="padding:24px;text-align:center;color:var(--text-dim);">没有找到任何内容或空文件夹</div>';
+        syncPickerSelectAll(prefix);
+        return;
+    }
+
+    const tree = buildPickerTree(files);
+    const html = renderPickerTreeRows(tree, prefix);
+    container.innerHTML = html || '<div style="padding:24px;text-align:center;color:var(--text-dim);">没有找到任何内容或空文件夹</div>';
+    syncPickerFolderStates(prefix);
+    applyPickerCollapsedState(prefix);
+    syncPickerSelectAll(prefix);
 }
 
 function updatePickerSelection(prefix) {
-    let cbList = [];
     let countSpan = null;
     let selectedInfoSpan = null;
-    
+    const cbList = getPickerFileCheckboxes(prefix);
+
     if (prefix === 'magnet') {
-        cbList = document.querySelectorAll('#magnetFileList input[type="checkbox"]');
         countSpan = document.getElementById('magnetFileCount');
         selectedInfoSpan = document.getElementById('magnetSelectedInfo');
     } else if (prefix === 'share') {
-        cbList = document.querySelectorAll('#fileList input[type="checkbox"]');
         countSpan = document.getElementById('fileCount');
         selectedInfoSpan = document.getElementById('selectedInfo');
     } else if (prefix === 'rss') {
-        cbList = document.querySelectorAll('#rssList input[type="checkbox"]');
         countSpan = document.getElementById('rssCount');
         selectedInfoSpan = document.getElementById('rssSelectedInfo');
     }
 
-    if (!cbList || cbList.length === 0) return;
+    if (!cbList.length) {
+        if (countSpan) countSpan.textContent = '共 0 项';
+        if (selectedInfoSpan) selectedInfoSpan.textContent = prefix === 'rss' ? '已选 0 项准备下载' : '已选 0 个对象';
+        syncPickerSelectAll(prefix);
+        return;
+    }
 
-    let total = cbList.length;
-    let checkedCount = 0;
-    cbList.forEach(cb => { if(cb.checked) checkedCount++; });
+    syncPickerFolderStates(prefix);
+
+    const total = cbList.length;
+    const checkedCount = cbList.filter(cb => cb.checked).length;
 
     if (countSpan) countSpan.textContent = `共 ${total} 项`;
     if (selectedInfoSpan) {
@@ -3047,4 +3265,7 @@ function updatePickerSelection(prefix) {
             selectedInfoSpan.textContent = `已选 ${checkedCount} 个对象`;
         }
     }
+
+    syncPickerSelectAll(prefix);
 }
+

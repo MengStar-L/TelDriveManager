@@ -231,8 +231,17 @@
         .folder-row { background: var(--accent-light); color: var(--text-primary); }
         .folder-row:hover { background: #e0f2fe; }
         .folder-row .file-icon { color: var(--accent); }
+        .picker-tree-row { --picker-depth: 0; padding-left: calc(24px + var(--picker-depth) * 20px); }
+        .picker-tree-row.is-hidden { display: none; }
+        .picker-folder-row { cursor: default; }
+        .picker-folder-toggle { width: 24px; height: 24px; display: inline-flex; align-items: center; justify-content: center; border: none; border-radius: 999px; background: rgba(59, 130, 246, 0.08); color: var(--accent); cursor: pointer; flex-shrink: 0; transition: all 0.2s ease; }
+        .picker-folder-toggle:hover { background: rgba(59, 130, 246, 0.14); }
+        .picker-folder-toggle i { font-size: 14px; transition: transform 0.2s ease; }
+        .picker-folder-toggle.is-collapsed i { transform: rotate(-90deg); }
+        .file-check-spacer { width: 24px; height: 24px; flex-shrink: 0; }
 
         .share-actions { position: sticky; bottom: 0; z-index: 8; display: grid; grid-template-columns: minmax(0, 1fr) minmax(280px, 400px) auto; align-items: center; gap: 16px 18px; padding: 18px 24px; margin-top: auto; flex-shrink: 0; border-top: 1px solid rgba(226, 232, 240, 0.9); background: linear-gradient(180deg, rgba(248,250,252,0.9), rgba(255,255,255,0.98)); box-shadow: 0 -12px 28px rgba(15, 23, 42, 0.08); backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px); }
+
 
         .action-meta { display: flex; align-items: center; gap: 18px; flex-wrap: wrap; min-width: 0; }
         .selected-info { display: inline-flex; align-items: center; gap: 8px; min-height: 40px; padding: 0 14px; border-radius: 999px; background: rgba(59, 130, 246, 0.08); color: #1d4ed8; font-size: 13px; font-weight: 600; }
@@ -251,7 +260,8 @@
         .magnet-result-card > .card-body { flex: 1; min-height: 0; display: flex; flex-direction: column; padding: 0; }
         .magnet-result-card .file-list,
         .share-file-panel .file-list,
-        .rss-result-panel .file-list { max-height: none; }
+        .rss-result-panel .file-list { max-height: none; padding-bottom: 112px; scroll-padding-bottom: 112px; }
+
         
         /* ── Log Container ── */
         .log-container { max-height: 450px; overflow-y: auto; scrollbar-width: thin; scrollbar-color: #cbd5e1 transparent; background: #1e293b; color: #f8fafc; border-radius: var(--radius-md); padding: 16px 24px; font-family: 'Cascadia Code', monospace; box-shadow: inset 0 4px 12px rgba(0,0,0,0.1); }
