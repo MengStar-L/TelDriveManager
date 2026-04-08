@@ -117,7 +117,63 @@
         .wizard-meta-item { font-size: 12px; color: var(--text-secondary); display: flex; align-items: center; justify-content: space-between; gap: 12px; }
         .wizard-meta-item strong { color: var(--text-primary); font-weight: 600; }
 
+        .inspection-layout { display: flex; flex-direction: column; gap: 20px; }
+        .inspection-hero { display: grid; grid-template-columns: minmax(0, 1.35fr) minmax(320px, 0.65fr); gap: 18px; padding: 22px; border-radius: 22px; border: 1px solid rgba(59, 130, 246, 0.14); background: linear-gradient(135deg, rgba(239,246,255,0.96), rgba(255,255,255,0.98) 62%, rgba(248,250,252,0.98)); box-shadow: 0 18px 48px rgba(15, 23, 42, 0.06); }
+        .inspection-hero-main { display: flex; flex-direction: column; gap: 14px; min-width: 0; }
+        .inspection-eyebrow { display: inline-flex; align-items: center; gap: 8px; width: fit-content; padding: 6px 12px; border-radius: 999px; background: rgba(59, 130, 246, 0.1); color: #1d4ed8; font-size: 12px; font-weight: 700; letter-spacing: 0.04em; }
+        .inspection-title { font-size: 24px; font-weight: 700; color: var(--text-primary); line-height: 1.2; }
+        .inspection-desc { font-size: 14px; line-height: 1.7; color: var(--text-secondary); }
+        .inspection-hero-side { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; align-content: start; }
+        .inspection-pill { min-height: 96px; padding: 16px; border-radius: 18px; border: 1px solid rgba(226, 232, 240, 0.9); background: rgba(255,255,255,0.85); box-shadow: inset 0 1px 0 rgba(255,255,255,0.8), 0 10px 28px rgba(15, 23, 42, 0.04); display: flex; flex-direction: column; gap: 8px; justify-content: space-between; }
+        .inspection-pill.wide { grid-column: 1 / -1; min-height: 0; }
+        .inspection-pill span { font-size: 12px; font-weight: 700; color: var(--text-secondary); letter-spacing: 0.04em; }
+        .inspection-pill strong { font-size: 15px; line-height: 1.6; color: var(--text-primary); word-break: break-word; }
+        .inspection-grid { display: grid; grid-template-columns: minmax(0, 1.12fr) minmax(300px, 0.88fr); gap: 20px; }
+        .inspection-panel { padding: 20px; border-radius: 20px; border: 1px solid var(--border); background: linear-gradient(180deg, rgba(255,255,255,0.98), rgba(248,250,252,0.96)); box-shadow: var(--shadow-soft); display: flex; flex-direction: column; gap: 16px; min-width: 0; }
+        .inspection-panel-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+        .inspection-panel-title { font-size: 16px; font-weight: 700; color: var(--text-primary); display: flex; align-items: center; gap: 8px; }
+        .inspection-panel-title i { color: var(--accent); font-size: 18px; }
+        .inspection-panel-subtitle { margin-top: 6px; font-size: 13px; line-height: 1.6; color: var(--text-secondary); }
+        .inspection-input-grid { display: grid; grid-template-columns: minmax(160px, 1fr) minmax(180px, 1fr) auto; gap: 12px; align-items: end; }
+        .inspection-action-btn { min-width: 128px; }
+        .inspection-textarea { min-height: 126px; resize: vertical; font-family: 'Cascadia Code', 'Fira Code', monospace; line-height: 1.6; }
+        .inspection-hint { padding: 12px 14px; border-radius: 14px; background: rgba(248, 250, 252, 0.95); border: 1px solid rgba(226, 232, 240, 0.92); }
+        .inspection-stat-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+        .inspection-stat-card { padding: 16px; border-radius: 18px; background: #fff; border: 1px solid rgba(226, 232, 240, 0.92); box-shadow: 0 12px 30px rgba(15, 23, 42, 0.04); display: flex; flex-direction: column; gap: 10px; }
+        .inspection-stat-card span { font-size: 12px; font-weight: 700; color: var(--text-secondary); letter-spacing: 0.04em; }
+        .inspection-stat-card strong { font-size: 28px; line-height: 1; color: var(--text-primary); }
+        .inspection-stat-card.is-ok strong { color: #059669; }
+        .inspection-stat-card.is-suspect strong { color: #d97706; }
+        .inspection-stat-card.is-invalid strong { color: #dc2626; }
+        .inspection-stat-card.is-total strong { color: #2563eb; }
+        .inspection-info-stack { display: grid; gap: 12px; }
+        .inspection-info-card { padding: 16px; border-radius: 18px; background: rgba(248, 250, 252, 0.95); border: 1px solid rgba(226, 232, 240, 0.92); }
+        .inspection-info-card-label { font-size: 12px; font-weight: 700; color: var(--text-secondary); letter-spacing: 0.04em; }
+        .inspection-info-card-value { margin-top: 8px; font-size: 13px; line-height: 1.7; color: var(--text-primary); white-space: pre-wrap; word-break: break-word; }
+        .inspection-issues-list { display: grid; gap: 12px; max-height: 360px; overflow-y: auto; padding-right: 4px; }
+        .inspection-issue-card { padding: 16px; border-radius: 18px; border: 1px solid rgba(226, 232, 240, 0.92); background: #fff; box-shadow: 0 10px 28px rgba(15, 23, 42, 0.04); }
+        .inspection-issue-card.suspect { border-color: rgba(245, 158, 11, 0.22); background: linear-gradient(180deg, rgba(255,251,235,0.96), rgba(255,255,255,0.98)); }
+        .inspection-issue-card.invalid { border-color: rgba(239, 68, 68, 0.22); background: linear-gradient(180deg, rgba(254,242,242,0.96), rgba(255,255,255,0.98)); }
+        .inspection-issue-card.error { border-color: rgba(59, 130, 246, 0.18); background: linear-gradient(180deg, rgba(239,246,255,0.96), rgba(255,255,255,0.98)); }
+        .inspection-issue-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 10px; flex-wrap: wrap; }
+        .inspection-issue-badge { display: inline-flex; align-items: center; gap: 6px; padding: 6px 10px; border-radius: 999px; font-size: 12px; font-weight: 700; }
+        .inspection-issue-badge.suspect { background: rgba(245, 158, 11, 0.12); color: #b45309; }
+        .inspection-issue-badge.invalid { background: rgba(239, 68, 68, 0.12); color: #b91c1c; }
+        .inspection-issue-badge.error { background: rgba(59, 130, 246, 0.12); color: #1d4ed8; }
+        .inspection-issue-time { font-size: 12px; color: var(--text-secondary); }
+        .inspection-issue-path { font-size: 13px; line-height: 1.7; font-weight: 600; color: var(--text-primary); word-break: break-all; }
+        .inspection-issue-meta { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+        .inspection-issue-chip { display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px; border-radius: 999px; background: rgba(148, 163, 184, 0.12); color: var(--text-secondary); font-size: 12px; }
+        .inspection-issue-message { margin-top: 10px; font-size: 12px; line-height: 1.7; color: var(--text-secondary); word-break: break-word; }
+        .inspection-empty-state { min-height: 180px; border: 1px dashed rgba(148, 163, 184, 0.35); border-radius: 18px; background: rgba(248, 250, 252, 0.92); color: var(--text-secondary); display: flex; align-items: center; justify-content: center; flex-direction: column; gap: 12px; text-align: center; padding: 28px; }
+        .inspection-empty-state i { font-size: 30px; color: #60a5fa; }
+        .inspection-log-card { gap: 0; }
+        .inspection-log-card .card-header { border-bottom-color: rgba(226, 232, 240, 0.9); }
+        .inspection-log-card .card-body { padding: 12px; }
+        .inspection-log-container { height: clamp(320px, 52vh, 720px); max-height: none; }
+
         .segmented-control { display: flex; align-items: center; gap: 8px; padding: 6px; background: linear-gradient(180deg, #f8fbff, #f1f5f9); border: 1px solid var(--border); border-radius: 16px; box-shadow: inset 0 1px 0 rgba(255,255,255,0.8); }
+
         .segmented-btn { flex: 1; min-width: 0; border: none; background: transparent; color: var(--text-secondary); border-radius: 12px; padding: 12px 14px; display: inline-flex; align-items: center; justify-content: center; gap: 8px; font-family: inherit; font-size: 14px; font-weight: 600; cursor: pointer; transition: all 0.22s ease; }
         .segmented-btn i { font-size: 16px; }
         .segmented-btn:hover { color: var(--text-primary); background: rgba(255,255,255,0.62); }
@@ -783,9 +839,33 @@
             .share-actions .btn {
                 width: 100%;
             }
+            .inspection-hero,
+            .inspection-grid {
+                grid-template-columns: 1fr;
+            }
+            .inspection-pill.wide {
+                grid-column: auto;
+            }
+        }
+
+        @media (max-width: 820px) {
+            .inspection-hero {
+                padding: 18px;
+            }
+            .inspection-hero-side,
+            .inspection-stat-grid {
+                grid-template-columns: 1fr;
+            }
+            .inspection-input-grid {
+                grid-template-columns: 1fr;
+            }
+            .inspection-action-btn {
+                width: 100%;
+            }
         }
 
         @media (max-height: 860px) {
+
             .layout {
                 padding: 12px 18px 16px;
                 gap: 24px;
@@ -1170,65 +1250,134 @@
                             <h3><i class="ph ph-shield-check"></i> TelDrive 文件巡检</h3>
                         </div>
                         <div class="card-body">
-                            <div class="wizard-status-card" style="margin-top:8px;">
-                                <div class="wizard-status-row" style="align-items:flex-end; gap:12px; flex-wrap:wrap;">
-                                    <div style="flex:1; min-width:240px;">
-                                        <div style="font-size:13px; font-weight:600; color:var(--text-primary); margin-bottom:4px;">TelDrive 文件可用性巡检</div>
-                                        <div class="wizard-note" data-t2td-health="status">尚未执行文件巡检</div>
-                                    </div>
-                                    <div style="display:flex; gap:10px; align-items:flex-end; flex-wrap:wrap;">
-                                        <div class="form-group" style="margin:0; min-width:160px;">
-                                            <label style="margin-bottom:6px;">巡检对象</label>
-                                            <select id="t2tdHealthScopeMode" class="form-input">
-                                                <option value="all">全部文件</option>
-                                                <option value="folder">指定目录</option>
-                                                <option value="files">指定文件</option>
-                                            </select>
+                            <div class="inspection-layout">
+                                <section class="inspection-hero">
+                                    <div class="inspection-hero-main">
+                                        <div class="inspection-eyebrow"><i class="ph ph-sparkle"></i> 智能巡检面板</div>
+                                        <div>
+                                            <div class="inspection-title">TelDrive 文件可用性巡检</div>
+                                            <div class="inspection-desc" data-t2td-health="status">尚未执行文件巡检</div>
                                         </div>
-                                        <div class="form-group" style="margin:0; min-width:180px;">
-                                            <label style="margin-bottom:6px;">文件头读取大小（KB）</label>
-                                            <input type="number" id="t2tdHealthProbeKb" class="form-input" min="1" max="10240" step="1" value="20">
+                                        <div class="inspection-info-card">
+                                            <div class="inspection-info-card-label">实时状态</div>
+                                            <div class="inspection-info-card-value" data-t2td-health="current-file">自动巡检：未开启</div>
                                         </div>
-                                        <button type="button" class="btn btn-ghost btn-sm" data-t2td-health="run" onclick="runT2TDHealthCheck()"><i class="ph ph-activity"></i> 立即巡检</button>
                                     </div>
+                                    <div class="inspection-hero-side">
+                                        <div class="inspection-pill">
+                                            <span>最近巡检</span>
+                                            <strong data-t2td-health="last-checked">--</strong>
+                                        </div>
+                                        <div class="inspection-pill">
+                                            <span>并发线程</span>
+                                            <strong data-t2td-health="workers">6</strong>
+                                        </div>
+                                        <div class="inspection-pill">
+                                            <span>自动巡检</span>
+                                            <strong data-t2td-health="auto-policy">未开启</strong>
+                                        </div>
+                                        <div class="inspection-pill wide">
+                                            <span>执行策略</span>
+                                            <strong data-t2td-health="scope">手动巡检对象：全部文件；文件头读取：每个文件前 20KB</strong>
+                                        </div>
+                                    </div>
+                                </section>
+
+                                <div class="inspection-grid">
+                                    <section class="inspection-panel">
+                                        <div>
+                                            <div class="inspection-panel-title"><i class="ph ph-sliders-horizontal"></i> 巡检控制</div>
+                                            <div class="inspection-panel-subtitle">支持全量巡检、指定目录或指定文件巡检；范围与读取大小可手动调整。</div>
+                                        </div>
+                                        <div class="inspection-input-grid">
+                                            <div class="form-group" style="margin:0;">
+                                                <label>巡检对象</label>
+                                                <select id="t2tdHealthScopeMode" class="form-input">
+                                                    <option value="all">全部文件</option>
+                                                    <option value="folder">指定目录</option>
+                                                    <option value="files">指定文件</option>
+                                                </select>
+                                            </div>
+                                            <div class="form-group" style="margin:0;">
+                                                <label>文件头读取大小（KB）</label>
+                                                <input type="number" id="t2tdHealthProbeKb" class="form-input" min="1" max="10240" step="1" value="20">
+                                            </div>
+                                            <button type="button" class="btn btn-primary inspection-action-btn" data-t2td-health="run" onclick="runT2TDHealthCheck()"><i class="ph ph-activity"></i> 立即巡检</button>
+                                        </div>
+                                        <div class="form-group" style="margin:0;">
+                                            <label id="t2tdHealthScopePathsLabel">TelDrive 目录路径</label>
+                                            <textarea id="t2tdHealthScopePaths" class="form-input inspection-textarea" rows="4" placeholder="/movies&#10;/series"></textarea>
+                                        </div>
+                                        <div class="inspection-hint">
+                                            <div class="wizard-note" data-t2td-health="scope-config-hint">当前为全部文件巡检；如需缩小范围，请切换为“指定目录”或“指定文件”。</div>
+                                        </div>
+                                    </section>
+
+                                    <section class="inspection-panel">
+                                        <div>
+                                            <div class="inspection-panel-title"><i class="ph ph-chart-bar"></i> 巡检概览</div>
+                                            <div class="inspection-panel-subtitle">一眼查看总量、健康状态与当前运行策略。</div>
+                                        </div>
+                                        <div class="inspection-stat-grid">
+                                            <div class="inspection-stat-card is-total">
+                                                <span>总文件</span>
+                                                <strong data-t2td-health="total">0</strong>
+                                            </div>
+                                            <div class="inspection-stat-card is-ok">
+                                                <span>正常</span>
+                                                <strong data-t2td-health="ok">0</strong>
+                                            </div>
+                                            <div class="inspection-stat-card is-suspect">
+                                                <span>可疑</span>
+                                                <strong data-t2td-health="suspect">0</strong>
+                                            </div>
+                                            <div class="inspection-stat-card is-invalid">
+                                                <span>失效</span>
+                                                <strong data-t2td-health="invalid">0</strong>
+                                            </div>
+                                        </div>
+                                        <div class="inspection-info-stack">
+                                            <div class="inspection-info-card">
+                                                <div class="inspection-info-card-label">自动策略</div>
+                                                <div class="inspection-info-card-value" data-t2td-health="auto-policy">未开启</div>
+                                            </div>
+                                            <div class="inspection-info-card">
+                                                <div class="inspection-info-card-label">当前范围</div>
+                                                <div class="inspection-info-card-value" data-t2td-health="scope">手动巡检对象：全部文件；文件头读取：每个文件前 20KB</div>
+                                            </div>
+                                        </div>
+                                    </section>
                                 </div>
 
-                                <div class="form-group" style="margin-top:14px;">
-                                    <label id="t2tdHealthScopePathsLabel" style="margin-bottom:6px;">TelDrive 目录路径</label>
-                                    <textarea id="t2tdHealthScopePaths" class="form-input" rows="3" style="min-height:92px; resize:vertical;" placeholder="/movies&#10;/series"></textarea>
-                                    <div class="wizard-note" data-t2td-health="scope-config-hint" style="margin-top:8px;">当前为全部文件巡检；如需缩小范围，请切换为“指定目录”或“指定文件”。</div>
-                                </div>
+                                <div class="inspection-grid">
+                                    <section class="inspection-panel">
+                                        <div class="inspection-panel-header">
+                                            <div>
+                                                <div class="inspection-panel-title"><i class="ph ph-warning-circle"></i> 可疑 / 失效文件</div>
+                                                <div class="inspection-panel-subtitle">仅展示最近巡检中出现异常的文件，便于快速定位。</div>
+                                            </div>
+                                        </div>
+                                        <div class="inspection-issues-list" data-t2td-health="issues">
+                                            <div class="inspection-empty-state"><i class="ph ph-shield-check"></i> 暂无失效或可疑文件</div>
+                                        </div>
+                                    </section>
 
-                                <div class="wizard-meta-list">
-
-                                    <div class="wizard-meta-item"><span>最近巡检</span><strong data-t2td-health="last-checked">--</strong></div>
-                                    <div class="wizard-meta-item"><span>总文件</span><strong data-t2td-health="total">0</strong></div>
-                                    <div class="wizard-meta-item"><span>正常</span><strong data-t2td-health="ok">0</strong></div>
-                                    <div class="wizard-meta-item"><span>可疑</span><strong data-t2td-health="suspect">0</strong></div>
-                                    <div class="wizard-meta-item"><span>失效</span><strong data-t2td-health="invalid">0</strong></div>
-                                </div>
-                                <div class="wizard-note" data-t2td-health="scope" style="margin-top:10px;">手动巡检对象：全部文件；文件头读取：每个文件前 20KB</div>
-                                <div class="wizard-note" data-t2td-health="current-file" style="margin-top:10px;">自动巡检：未开启</div>
-
-
-                                <div class="log-container" data-t2td-health="issues" style="height:auto; max-height:240px; margin-top:16px;">
-                                    <div class="log-empty"><i class="ph ph-shield-check"></i> 暂无失效或可疑文件</div>
-                                </div>
-                            </div>
-
-                            <div class="card" style="margin-top:20px; border:1px solid var(--border); box-shadow:none;">
-                                <div class="card-header">
-                                    <h3><i class="ph ph-terminal-window"></i> 巡检日志</h3>
-                                </div>
-                                <div class="card-body" style="padding:12px;">
-                                    <div class="log-container" id="t2tdHealthLogContainer" style="height: 40vh; max-height: 52vh;">
-                                        <div class="log-empty" id="t2tdHealthLogEmpty"><i class="ph ph-shield-check"></i> 暂无巡检日志</div>
+                                    <div class="card inspection-log-card" style="margin-bottom:0;">
+                                        <div class="card-header">
+                                            <h3><i class="ph ph-terminal-window"></i> 巡检日志</h3>
+                                        </div>
+                                        <div class="card-body">
+                                            <div class="log-container inspection-log-container" id="t2tdHealthLogContainer">
+                                                <div class="log-empty" id="t2tdHealthLogEmpty"><i class="ph ph-shield-check"></i> 暂无巡检日志</div>
+                                            </div>
+                                        </div>
                                     </div>
                                 </div>
                             </div>
                         </div>
                     </div>
                 </div>
+
 <!-- Test -->
                 <div class="page" id="page-test">
                     <div style="display:flex;justify-content:flex-end;margin-bottom:16px;">
@@ -1442,7 +1591,8 @@
                                         启用 TelDrive 文件可用性巡检
                                         <div class="toggle-switch"><input type="checkbox" id="cfgTelegramHealthCheckEnabled"><span class="toggle-slider"></span></div>
                                     </label>
-                                    <div class="wizard-note" style="margin-top:12px;">自动巡检默认检查全部文件并读取每个文件前 20KB；手动巡检可在“文件巡检”页面自定义 TelDrive 文件夹/文件范围以及文件头读取大小。</div>
+                                    <div class="wizard-note" style="margin-top:12px;">自动巡检默认检查全部文件并读取每个文件前 20KB；手动巡检可在“文件巡检”页面自定义 TelDrive 文件夹/文件范围以及文件头读取大小，并可在此配置巡检并发线程数。</div>
+
 
 
                                 </div>
@@ -1479,7 +1629,8 @@
 
     <div id="a2tdToastContainer" class="app-toast-container"></div>
 
-    <script src="/static/app.js?v=20260408a"></script>
+    <script src="/static/app.js?v=20260408b"></script>
+
 
 
 

@@ -66,7 +66,9 @@ MAX_HEALTH_CHECK_PROBE_LIMIT_BYTES = 10 * 1024 * 1024
 HEALTH_CHECK_PROBE_CHUNK_BYTES = 4 * 1024
 HEALTH_CHECK_PROBE_MAX_ATTEMPTS = 3
 HEALTH_CHECK_PROBE_RETRY_DELAY_SECONDS = 0.5
+HEALTH_CHECK_PROBE_WORKERS = 6
 HEALTH_CHECK_SCOPE_MODE_ALL = "all"
+
 
 HEALTH_CHECK_SCOPE_MODE_FOLDER = "folder"
 HEALTH_CHECK_SCOPE_MODE_FILES = "files"
@@ -90,6 +92,8 @@ DEFAULT_CONFIG: dict[str, dict[str, Any]] = {
         "confirm_cycles": 3,
         "health_check_enabled": False,
         "health_check_interval_hours": 24,
+        "health_check_workers": HEALTH_CHECK_PROBE_WORKERS,
+
     },
     "teldrive": {
         "api_host": "",
@@ -155,7 +159,9 @@ class RuntimeConfig:
     confirm_cycles: int
     health_check_enabled: bool
     health_check_interval_hours: int
+    health_check_workers: int
     db_host: str
+
     db_port: int
     db_user: str
     db_password: str
@@ -254,7 +260,9 @@ class ConfigStore:
             confirm_cycles=telegram["confirm_cycles"],
             health_check_enabled=telegram["health_check_enabled"],
             health_check_interval_hours=telegram["health_check_interval_hours"],
+            health_check_workers=telegram["health_check_workers"],
             db_host=data.get("telegram_db", {}).get("host", ""),
+
             db_port=data.get("telegram_db", {}).get("port", 5432),
             db_user=data.get("telegram_db", {}).get("user", ""),
             db_password=data.get("telegram_db", {}).get("password", ""),
@@ -282,7 +290,9 @@ class ConfigStore:
                 "confirm_cycles": runtime.confirm_cycles,
                 "health_check_enabled": runtime.health_check_enabled,
                 "health_check_interval_hours": runtime.health_check_interval_hours,
+                "health_check_workers": runtime.health_check_workers,
             },
+
             "teldrive": {
                 "api_host": runtime.teldrive_url,
                 "access_token": runtime.bearer_token,
@@ -367,8 +377,15 @@ class ConfigStore:
             default=DEFAULT_CONFIG["telegram"]["health_check_interval_hours"],
             strict=strict,
         )
+        telegram["health_check_workers"] = self._parse_positive_int(
+            telegram_payload.get("health_check_workers"),
+            "巡检并发线程数",
+            default=DEFAULT_CONFIG["telegram"]["health_check_workers"],
+            strict=strict,
+        )
 
         teldrive = data["teldrive"]
+
         teldrive["api_host"] = self._parse_string(teldrive_payload.get("api_host"))
         teldrive["access_token"] = self._parse_string(teldrive_payload.get("access_token"))
         teldrive["channel_id"] = self._parse_optional_int(teldrive_payload.get("channel_id"), "TelDrive 频道 ID", strict=strict)
@@ -693,7 +710,9 @@ def state_config_payload(config: RuntimeConfig) -> dict[str, Any]:
         "max_scan_messages": config.max_scan_messages,
         "health_check_enabled": config.health_check_enabled,
         "health_check_interval_hours": config.health_check_interval_hours,
+        "health_check_workers": config.health_check_workers,
         "log_file": config.log_file_path.name,
+
     }
 
 
@@ -1873,6 +1892,12 @@ class Tel2TelDriveService:
             suspect_count = 0
             invalid_count = 0
             error_count = 0
+            worker_count = min(max(1, int(config.health_check_workers or HEALTH_CHECK_PROBE_WORKERS)), max(1, total)) if total else 0
+
+            item_cursor = 0
+            item_lock = asyncio.Lock()
+            result_lock = asyncio.Lock()
+            fatal_error: RuntimeError | None = None
 
             logger.info(f"本次巡检对象 {scope_label} 共匹配到 {total} 个文件", stream="health")
             await broker.update_state(
@@ -1883,103 +1908,147 @@ class Tel2TelDriveService:
                 health_check_invalid_count=0,
                 health_check_error_count=0,
                 health_check_probe_bytes=probe_limit_bytes,
-                health_check_current_file=f"正在执行 {scope_label} 的文件头读取探测..." if total else f"{scope_label} 范围内没有可巡检文件",
+                health_check_current_file=(
+                    f"正在并发执行 {scope_label} 的文件头读取探测（{worker_count} 线程）..."
+                    if total
+                    else f"{scope_label} 范围内没有可巡检文件"
+                ),
             )
+            if worker_count:
+                logger.info(f"本次巡检启用并发检查，线程数 {worker_count}", stream="health")
 
-            for file_id, info in items:
-                if self.stop_event.is_set() or self.reload_event.is_set():
-                    raise asyncio.CancelledError()
+                async def get_next_health_item() -> tuple[int, tuple[str, dict[str, Any]]] | None:
+                    nonlocal item_cursor
+                    async with item_lock:
+                        if fatal_error is not None or self.stop_event.is_set() or self.reload_event.is_set():
+                            return None
+                        if item_cursor >= total:
+                            return None
+                        current_index = item_cursor
+                        item_cursor += 1
+                        return current_index, items[current_index]
 
-                file_name = str(info.get("name") or file_id)
-                file_path = str(info.get("path") or f"/{file_name}")
-                file_size = int(info.get("size") or 0)
-                probe_target_bytes = min(max(file_size, 0), probe_limit_bytes) if file_size > 0 else probe_limit_bytes
+                async def health_check_worker(worker_no: int) -> None:
+                    nonlocal checked, ok_count, suspect_count, invalid_count, error_count, fatal_error
+                    while True:
+                        next_item = await get_next_health_item()
+                        if next_item is None:
+                            return
+                        item_index, (file_id, info) = next_item
 
-                telegram_part_count = len(telegram_part_mapping.get(file_id) or [])
-                telegram_chunk_mark = f" [Telegram 分片 {telegram_part_count} 块]" if telegram_part_count > 1 else ""
-                await broker.update_state(
-                    health_check_current_file=f"{file_path} ({checked + 1}/{max(total, 1)}){telegram_chunk_mark}"
-                )
-                logger.info(
-                    f"开始巡检文件 {checked + 1}/{max(total, 1)}: {file_path}{telegram_chunk_mark} | 仅读取前 {probe_target_bytes} 字节",
-                    stream="health",
-                )
+                        file_name = str(info.get("name") or file_id)
+                        file_path = str(info.get("path") or f"/{file_name}")
+                        file_size = int(info.get("size") or 0)
+                        probe_target_bytes = min(max(file_size, 0), probe_limit_bytes) if file_size > 0 else probe_limit_bytes
+                        telegram_part_count = len(telegram_part_mapping.get(file_id) or [])
+                        telegram_chunk_mark = f" [Telegram 分片 {telegram_part_count} 块]" if telegram_part_count > 1 else ""
 
-                probe_result = await probe_teldrive_file_download_async(
-                    config,
-                    file_id,
-                    file_size,
-                    probe_limit_bytes=probe_limit_bytes,
-                )
-
-                probe_attempts = max(1, int(probe_result.get("attempts") or 1))
-                checked_at = probe_result.get("checked_at") or iso_now()
-                previous = previous_by_id.get(file_id) or {}
-
-                if probe_result.get("success"):
-                    status = "ok"
-                    consecutive_failures = 0
-                    last_ok_at = checked_at
-                    last_error = None
-                    ok_count += 1
-                    if probe_attempts > 1:
                         logger.info(
-                            f"巡检重试成功: {file_path}{telegram_chunk_mark} | 第 {probe_attempts}/{HEALTH_CHECK_PROBE_MAX_ATTEMPTS} 次尝试成功",
+                            f"开始巡检文件 {item_index + 1}/{total}: {file_path}{telegram_chunk_mark} | 线程 {worker_no}/{worker_count} | 仅读取前 {probe_target_bytes} 字节",
                             stream="health",
                         )
-                else:
-                    status_code = probe_result.get("status_code")
-                    if status_code in {401, 403}:
-                        raise RuntimeError(f"TelDrive 下载鉴权失败：HTTP {status_code}")
-                    consecutive_failures = int(previous.get("consecutive_failures") or 0) + 1
-                    status = "invalid" if consecutive_failures >= config.confirm_cycles else "suspect"
-                    last_ok_at = previous.get("last_ok_at")
-                    last_error = probe_result.get("error") or "未知错误"
-                    if status == "invalid":
-                        invalid_count += 1
-                    else:
-                        suspect_count += 1
-                    retry_suffix = f" | 已重试 {probe_attempts - 1} 次" if probe_attempts > 1 else ""
-                    logger.warning(
-                        f"巡检失败: {file_path}{telegram_chunk_mark} -> {last_error} ({consecutive_failures}/{config.confirm_cycles}){retry_suffix}",
-                        stream="health",
-                    )
 
+                        probe_result = await probe_teldrive_file_download_async(
+                            config,
+                            file_id,
+                            file_size,
+                            probe_limit_bytes=probe_limit_bytes,
+                        )
 
-                await db.upsert_file_health_check(
-                    file_id=file_id,
-                    file_name=file_name,
-                    file_path=file_path,
-                    file_size=file_size,
-                    status=status,
-                    consecutive_failures=consecutive_failures,
-                    last_checked_at=checked_at,
-                    last_ok_at=last_ok_at,
-                    last_error=last_error,
-                    last_run_id=run_id,
-                    last_probe_status=probe_result.get("status_code"),
-                    last_probe_bytes=int(probe_result.get("bytes_read") or 0),
-                    last_probe_duration_ms=int(probe_result.get("duration_ms") or 0),
-                    last_probe_content_type=probe_result.get("content_type"),
-                )
+                        async with result_lock:
+                            if fatal_error is not None:
+                                return
 
-                checked += 1
-                await broker.update_state(
-                    health_check_checked_files=checked,
-                    health_check_total_files=total,
-                    health_check_ok_count=ok_count,
-                    health_check_suspect_count=suspect_count,
-                    health_check_invalid_count=invalid_count,
-                    health_check_error_count=error_count,
-                )
-                if checked == total or checked % 20 == 0:
-                    logger.info(
-                        f"巡检进度: {checked}/{total} | 正常 {ok_count} | 可疑 {suspect_count} | 失效 {invalid_count}",
-                        stream="health",
-                    )
+                            status_code = probe_result.get("status_code")
+                            if status_code in {401, 403}:
+                                fatal_error = RuntimeError(f"TelDrive 下载鉴权失败：HTTP {status_code}")
+                                return
 
+                            probe_attempts = max(1, int(probe_result.get("attempts") or 1))
+                            checked_at = probe_result.get("checked_at") or iso_now()
+                            previous = previous_by_id.get(file_id) or {}
+
+                            if probe_result.get("success"):
+                                status = "ok"
+                                consecutive_failures = 0
+                                last_ok_at = checked_at
+                                last_error = None
+                                ok_count += 1
+                                if probe_attempts > 1:
+                                    logger.info(
+                                        f"巡检重试成功: {file_path}{telegram_chunk_mark} | 第 {probe_attempts}/{HEALTH_CHECK_PROBE_MAX_ATTEMPTS} 次尝试成功",
+                                        stream="health",
+                                    )
+                            else:
+                                consecutive_failures = int(previous.get("consecutive_failures") or 0) + 1
+                                status = "invalid" if consecutive_failures >= config.confirm_cycles else "suspect"
+                                last_ok_at = previous.get("last_ok_at")
+                                last_error = probe_result.get("error") or "未知错误"
+                                if status == "invalid":
+                                    invalid_count += 1
+                                else:
+                                    suspect_count += 1
+                                retry_suffix = f" | 已重试 {probe_attempts - 1} 次" if probe_attempts > 1 else ""
+                                logger.warning(
+                                    f"巡检失败: {file_path}{telegram_chunk_mark} -> {last_error} ({consecutive_failures}/{config.confirm_cycles}){retry_suffix}",
+                                    stream="health",
+                                )
+
+                            await db.upsert_file_health_check(
+                                file_id=file_id,
+                                file_name=file_name,
+                                file_path=file_path,
+                                file_size=file_size,
+                                status=status,
+                                consecutive_failures=consecutive_failures,
+                                last_checked_at=checked_at,
+                                last_ok_at=last_ok_at,
+                                last_error=last_error,
+                                last_run_id=run_id,
+                                last_probe_status=probe_result.get("status_code"),
+                                last_probe_bytes=int(probe_result.get("bytes_read") or 0),
+                                last_probe_duration_ms=int(probe_result.get("duration_ms") or 0),
+                                last_probe_content_type=probe_result.get("content_type"),
+                            )
+
+                            checked += 1
+                            await broker.update_state(
+                                health_check_checked_files=checked,
+                                health_check_total_files=total,
+                                health_check_ok_count=ok_count,
+                                health_check_suspect_count=suspect_count,
+                                health_check_invalid_count=invalid_count,
+                                health_check_error_count=error_count,
+                                health_check_current_file=(
+                                    f"并发巡检中（{worker_count} 线程）| 已完成 {checked}/{total} | 最近完成: "
+                                    f"{file_path}{telegram_chunk_mark}"
+                                ),
+                            )
+                            if checked == total or checked % 20 == 0:
+                                logger.info(
+                                    f"巡检进度: {checked}/{total} | 正常 {ok_count} | 可疑 {suspect_count} | 失效 {invalid_count}",
+                                    stream="health",
+                                )
+
+                worker_tasks = [
+                    asyncio.create_task(health_check_worker(index + 1))
+                    for index in range(worker_count)
+                ]
+                try:
+                    await asyncio.gather(*worker_tasks)
+                finally:
+                    for task in worker_tasks:
+                        if not task.done():
+                            task.cancel()
+                    await asyncio.gather(*worker_tasks, return_exceptions=True)
+
+                if self.stop_event.is_set() or self.reload_event.is_set():
+                    raise asyncio.CancelledError()
+                if fatal_error is not None:
+                    raise fatal_error
 
             if full_scan:
+
                 await db.delete_stale_file_health_checks(run_id)
             summary = await db.get_file_health_summary()
             finished_at = iso_now()

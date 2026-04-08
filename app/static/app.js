@@ -2314,8 +2314,10 @@ function collectSettingsConfig() {
             sync_interval: parseInt(document.getElementById('cfgTelegramSyncInterval').value, 10) || 10,
             sync_enabled: document.getElementById('cfgTelegramSyncEnabled').checked,
             health_check_enabled: document.getElementById('cfgTelegramHealthCheckEnabled').checked,
-            health_check_interval_hours: Math.max(1, parseInt(document.getElementById('cfgTelegramHealthCheckIntervalHours').value, 10) || 24)
+            health_check_interval_hours: Math.max(1, parseInt(document.getElementById('cfgTelegramHealthCheckIntervalHours').value, 10) || 24),
+            health_check_workers: Math.max(1, parseInt(document.getElementById('cfgTelegramHealthCheckWorkers').value, 10) || 6)
         },
+
 
         telegram_db: {
             host: document.getElementById('cfgDbHost').value,
@@ -2377,9 +2379,11 @@ async function loadConfig() {
         document.getElementById('cfgTelegramSyncEnabled').checked = cfg.telegram?.sync_enabled !== false;
         document.getElementById('cfgTelegramHealthCheckEnabled').checked = !!cfg.telegram?.health_check_enabled;
         document.getElementById('cfgTelegramHealthCheckIntervalHours').value = cfg.telegram?.health_check_interval_hours || 24;
+        document.getElementById('cfgTelegramHealthCheckWorkers').value = cfg.telegram?.health_check_workers || 6;
 
 
         document.getElementById('cfgDbHost').value = cfg.telegram_db?.host || '';
+
         document.getElementById('cfgDbPort').value = cfg.telegram_db?.port || 5432;
         document.getElementById('cfgDbUser').value = cfg.telegram_db?.user || '';
         document.getElementById('cfgDbPassword').value = cfg.telegram_db?.password || '';
@@ -2705,7 +2709,7 @@ function renderT2TDHealthIssues(issues = []) {
     if (!containers.length) return;
 
     if (!issues.length) {
-        const emptyHtml = '<div class="log-empty"><i class="ph ph-shield-check"></i> 暂无失效或可疑文件</div>';
+        const emptyHtml = '<div class="inspection-empty-state"><i class="ph ph-shield-check"></i><span>暂无失效或可疑文件</span></div>';
         containers.forEach(container => {
             container.innerHTML = emptyHtml;
         });
@@ -2713,19 +2717,34 @@ function renderT2TDHealthIssues(issues = []) {
     }
 
     const html = issues.map(item => {
-        const status = item.status === 'invalid' ? '失效' : item.status === 'suspect' ? '可疑' : '异常';
-        const color = item.status === 'invalid' ? '#f87171' : item.status === 'suspect' ? '#f59e0b' : '#60a5fa';
+        const statusKey = item.status === 'invalid' ? 'invalid' : item.status === 'suspect' ? 'suspect' : 'error';
+        const statusLabel = statusKey === 'invalid' ? '失效' : statusKey === 'suspect' ? '可疑' : '异常';
         const sizeText = Number(item.file_size || 0) > 0 ? formatBytes(Number(item.file_size || 0), 0) : '--';
         const path = escapeA2TDHtml(item.file_path || item.file_name || item.file_id || '--');
         const message = escapeA2TDHtml(item.last_error || '未知错误');
         const checkedAt = formatT2TDDateTime(item.last_checked_at);
-        return `<div class="log-entry"><span style="color:${color}">[${status}]</span> <span>${path}</span> <span style="color:var(--text-secondary)">(${sizeText} · ${checkedAt})</span><br><span style="color:var(--text-secondary)">${message}</span></div>`;
+        const failures = Math.max(0, Number(item.consecutive_failures || 0));
+        return `
+            <div class="inspection-issue-card ${statusKey}">
+                <div class="inspection-issue-head">
+                    <span class="inspection-issue-badge ${statusKey}">${statusLabel}</span>
+                    <span class="inspection-issue-time">${checkedAt}</span>
+                </div>
+                <div class="inspection-issue-path">${path}</div>
+                <div class="inspection-issue-meta">
+                    <span class="inspection-issue-chip"><i class="ph ph-hard-drive"></i> ${sizeText}</span>
+                    <span class="inspection-issue-chip"><i class="ph ph-arrows-clockwise"></i> 连续失败 ${failures} 次</span>
+                </div>
+                <div class="inspection-issue-message">${message}</div>
+            </div>
+        `;
     }).join('');
 
     containers.forEach(container => {
         container.innerHTML = html;
     });
 }
+
 
 function updateT2TDHealthFromState(state = {}) {
     initT2TDHealthProbeInput();
@@ -2748,20 +2767,23 @@ function updateT2TDHealthFromState(state = {}) {
     const running = !!state.health_check_running;
     const checkedFiles = Number(state.health_check_checked_files || 0);
     const intervalHours = Math.max(1, Number(state.health_check_interval_hours || 24));
+    const workers = Math.max(1, Number(state.health_check_workers || window.currentConfig?.telegram?.health_check_workers || 6));
     const autoEnabled = !!state.health_check_enabled;
+    const totalForProgress = Math.max(total, checkedFiles, 1);
     const statusText = running
-        ? `正在巡检 ${activeScopeLabel}：${checkedFiles}/${Math.max(total, checkedFiles, 1)} | 正常 ${ok} | 可疑 ${suspect} | 失效 ${invalid}`
+        ? `正在巡检 ${activeScopeLabel}：${checkedFiles}/${totalForProgress} | 正常 ${ok} | 可疑 ${suspect} | 失效 ${invalid}`
         : state.health_check_last_error
             ? `巡检异常：${state.health_check_last_error}`
             : lastCheckedAt
                 ? `最近一次巡检结果：正常 ${ok} / 可疑 ${suspect} / 失效 ${invalid}`
                 : '尚未执行文件巡检';
+    const autoPolicyText = autoEnabled ? `已开启 / 每 ${intervalHours} 小时 / ${workers} 线程` : '未开启';
     const currentFileText = running
         ? (state.health_check_current_file || `正在执行 ${activeScopeLabel} 的文件头读取探测...`)
-        : `自动巡检：${autoEnabled ? `已开启 / 每 ${intervalHours} 小时 / 全部文件` : '未开启'}`;
+        : `自动巡检：${autoPolicyText}`;
     const scopeText = running
-        ? `当前巡检对象：${activeScopeLabel}；文件头读取：每个文件前 ${activeProbeText}`
-        : `手动巡检对象：${selectedScopeLabel}；文件头读取：每个文件前 ${selectedProbeText}`;
+        ? `当前巡检对象：${activeScopeLabel}；文件头读取：每个文件前 ${activeProbeText}；并发线程：${workers}`
+        : `手动巡检对象：${selectedScopeLabel}；文件头读取：每个文件前 ${selectedProbeText}；并发线程：${workers}`;
     const runBtnHtml = running
         ? '<span class="spinner" style="width:14px;height:14px;border-width:2px;display:inline-block;margin-right:6px;"></span> 巡检中'
         : '<i class="ph ph-activity"></i> 立即巡检';
@@ -2780,6 +2802,12 @@ function updateT2TDHealthFromState(state = {}) {
     });
     getT2TDHealthTargets('last-checked').forEach(el => {
         el.textContent = formatT2TDDateTime(lastCheckedAt);
+    });
+    getT2TDHealthTargets('workers').forEach(el => {
+        el.textContent = String(workers);
+    });
+    getT2TDHealthTargets('auto-policy').forEach(el => {
+        el.textContent = autoPolicyText;
     });
     getT2TDHealthTargets('status').forEach(el => {
         el.textContent = statusText;
@@ -2806,6 +2834,7 @@ function updateT2TDHealthFromState(state = {}) {
         loadT2TDHealth();
     }
 }
+
 
 
 function renderT2TDHealthSnapshot(snapshot = {}) {

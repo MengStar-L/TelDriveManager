@@ -184,6 +184,9 @@ def _normalize_config(merged: dict, raw: dict | None = None) -> dict:
     log_cfg["buffer_size"] = max(50, int(log_cfg.get("buffer_size") or 400))
     log_cfg["file"] = str(log_cfg.get("file") or "runtime.log").strip() or "runtime.log"
 
+    telegram_cfg = merged.setdefault("telegram", {})
+    telegram_cfg["health_check_workers"] = max(1, int(telegram_cfg.get("health_check_workers") or 6))
+
     return merged
 
 
