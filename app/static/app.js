@@ -2571,14 +2571,14 @@ function updateT2TDHealthFromState(state = {}) {
     const intervalHours = Math.max(1, Number(state.health_check_interval_hours || 24));
     const autoEnabled = !!state.health_check_enabled;
     const statusText = running
-        ? `正在执行真实下载巡检：${checkedFiles}/${Math.max(total, checkedFiles, 1)} | 正常 ${ok} | 可疑 ${suspect} | 失效 ${invalid}`
+        ? `正在执行 20KB 可用性巡检：${checkedFiles}/${Math.max(total, checkedFiles, 1)} | 正常 ${ok} | 可疑 ${suspect} | 失效 ${invalid}`
         : state.health_check_last_error
             ? `巡检异常：${state.health_check_last_error}`
             : lastCheckedAt
                 ? `最近一次巡检结果：正常 ${ok} / 可疑 ${suspect} / 失效 ${invalid}`
                 : '尚未执行文件巡检';
     const currentFileText = running
-        ? (state.health_check_current_file || '正在执行真实下载探测...')
+        ? (state.health_check_current_file || '正在执行 20KB 读取探测...')
         : `自动巡检：${autoEnabled ? `已开启 / 每 ${intervalHours} 小时` : '未开启'}`;
     const runBtnHtml = running
         ? '<span class="spinner" style="width:14px;height:14px;border-width:2px;display:inline-block;margin-right:6px;"></span> 巡检中'
@@ -2672,7 +2672,7 @@ async function runT2TDHealthCheck() {
         const resp = await fetch('/api/t2td/health/run', { method: 'POST' });
         const data = await readJsonSafe(resp);
         if (!resp.ok || data.ok === false) throw new Error(data.detail || data.message || '启动巡检失败');
-        if (typeof showA2TDToast === 'function') showA2TDToast(data.message || '已开始文件真实下载巡检', 'info');
+        if (typeof showA2TDToast === 'function') showA2TDToast(data.message || '已开始文件 20KB 可用性巡检', 'info');
         await loadT2TDState();
     } catch (e) {
         alert(e.message || '启动巡检失败');

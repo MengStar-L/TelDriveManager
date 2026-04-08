@@ -1173,7 +1173,7 @@
                             <div class="wizard-status-card" style="margin-top:8px;">
                                 <div class="wizard-status-row">
                                     <div>
-                                        <div style="font-size:13px; font-weight:600; color:var(--text-primary); margin-bottom:4px;">TelDrive 全文件真实下载巡检</div>
+                                        <div style="font-size:13px; font-weight:600; color:var(--text-primary); margin-bottom:4px;">TelDrive 20KB 可用性巡检</div>
                                         <div class="wizard-note" data-t2td-health="status">尚未执行文件巡检</div>
                                     </div>
                                     <button type="button" class="btn btn-ghost btn-sm" data-t2td-health="run" onclick="runT2TDHealthCheck()"><i class="ph ph-activity"></i> 立即巡检</button>
@@ -1414,10 +1414,10 @@
                                         <div class="toggle-switch"><input type="checkbox" id="cfgTelegramSyncEnabled" checked><span class="toggle-slider"></span></div>
                                     </label>
                                     <label class="toggle-row" style="justify-content:space-between; margin-top:12px;">
-                                        启用 TelDrive 全文件真实下载巡检
+                                        启用 TelDrive 20KB 可用性巡检
                                         <div class="toggle-switch"><input type="checkbox" id="cfgTelegramHealthCheckEnabled"><span class="toggle-slider"></span></div>
                                     </label>
-                                    <div class="wizard-note" style="margin-top:12px;">巡检会逐个真实下载全部 TelDrive 文件并丢弃数据，用于判断文件是否仍可播放或下载。</div>
+                                    <div class="wizard-note" style="margin-top:12px;">巡检会逐个读取每个 TelDrive 文件前 20KB，并在日志中显示当前读取分块数，用于快速判断文件是否仍可下载。</div>
                                 </div>
 
                             </div>

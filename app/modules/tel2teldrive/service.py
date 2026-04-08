@@ -54,6 +54,8 @@ TEMPLATES_DIR = BASE_DIR / "templates"
 CONFIG_PATH = BASE_DIR.parent.parent.parent / "config.toml"
 MAPPING_PATH = BASE_DIR / "file_msg_map.json"
 DEFAULT_LOG_FILE = BASE_DIR / "runtime.log"
+HEALTH_CHECK_PROBE_LIMIT_BYTES = 20 * 1024
+HEALTH_CHECK_PROBE_CHUNK_BYTES = 4 * 1024
 
 DEFAULT_CONFIG: dict[str, dict[str, Any]] = {
     "telegram": {
@@ -880,14 +882,26 @@ def get_teldrive_files(config: RuntimeConfig) -> dict[str, dict[str, Any]]:
     return result
 
 
-def probe_teldrive_file_download(config: RuntimeConfig, file_id: str, expected_size: int = 0) -> dict[str, Any]:
+def probe_teldrive_file_download(
+    config: RuntimeConfig,
+    file_id: str,
+    expected_size: int = 0,
+) -> dict[str, Any]:
+
     checked_at = iso_now()
     started = datetime.now(timezone.utc)
     url = f"{config.teldrive_url}/api/files/{file_id}/download"
-    headers = build_teldrive_auth_headers(config)
+    headers = {
+        **build_teldrive_auth_headers(config),
+        "Range": f"bytes=0-{HEALTH_CHECK_PROBE_LIMIT_BYTES - 1}",
+    }
     bytes_read = 0
+    chunk_count = 0
     status_code: int | None = None
     content_type = ""
+    expected = max(0, int(expected_size or 0))
+    target_bytes = min(expected, HEALTH_CHECK_PROBE_LIMIT_BYTES) if expected > 0 else HEALTH_CHECK_PROBE_LIMIT_BYTES
+
 
     try:
         with requests.get(url, headers=headers, stream=True, timeout=(10, 60)) as response:
@@ -897,13 +911,21 @@ def probe_teldrive_file_download(config: RuntimeConfig, file_id: str, expected_s
                 message = response.text[:300].strip()
                 raise RuntimeError(message or f"HTTP {response.status_code}")
 
-            for chunk in response.iter_content(chunk_size=1024 * 1024):
-                if chunk:
-                    bytes_read += len(chunk)
+            for chunk in response.iter_content(chunk_size=HEALTH_CHECK_PROBE_CHUNK_BYTES):
+                if not chunk:
+                    continue
+                remaining = max(0, target_bytes - bytes_read)
+                consumed = min(len(chunk), remaining)
+                if consumed <= 0:
+                    break
+                bytes_read += consumed
+                chunk_count += 1
 
-        expected = max(0, int(expected_size or 0))
-        if expected > 0 and bytes_read != expected:
-            raise RuntimeError(f"下载字节数不匹配: expected={expected}, actual={bytes_read}")
+                if bytes_read >= target_bytes:
+                    break
+
+        if bytes_read < target_bytes:
+            raise RuntimeError(f"读取字节不足: expected={target_bytes}, actual={bytes_read}")
 
         duration_ms = int((datetime.now(timezone.utc) - started).total_seconds() * 1000)
         return {
@@ -911,6 +933,8 @@ def probe_teldrive_file_download(config: RuntimeConfig, file_id: str, expected_s
             "checked_at": checked_at,
             "status_code": status_code,
             "bytes_read": bytes_read,
+            "chunk_count": chunk_count,
+            "target_bytes": target_bytes,
             "duration_ms": duration_ms,
             "content_type": content_type,
             "error": None,
@@ -922,10 +946,13 @@ def probe_teldrive_file_download(config: RuntimeConfig, file_id: str, expected_s
             "checked_at": checked_at,
             "status_code": status_code,
             "bytes_read": bytes_read,
+            "chunk_count": chunk_count,
+            "target_bytes": target_bytes,
             "duration_ms": duration_ms,
             "content_type": content_type,
             "error": str(exc),
         }
+
 
 
 
@@ -1438,7 +1465,7 @@ class Tel2TelDriveService:
         return {
             "accepted": not already_running,
             "already_running": already_running,
-            "message": "文件真实下载巡检已在运行中" if already_running else "已开始文件真实下载巡检",
+            "message": "文件 20KB 可用性巡检已在运行中" if already_running else "已开始文件 20KB 可用性巡检",
         }
 
     async def get_health_snapshot(self, limit: int = 50) -> dict[str, Any]:
@@ -1481,13 +1508,20 @@ class Tel2TelDriveService:
             health_check_last_error=None,
             health_check_current_file="正在获取 TelDrive 文件清单...",
         )
-        logger.info(f"开始执行文件真实下载巡检（触发方式: {trigger}）", stream="health")
+        logger.info(f"开始执行文件 20KB 可用性巡检（触发方式: {trigger}）", stream="health")
+
 
         try:
             files = await asyncio.to_thread(get_teldrive_files, config)
             previous_rows = await db.get_all_file_health_checks()
             previous_by_id = {row.get("file_id"): row for row in previous_rows if row.get("file_id")}
+            telegram_part_mapping = load_mapping()
+            if config.db_enabled:
+                db_mapping = await asyncio.to_thread(query_db_mapping, config)
+                if db_mapping:
+                    telegram_part_mapping.update(db_mapping)
             items = sorted(files.items(), key=lambda item: item[1].get("path") or item[1].get("name") or "")
+
             total = len(items)
             checked = 0
             ok_count = 0
@@ -1502,7 +1536,8 @@ class Tel2TelDriveService:
                 health_check_suspect_count=0,
                 health_check_invalid_count=0,
                 health_check_error_count=0,
-                health_check_current_file="正在执行文件真实下载探测..." if total else "当前没有可巡检文件",
+                health_check_current_file="正在执行文件 20KB 读取探测..." if total else "当前没有可巡检文件",
+
             )
 
             for file_id, info in items:
@@ -1512,9 +1547,25 @@ class Tel2TelDriveService:
                 file_name = str(info.get("name") or file_id)
                 file_path = str(info.get("path") or f"/{file_name}")
                 file_size = int(info.get("size") or 0)
-                await broker.update_state(health_check_current_file=f"{file_path} ({checked + 1}/{max(total, 1)})")
+                probe_target_bytes = min(max(file_size, 0), HEALTH_CHECK_PROBE_LIMIT_BYTES) if file_size > 0 else HEALTH_CHECK_PROBE_LIMIT_BYTES
+                telegram_part_count = len(telegram_part_mapping.get(file_id) or [])
+                telegram_chunk_mark = f" [Telegram 分片 {telegram_part_count} 块]" if telegram_part_count > 1 else ""
+                await broker.update_state(
+                    health_check_current_file=f"{file_path} ({checked + 1}/{max(total, 1)}){telegram_chunk_mark}"
+                )
+                logger.info(
+                    f"开始巡检文件 {checked + 1}/{max(total, 1)}: {file_path}{telegram_chunk_mark} | 仅读取前 {probe_target_bytes} 字节",
+                    stream="health",
+                )
 
-                probe_result = await asyncio.to_thread(probe_teldrive_file_download, config, file_id, file_size)
+                probe_result = await asyncio.to_thread(
+                    probe_teldrive_file_download,
+                    config,
+                    file_id,
+                    file_size,
+                )
+
+
                 checked_at = probe_result.get("checked_at") or iso_now()
                 previous = previous_by_id.get(file_id) or {}
 
@@ -1537,9 +1588,10 @@ class Tel2TelDriveService:
                     else:
                         suspect_count += 1
                     logger.warning(
-                        f"巡检失败: {file_path} -> {last_error} ({consecutive_failures}/{config.confirm_cycles})",
+                        f"巡检失败: {file_path}{telegram_chunk_mark} -> {last_error} ({consecutive_failures}/{config.confirm_cycles})",
                         stream="health",
                     )
+
 
                 await db.upsert_file_health_check(
                     file_id=file_id,
@@ -1559,20 +1611,20 @@ class Tel2TelDriveService:
                 )
 
                 checked += 1
-                if checked == total or checked % 5 == 0 or status != "ok":
-                    await broker.update_state(
-                        health_check_checked_files=checked,
-                        health_check_total_files=total,
-                        health_check_ok_count=ok_count,
-                        health_check_suspect_count=suspect_count,
-                        health_check_invalid_count=invalid_count,
-                        health_check_error_count=error_count,
+                await broker.update_state(
+                    health_check_checked_files=checked,
+                    health_check_total_files=total,
+                    health_check_ok_count=ok_count,
+                    health_check_suspect_count=suspect_count,
+                    health_check_invalid_count=invalid_count,
+                    health_check_error_count=error_count,
+                )
+                if checked == total or checked % 20 == 0:
+                    logger.info(
+                        f"巡检进度: {checked}/{total} | 正常 {ok_count} | 可疑 {suspect_count} | 失效 {invalid_count}",
+                        stream="health",
                     )
-                    if checked == total or checked % 20 == 0:
-                        logger.info(
-                            f"巡检进度: {checked}/{total} | 正常 {ok_count} | 可疑 {suspect_count} | 失效 {invalid_count}",
-                            stream="health",
-                        )
+
 
             await db.delete_stale_file_health_checks(run_id)
             summary = await db.get_file_health_summary()
