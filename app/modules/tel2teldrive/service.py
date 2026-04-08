@@ -8,6 +8,7 @@ import mimetypes
 import re
 import secrets
 import tomllib
+import unicodedata
 from collections import deque
 from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass
@@ -16,6 +17,7 @@ from io import BytesIO
 from itertools import count
 from pathlib import Path
 from typing import Any
+
 
 
 try:
@@ -560,7 +562,12 @@ def normalize_teldrive_path(value: Any) -> str:
     return text or "/"
 
 
+def build_teldrive_path_match_key(value: Any) -> str:
+    return unicodedata.normalize("NFKC", normalize_teldrive_path(value))
+
+
 def parse_health_check_scope_paths(value: Any) -> list[str]:
+
     if value in (None, ""):
         return []
     raw_values: list[str] = []
@@ -623,14 +630,17 @@ def normalize_health_check_scope(mode: Any, paths: Any) -> tuple[str, list[str],
 
 def file_path_in_health_scope(file_path: str, mode: str, paths: list[str]) -> bool:
     normalized_file_path = normalize_teldrive_path(file_path)
+    match_file_path = build_teldrive_path_match_key(normalized_file_path)
     if mode == HEALTH_CHECK_SCOPE_MODE_ALL:
         return True
     if mode == HEALTH_CHECK_SCOPE_MODE_FILES:
-        return normalized_file_path in set(paths)
+        return match_file_path in {build_teldrive_path_match_key(path) for path in paths}
     for base_path in paths:
-        if base_path == "/":
+        normalized_base_path = normalize_teldrive_path(base_path)
+        match_base_path = build_teldrive_path_match_key(normalized_base_path)
+        if normalized_base_path == "/":
             return True
-        if normalized_file_path == base_path or normalized_file_path.startswith(f"{base_path}/"):
+        if match_file_path == match_base_path or match_file_path.startswith(f"{match_base_path}/"):
             return True
     return False
 
@@ -644,11 +654,11 @@ def filter_health_check_items(
         return items
     normalized_paths = [normalize_teldrive_path(path) for path in scope_paths]
     if scope_mode == HEALTH_CHECK_SCOPE_MODE_FILES:
-        path_set = set(normalized_paths)
+        path_set = {build_teldrive_path_match_key(path) for path in normalized_paths}
         return [
             (file_id, info)
             for file_id, info in items
-            if normalize_teldrive_path(info.get("path") or f"/{info.get('name') or file_id}") in path_set
+            if build_teldrive_path_match_key(info.get("path") or f"/{info.get('name') or file_id}") in path_set
         ]
     return [
         (file_id, info)
@@ -659,6 +669,7 @@ def filter_health_check_items(
             normalized_paths,
         )
     ]
+
 
 
 def state_config_payload(config: RuntimeConfig) -> dict[str, Any]:
@@ -1051,63 +1062,16 @@ def get_teldrive_files(config: RuntimeConfig) -> dict[str, dict[str, Any]]:
 async def list_teldrive_dir_async(
     config: RuntimeConfig,
     path: str,
-    client: httpx.AsyncClient,
+    client: httpx.AsyncClient | None = None,
 ) -> list[dict[str, Any]]:
-    items: list[dict[str, Any]] = []
-    page = 1
-
-    while True:
-        params = {
-            "path": path,
-            "op": "list",
-            "perPage": 500,
-            "page": page,
-        }
-        try:
-            response = await client.get(f"{config.teldrive_url}/api/files", params=params)
-            response.raise_for_status()
-            data = response.json()
-        except Exception as exc:
-            logger.warning(f"获取 TelDrive 目录 {path} 失败: {exc}")
-            return items
-
-        items.extend(data.get("items", []))
-        meta = data.get("meta", {})
-        total_pages = meta.get("totalPages", 1)
-        if page >= total_pages:
-            break
-        page += 1
-
-    return items
+    return await asyncio.to_thread(list_teldrive_dir, config, path)
 
 
 async def get_teldrive_files_async(
     config: RuntimeConfig,
-    client: httpx.AsyncClient,
+    client: httpx.AsyncClient | None = None,
 ) -> dict[str, dict[str, Any]]:
-    result: dict[str, dict[str, Any]] = {}
-    dirs_to_scan = ["/"]
-
-    while dirs_to_scan:
-        current_path = dirs_to_scan.pop()
-        items = await list_teldrive_dir_async(config, current_path, client)
-        for item in items:
-            item_type = item.get("type", "")
-            item_id = item.get("id", "")
-            item_name = item.get("name", "")
-            item_size = int(item.get("size") or 0)
-            item_path = build_teldrive_file_path(current_path, item_name)
-            if item_type == "folder":
-                dirs_to_scan.append(item_path)
-            elif item_id:
-                result[item_id] = {
-                    "name": item_name,
-                    "size": item_size,
-                    "path": item_path,
-                    "mime_type": item.get("mimeType") or item.get("mime_type") or "",
-                }
-
-    return result
+    return await asyncio.to_thread(get_teldrive_files, config)
 
 
 async def probe_teldrive_file_download_async(
@@ -1115,71 +1079,16 @@ async def probe_teldrive_file_download_async(
     file_id: str,
     expected_size: int = 0,
     *,
-    client: httpx.AsyncClient,
+    client: httpx.AsyncClient | None = None,
     probe_limit_bytes: int = HEALTH_CHECK_PROBE_LIMIT_BYTES,
 ) -> dict[str, Any]:
-    checked_at = iso_now()
-    started = datetime.now(timezone.utc)
-    url = f"{config.teldrive_url}/api/files/{file_id}/download"
-    normalized_probe_limit = normalize_health_check_probe_bytes(probe_limit_bytes)
-    headers = {"Range": f"bytes=0-{normalized_probe_limit - 1}"}
-    bytes_read = 0
-    chunk_count = 0
-    status_code: int | None = None
-    content_type = ""
-    expected = max(0, int(expected_size or 0))
-    target_bytes = min(expected, normalized_probe_limit) if expected > 0 else normalized_probe_limit
-
-
-    try:
-        async with client.stream("GET", url, headers=headers) as response:
-            status_code = response.status_code
-            content_type = response.headers.get("Content-Type", "")
-            if response.status_code >= 400:
-                message = (await response.aread()).decode("utf-8", errors="ignore")[:300].strip()
-                raise RuntimeError(message or f"HTTP {response.status_code}")
-
-            async for chunk in response.aiter_bytes(chunk_size=HEALTH_CHECK_PROBE_CHUNK_BYTES):
-                if not chunk:
-                    continue
-                remaining = max(0, target_bytes - bytes_read)
-                consumed = min(len(chunk), remaining)
-                if consumed <= 0:
-                    break
-                bytes_read += consumed
-                chunk_count += 1
-
-                if bytes_read >= target_bytes:
-                    break
-
-        if bytes_read < target_bytes:
-            raise RuntimeError(f"读取字节不足: expected={target_bytes}, actual={bytes_read}")
-
-        duration_ms = int((datetime.now(timezone.utc) - started).total_seconds() * 1000)
-        return {
-            "success": True,
-            "checked_at": checked_at,
-            "status_code": status_code,
-            "bytes_read": bytes_read,
-            "chunk_count": chunk_count,
-            "target_bytes": target_bytes,
-            "duration_ms": duration_ms,
-            "content_type": content_type,
-            "error": None,
-        }
-    except Exception as exc:
-        duration_ms = int((datetime.now(timezone.utc) - started).total_seconds() * 1000)
-        return {
-            "success": False,
-            "checked_at": checked_at,
-            "status_code": status_code,
-            "bytes_read": bytes_read,
-            "chunk_count": chunk_count,
-            "target_bytes": target_bytes,
-            "duration_ms": duration_ms,
-            "content_type": content_type,
-            "error": str(exc),
-        }
+    return await asyncio.to_thread(
+        probe_teldrive_file_download,
+        config,
+        file_id,
+        expected_size,
+        probe_limit_bytes=probe_limit_bytes,
+    )
 
 
 def probe_teldrive_file_download(
@@ -1187,21 +1096,25 @@ def probe_teldrive_file_download(
     config: RuntimeConfig,
     file_id: str,
     expected_size: int = 0,
+    *,
+    probe_limit_bytes: int = HEALTH_CHECK_PROBE_LIMIT_BYTES,
 ) -> dict[str, Any]:
 
     checked_at = iso_now()
     started = datetime.now(timezone.utc)
     url = f"{config.teldrive_url}/api/files/{file_id}/download"
+    normalized_probe_limit = normalize_health_check_probe_bytes(probe_limit_bytes)
     headers = {
         **build_teldrive_auth_headers(config),
-        "Range": f"bytes=0-{HEALTH_CHECK_PROBE_LIMIT_BYTES - 1}",
+        "Range": f"bytes=0-{normalized_probe_limit - 1}",
     }
     bytes_read = 0
     chunk_count = 0
     status_code: int | None = None
     content_type = ""
     expected = max(0, int(expected_size or 0))
-    target_bytes = min(expected, HEALTH_CHECK_PROBE_LIMIT_BYTES) if expected > 0 else HEALTH_CHECK_PROBE_LIMIT_BYTES
+    target_bytes = min(expected, normalized_probe_limit) if expected > 0 else normalized_probe_limit
+
 
 
     try:
@@ -1882,130 +1795,120 @@ class Tel2TelDriveService:
 
 
         try:
+            files = await get_teldrive_files_async(config)
+            previous_rows = await db.get_all_file_health_checks()
+            previous_by_id = {row.get("file_id"): row for row in previous_rows if row.get("file_id")}
+            telegram_part_mapping = load_mapping()
+            if config.db_enabled:
+                db_mapping = await asyncio.to_thread(query_db_mapping, config)
+                if db_mapping:
+                    telegram_part_mapping.update(db_mapping)
+            all_items = sorted(files.items(), key=lambda item: item[1].get("path") or item[1].get("name") or "")
+            items = filter_health_check_items(all_items, scope_mode, scope_paths)
 
-            timeout = httpx.Timeout(connect=10.0, read=60.0, write=30.0, pool=10.0)
-            async with httpx.AsyncClient(
-                headers=build_teldrive_auth_headers(config),
-                follow_redirects=True,
-                timeout=timeout,
-            ) as health_client:
-                files = await get_teldrive_files_async(config, health_client)
-                previous_rows = await db.get_all_file_health_checks()
-                previous_by_id = {row.get("file_id"): row for row in previous_rows if row.get("file_id")}
-                telegram_part_mapping = load_mapping()
-                if config.db_enabled:
-                    db_mapping = await asyncio.to_thread(query_db_mapping, config)
-                    if db_mapping:
-                        telegram_part_mapping.update(db_mapping)
-                all_items = sorted(files.items(), key=lambda item: item[1].get("path") or item[1].get("name") or "")
-                items = filter_health_check_items(all_items, scope_mode, scope_paths)
+            total = len(items)
+            checked = 0
+            ok_count = 0
+            suspect_count = 0
+            invalid_count = 0
+            error_count = 0
 
-                total = len(items)
-                checked = 0
-                ok_count = 0
-                suspect_count = 0
-                invalid_count = 0
-                error_count = 0
+            logger.info(f"本次巡检对象 {scope_label} 共匹配到 {total} 个文件", stream="health")
+            await broker.update_state(
+                health_check_total_files=total,
+                health_check_checked_files=0,
+                health_check_ok_count=0,
+                health_check_suspect_count=0,
+                health_check_invalid_count=0,
+                health_check_error_count=0,
+                health_check_probe_bytes=probe_limit_bytes,
+                health_check_current_file=f"正在执行 {scope_label} 的文件头读取探测..." if total else f"{scope_label} 范围内没有可巡检文件",
+            )
 
-                logger.info(f"本次巡检对象 {scope_label} 共匹配到 {total} 个文件", stream="health")
+            for file_id, info in items:
+                if self.stop_event.is_set() or self.reload_event.is_set():
+                    raise asyncio.CancelledError()
+
+                file_name = str(info.get("name") or file_id)
+                file_path = str(info.get("path") or f"/{file_name}")
+                file_size = int(info.get("size") or 0)
+                probe_target_bytes = min(max(file_size, 0), probe_limit_bytes) if file_size > 0 else probe_limit_bytes
+
+                telegram_part_count = len(telegram_part_mapping.get(file_id) or [])
+                telegram_chunk_mark = f" [Telegram 分片 {telegram_part_count} 块]" if telegram_part_count > 1 else ""
                 await broker.update_state(
-                    health_check_total_files=total,
-                    health_check_checked_files=0,
-                    health_check_ok_count=0,
-                    health_check_suspect_count=0,
-                    health_check_invalid_count=0,
-                    health_check_error_count=0,
-                    health_check_probe_bytes=probe_limit_bytes,
-                    health_check_current_file=f"正在执行 {scope_label} 的文件头读取探测..." if total else f"{scope_label} 范围内没有可巡检文件",
+                    health_check_current_file=f"{file_path} ({checked + 1}/{max(total, 1)}){telegram_chunk_mark}"
+                )
+                logger.info(
+                    f"开始巡检文件 {checked + 1}/{max(total, 1)}: {file_path}{telegram_chunk_mark} | 仅读取前 {probe_target_bytes} 字节",
+                    stream="health",
                 )
 
+                probe_result = await probe_teldrive_file_download_async(
+                    config,
+                    file_id,
+                    file_size,
+                    probe_limit_bytes=probe_limit_bytes,
+                )
 
+                checked_at = probe_result.get("checked_at") or iso_now()
+                previous = previous_by_id.get(file_id) or {}
 
-                for file_id, info in items:
-                    if self.stop_event.is_set() or self.reload_event.is_set():
-                        raise asyncio.CancelledError()
-
-                    file_name = str(info.get("name") or file_id)
-                    file_path = str(info.get("path") or f"/{file_name}")
-                    file_size = int(info.get("size") or 0)
-                    probe_target_bytes = min(max(file_size, 0), probe_limit_bytes) if file_size > 0 else probe_limit_bytes
-
-                    telegram_part_count = len(telegram_part_mapping.get(file_id) or [])
-                    telegram_chunk_mark = f" [Telegram 分片 {telegram_part_count} 块]" if telegram_part_count > 1 else ""
-                    await broker.update_state(
-                        health_check_current_file=f"{file_path} ({checked + 1}/{max(total, 1)}){telegram_chunk_mark}"
-                    )
-                    logger.info(
-                        f"开始巡检文件 {checked + 1}/{max(total, 1)}: {file_path}{telegram_chunk_mark} | 仅读取前 {probe_target_bytes} 字节",
+                if probe_result.get("success"):
+                    status = "ok"
+                    consecutive_failures = 0
+                    last_ok_at = checked_at
+                    last_error = None
+                    ok_count += 1
+                else:
+                    status_code = probe_result.get("status_code")
+                    if status_code in {401, 403}:
+                        raise RuntimeError(f"TelDrive 下载鉴权失败：HTTP {status_code}")
+                    consecutive_failures = int(previous.get("consecutive_failures") or 0) + 1
+                    status = "invalid" if consecutive_failures >= config.confirm_cycles else "suspect"
+                    last_ok_at = previous.get("last_ok_at")
+                    last_error = probe_result.get("error") or "未知错误"
+                    if status == "invalid":
+                        invalid_count += 1
+                    else:
+                        suspect_count += 1
+                    logger.warning(
+                        f"巡检失败: {file_path}{telegram_chunk_mark} -> {last_error} ({consecutive_failures}/{config.confirm_cycles})",
                         stream="health",
                     )
 
-                    probe_result = await probe_teldrive_file_download_async(
-                        config,
-                        file_id,
-                        file_size,
-                        client=health_client,
-                        probe_limit_bytes=probe_limit_bytes,
+                await db.upsert_file_health_check(
+                    file_id=file_id,
+                    file_name=file_name,
+                    file_path=file_path,
+                    file_size=file_size,
+                    status=status,
+                    consecutive_failures=consecutive_failures,
+                    last_checked_at=checked_at,
+                    last_ok_at=last_ok_at,
+                    last_error=last_error,
+                    last_run_id=run_id,
+                    last_probe_status=probe_result.get("status_code"),
+                    last_probe_bytes=int(probe_result.get("bytes_read") or 0),
+                    last_probe_duration_ms=int(probe_result.get("duration_ms") or 0),
+                    last_probe_content_type=probe_result.get("content_type"),
+                )
+
+                checked += 1
+                await broker.update_state(
+                    health_check_checked_files=checked,
+                    health_check_total_files=total,
+                    health_check_ok_count=ok_count,
+                    health_check_suspect_count=suspect_count,
+                    health_check_invalid_count=invalid_count,
+                    health_check_error_count=error_count,
+                )
+                if checked == total or checked % 20 == 0:
+                    logger.info(
+                        f"巡检进度: {checked}/{total} | 正常 {ok_count} | 可疑 {suspect_count} | 失效 {invalid_count}",
+                        stream="health",
                     )
 
-
-                    checked_at = probe_result.get("checked_at") or iso_now()
-                    previous = previous_by_id.get(file_id) or {}
-
-                    if probe_result.get("success"):
-                        status = "ok"
-                        consecutive_failures = 0
-                        last_ok_at = checked_at
-                        last_error = None
-                        ok_count += 1
-                    else:
-                        status_code = probe_result.get("status_code")
-                        if status_code in {401, 403}:
-                            raise RuntimeError(f"TelDrive 下载鉴权失败：HTTP {status_code}")
-                        consecutive_failures = int(previous.get("consecutive_failures") or 0) + 1
-                        status = "invalid" if consecutive_failures >= config.confirm_cycles else "suspect"
-                        last_ok_at = previous.get("last_ok_at")
-                        last_error = probe_result.get("error") or "未知错误"
-                        if status == "invalid":
-                            invalid_count += 1
-                        else:
-                            suspect_count += 1
-                        logger.warning(
-                            f"巡检失败: {file_path}{telegram_chunk_mark} -> {last_error} ({consecutive_failures}/{config.confirm_cycles})",
-                            stream="health",
-                        )
-
-                    await db.upsert_file_health_check(
-                        file_id=file_id,
-                        file_name=file_name,
-                        file_path=file_path,
-                        file_size=file_size,
-                        status=status,
-                        consecutive_failures=consecutive_failures,
-                        last_checked_at=checked_at,
-                        last_ok_at=last_ok_at,
-                        last_error=last_error,
-                        last_run_id=run_id,
-                        last_probe_status=probe_result.get("status_code"),
-                        last_probe_bytes=int(probe_result.get("bytes_read") or 0),
-                        last_probe_duration_ms=int(probe_result.get("duration_ms") or 0),
-                        last_probe_content_type=probe_result.get("content_type"),
-                    )
-
-                    checked += 1
-                    await broker.update_state(
-                        health_check_checked_files=checked,
-                        health_check_total_files=total,
-                        health_check_ok_count=ok_count,
-                        health_check_suspect_count=suspect_count,
-                        health_check_invalid_count=invalid_count,
-                        health_check_error_count=error_count,
-                    )
-                    if checked == total or checked % 20 == 0:
-                        logger.info(
-                            f"巡检进度: {checked}/{total} | 正常 {ok_count} | 可疑 {suspect_count} | 失效 {invalid_count}",
-                            stream="health",
-                        )
 
             if full_scan:
                 await db.delete_stale_file_health_checks(run_id)
