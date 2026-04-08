@@ -57,7 +57,19 @@ CONFIG_PATH = BASE_DIR.parent.parent.parent / "config.toml"
 MAPPING_PATH = BASE_DIR / "file_msg_map.json"
 DEFAULT_LOG_FILE = BASE_DIR / "runtime.log"
 HEALTH_CHECK_PROBE_LIMIT_BYTES = 20 * 1024
+MIN_HEALTH_CHECK_PROBE_LIMIT_BYTES = 1 * 1024
+MAX_HEALTH_CHECK_PROBE_LIMIT_BYTES = 10 * 1024 * 1024
 HEALTH_CHECK_PROBE_CHUNK_BYTES = 4 * 1024
+HEALTH_CHECK_SCOPE_MODE_ALL = "all"
+HEALTH_CHECK_SCOPE_MODE_FOLDER = "folder"
+HEALTH_CHECK_SCOPE_MODE_FILES = "files"
+HEALTH_CHECK_SCOPE_MODES = {
+    HEALTH_CHECK_SCOPE_MODE_ALL,
+    HEALTH_CHECK_SCOPE_MODE_FOLDER,
+    HEALTH_CHECK_SCOPE_MODE_FILES,
+}
+
+
 
 DEFAULT_CONFIG: dict[str, dict[str, Any]] = {
     "telegram": {
@@ -507,7 +519,151 @@ def format_local_time(value: str | None) -> str:
         return value
 
 
+def format_health_check_probe_bytes(value: int) -> str:
+    size = max(1, int(value or 0))
+    units = ("B", "KB", "MB", "GB")
+    amount = float(size)
+    for unit in units:
+        if amount < 1024 or unit == units[-1]:
+            if unit == "B":
+                return f"{int(amount)}{unit}"
+            if amount.is_integer():
+                return f"{int(amount)}{unit}"
+            return f"{amount:.1f}{unit}"
+        amount /= 1024
+    return f"{size}B"
+
+
+def normalize_health_check_probe_bytes(value: Any) -> int:
+    if value in (None, ""):
+        return HEALTH_CHECK_PROBE_LIMIT_BYTES
+    try:
+        result = int(str(value).strip())
+    except (TypeError, ValueError) as exc:
+        raise ValueError("文件头读取大小必须是整数") from exc
+    if result < MIN_HEALTH_CHECK_PROBE_LIMIT_BYTES or result > MAX_HEALTH_CHECK_PROBE_LIMIT_BYTES:
+        min_label = format_health_check_probe_bytes(MIN_HEALTH_CHECK_PROBE_LIMIT_BYTES)
+        max_label = format_health_check_probe_bytes(MAX_HEALTH_CHECK_PROBE_LIMIT_BYTES)
+        raise ValueError(f"文件头读取大小必须在 {min_label} 到 {max_label} 之间")
+    return result
+
+
+def normalize_teldrive_path(value: Any) -> str:
+    text = str(value or "").strip().replace("\\", "/")
+    if not text:
+        raise ValueError("TelDrive 路径不能为空")
+    text = re.sub(r"/+", "/", text)
+    if not text.startswith("/"):
+        text = f"/{text}"
+    if text != "/":
+        text = text.rstrip("/")
+    return text or "/"
+
+
+def parse_health_check_scope_paths(value: Any) -> list[str]:
+    if value in (None, ""):
+        return []
+    raw_values: list[str] = []
+    if isinstance(value, (list, tuple, set)):
+        for item in value:
+            text = str(item or "").strip()
+            if text:
+                raw_values.extend(re.split(r"[\r\n,，;；]+", text))
+    else:
+        raw_values.extend(re.split(r"[\r\n,，;；]+", str(value)))
+
+    result: list[str] = []
+    seen: set[str] = set()
+    for item in raw_values:
+        text = str(item or "").strip()
+        if not text:
+            continue
+        normalized = normalize_teldrive_path(text)
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        result.append(normalized)
+    return result
+
+
+def format_health_check_scope_label(mode: str, paths: list[str] | None = None) -> str:
+    normalized_mode = str(mode or HEALTH_CHECK_SCOPE_MODE_ALL).strip().lower()
+    normalized_paths = [normalize_teldrive_path(path) for path in (paths or []) if str(path or "").strip()]
+    if normalized_mode == HEALTH_CHECK_SCOPE_MODE_ALL or not normalized_paths:
+        return "全部文件"
+    kind = "目录" if normalized_mode == HEALTH_CHECK_SCOPE_MODE_FOLDER else "文件"
+    if len(normalized_paths) == 1:
+        suffix = "（含子目录）" if normalized_mode == HEALTH_CHECK_SCOPE_MODE_FOLDER else ""
+        return f"{kind} {normalized_paths[0]}{suffix}"
+    preview = "、".join(normalized_paths[:2])
+    if len(normalized_paths) > 2:
+        preview = f"{preview} 等 {len(normalized_paths)} 个"
+    else:
+        preview = f"{preview} 共 {len(normalized_paths)} 个"
+    return f"{kind} {preview}"
+
+
+def normalize_health_check_scope(mode: Any, paths: Any) -> tuple[str, list[str], str]:
+    normalized_mode = str(mode or HEALTH_CHECK_SCOPE_MODE_ALL).strip().lower()
+    if normalized_mode not in HEALTH_CHECK_SCOPE_MODES:
+        raise ValueError("巡检对象类型无效")
+    if normalized_mode == HEALTH_CHECK_SCOPE_MODE_ALL:
+        return HEALTH_CHECK_SCOPE_MODE_ALL, [], "全部文件"
+
+    normalized_paths = parse_health_check_scope_paths(paths)
+    if not normalized_paths:
+        target_name = "目录" if normalized_mode == HEALTH_CHECK_SCOPE_MODE_FOLDER else "文件"
+        raise ValueError(f"请至少填写一个 TelDrive {target_name}路径")
+    if normalized_mode == HEALTH_CHECK_SCOPE_MODE_FILES and any(path == "/" for path in normalized_paths):
+        raise ValueError("文件巡检路径不能是根目录 /")
+    if normalized_mode == HEALTH_CHECK_SCOPE_MODE_FOLDER and "/" in normalized_paths:
+        return HEALTH_CHECK_SCOPE_MODE_ALL, [], "全部文件"
+    return normalized_mode, normalized_paths, format_health_check_scope_label(normalized_mode, normalized_paths)
+
+
+def file_path_in_health_scope(file_path: str, mode: str, paths: list[str]) -> bool:
+    normalized_file_path = normalize_teldrive_path(file_path)
+    if mode == HEALTH_CHECK_SCOPE_MODE_ALL:
+        return True
+    if mode == HEALTH_CHECK_SCOPE_MODE_FILES:
+        return normalized_file_path in set(paths)
+    for base_path in paths:
+        if base_path == "/":
+            return True
+        if normalized_file_path == base_path or normalized_file_path.startswith(f"{base_path}/"):
+            return True
+    return False
+
+
+def filter_health_check_items(
+    items: list[tuple[str, dict[str, Any]]],
+    scope_mode: str,
+    scope_paths: list[str],
+) -> list[tuple[str, dict[str, Any]]]:
+    if scope_mode == HEALTH_CHECK_SCOPE_MODE_ALL:
+        return items
+    normalized_paths = [normalize_teldrive_path(path) for path in scope_paths]
+    if scope_mode == HEALTH_CHECK_SCOPE_MODE_FILES:
+        path_set = set(normalized_paths)
+        return [
+            (file_id, info)
+            for file_id, info in items
+            if normalize_teldrive_path(info.get("path") or f"/{info.get('name') or file_id}") in path_set
+        ]
+    return [
+        (file_id, info)
+        for file_id, info in items
+        if file_path_in_health_scope(
+            info.get("path") or f"/{info.get('name') or file_id}",
+            HEALTH_CHECK_SCOPE_MODE_FOLDER,
+            normalized_paths,
+        )
+    ]
+
+
 def state_config_payload(config: RuntimeConfig) -> dict[str, Any]:
+
+
     return {
         "config_ready": config.is_ready,
         "config_exists": config.config_exists,
@@ -535,8 +691,9 @@ def health_summary_state_payload(summary: dict[str, Any] | None = None) -> dict[
         "health_check_error_count": int(summary.get("error_count") or 0),
         "health_check_last_checked_at": summary.get("last_checked_at"),
         "health_check_last_ok_at": summary.get("last_ok_at"),
-        "health_check_checked_files": int(summary.get("checked_files") or 0),
+        "health_check_checked_files": int(summary.get("checked_files") or summary.get("total_files") or 0),
     }
+
 
 
 async def build_health_snapshot(limit: int = 50) -> dict[str, Any]:
@@ -574,7 +731,14 @@ class DashboardBroker:
             "health_check_last_started_at": None,
             "health_check_last_finished_at": None,
             "health_check_last_error": None,
+            "health_check_last_checked_at": None,
+            "health_check_probe_bytes": HEALTH_CHECK_PROBE_LIMIT_BYTES,
+            "health_check_scope_mode": HEALTH_CHECK_SCOPE_MODE_ALL,
+            "health_check_scope_paths": [],
+            "health_check_scope_label": "全部文件",
             **state_config_payload(config),
+
+
             **health_summary_state_payload(),
         }
 
@@ -952,17 +1116,20 @@ async def probe_teldrive_file_download_async(
     expected_size: int = 0,
     *,
     client: httpx.AsyncClient,
+    probe_limit_bytes: int = HEALTH_CHECK_PROBE_LIMIT_BYTES,
 ) -> dict[str, Any]:
     checked_at = iso_now()
     started = datetime.now(timezone.utc)
     url = f"{config.teldrive_url}/api/files/{file_id}/download"
-    headers = {"Range": f"bytes=0-{HEALTH_CHECK_PROBE_LIMIT_BYTES - 1}"}
+    normalized_probe_limit = normalize_health_check_probe_bytes(probe_limit_bytes)
+    headers = {"Range": f"bytes=0-{normalized_probe_limit - 1}"}
     bytes_read = 0
     chunk_count = 0
     status_code: int | None = None
     content_type = ""
     expected = max(0, int(expected_size or 0))
-    target_bytes = min(expected, HEALTH_CHECK_PROBE_LIMIT_BYTES) if expected > 0 else HEALTH_CHECK_PROBE_LIMIT_BYTES
+    target_bytes = min(expected, normalized_probe_limit) if expected > 0 else normalized_probe_limit
+
 
     try:
         async with client.stream("GET", url, headers=headers) as response:
@@ -1410,8 +1577,13 @@ class Tel2TelDriveService:
         self.refresh_qr_event = asyncio.Event()
         self.health_trigger_event = asyncio.Event()
         self.password_future: asyncio.Future[str] | None = None
+        self._pending_health_check_probe_bytes: int | None = None
+        self._pending_health_check_scope_mode = HEALTH_CHECK_SCOPE_MODE_ALL
+        self._pending_health_check_scope_paths: list[str] = []
+
 
     async def run_forever(self):
+
         logger.info("=" * 56)
         logger.info("Telegram 监听中转服务启动")
         logger.info("=" * 56)
@@ -1546,7 +1718,12 @@ class Tel2TelDriveService:
         self.reload_event.set()
         self.refresh_qr_event.set()
         self.health_trigger_event.set()
+        self._pending_health_check_probe_bytes = None
+        self._pending_health_check_scope_mode = HEALTH_CHECK_SCOPE_MODE_ALL
+        self._pending_health_check_scope_paths = []
+
         if self.password_future and not self.password_future.done():
+
             self.password_future.cancel()
         if self.sync_task and not self.sync_task.done():
             self.sync_task.cancel()
@@ -1570,7 +1747,12 @@ class Tel2TelDriveService:
         self.reload_event.set()
         self.refresh_qr_event.set()
         self.health_trigger_event.set()
+        self._pending_health_check_probe_bytes = None
+        self._pending_health_check_scope_mode = HEALTH_CHECK_SCOPE_MODE_ALL
+        self._pending_health_check_scope_paths = []
+
         if self.password_future and not self.password_future.done():
+
             self.password_future.cancel()
         if self.client and self.client.is_connected():
             with suppress(Exception):
@@ -1591,18 +1773,51 @@ class Tel2TelDriveService:
         self.refresh_qr_event.set()
         logger.info("管理员发起二维码刷新请求")
 
-    async def request_health_check(self) -> dict[str, Any]:
+    async def request_health_check(
+        self,
+        probe_bytes: Any = None,
+        scope_mode: Any = None,
+        scope_paths: Any = None,
+    ) -> dict[str, Any]:
         if not self.client or not self.client.is_connected() or not broker.snapshot().get("authorized"):
             raise RuntimeError("Telegram 服务尚未就绪，暂时无法执行文件巡检")
+        normalized_probe_bytes = normalize_health_check_probe_bytes(probe_bytes)
+        normalized_scope_mode, normalized_scope_paths, scope_label = normalize_health_check_scope(scope_mode, scope_paths)
+        probe_label = format_health_check_probe_bytes(normalized_probe_bytes)
         already_running = bool(broker.snapshot().get("health_check_running"))
+        if already_running:
+            return {
+                "accepted": False,
+                "already_running": True,
+                "probe_bytes": normalized_probe_bytes,
+                "scope_mode": normalized_scope_mode,
+                "scope_paths": normalized_scope_paths,
+                "scope_label": scope_label,
+                "message": "文件巡检已在运行中",
+            }
+        self._pending_health_check_probe_bytes = normalized_probe_bytes
+        self._pending_health_check_scope_mode = normalized_scope_mode
+        self._pending_health_check_scope_paths = list(normalized_scope_paths)
+        await broker.update_state(
+            health_check_probe_bytes=normalized_probe_bytes,
+            health_check_scope_mode=normalized_scope_mode,
+            health_check_scope_paths=normalized_scope_paths,
+            health_check_scope_label=scope_label,
+        )
         self.health_trigger_event.set()
         return {
-            "accepted": not already_running,
-            "already_running": already_running,
-            "message": "文件 20KB 可用性巡检已在运行中" if already_running else "已开始文件 20KB 可用性巡检",
+            "accepted": True,
+            "already_running": False,
+            "probe_bytes": normalized_probe_bytes,
+            "scope_mode": normalized_scope_mode,
+            "scope_paths": normalized_scope_paths,
+            "scope_label": scope_label,
+            "message": f"已开始巡检：{scope_label}（每个文件仅读取前 {probe_label}）",
         }
 
+
     async def get_health_snapshot(self, limit: int = 50) -> dict[str, Any]:
+
         return await build_health_snapshot(limit=limit)
 
     async def refresh_health_state(self):
@@ -1634,6 +1849,19 @@ class Tel2TelDriveService:
     async def _run_health_check(self, config: RuntimeConfig, *, trigger: str):
         run_id = secrets.token_hex(8)
         started_at = iso_now()
+        probe_limit_bytes = (
+            self._pending_health_check_probe_bytes
+            if trigger == "manual" and self._pending_health_check_probe_bytes
+            else HEALTH_CHECK_PROBE_LIMIT_BYTES
+        )
+        scope_mode = self._pending_health_check_scope_mode if trigger == "manual" else HEALTH_CHECK_SCOPE_MODE_ALL
+        scope_paths = list(self._pending_health_check_scope_paths) if trigger == "manual" else []
+        self._pending_health_check_probe_bytes = None
+        self._pending_health_check_scope_mode = HEALTH_CHECK_SCOPE_MODE_ALL
+        self._pending_health_check_scope_paths = []
+        probe_label = format_health_check_probe_bytes(probe_limit_bytes)
+        scope_label = format_health_check_scope_label(scope_mode, scope_paths)
+        full_scan = scope_mode == HEALTH_CHECK_SCOPE_MODE_ALL
         await broker.update_state(
             health_check_running=True,
             health_check_trigger=trigger,
@@ -1641,11 +1869,20 @@ class Tel2TelDriveService:
             health_check_last_finished_at=None,
             health_check_last_error=None,
             health_check_current_file="正在获取 TelDrive 文件清单...",
+            health_check_probe_bytes=probe_limit_bytes,
+            health_check_scope_mode=scope_mode,
+            health_check_scope_paths=scope_paths,
+            health_check_scope_label=scope_label,
         )
-        logger.info(f"开始执行文件 20KB 可用性巡检（触发方式: {trigger}）", stream="health")
+        logger.info(
+            f"开始执行文件巡检（触发方式: {trigger}）| 巡检对象: {scope_label} | 每个文件仅读取前 {probe_label}",
+            stream="health",
+        )
+
 
 
         try:
+
             timeout = httpx.Timeout(connect=10.0, read=60.0, write=30.0, pool=10.0)
             async with httpx.AsyncClient(
                 headers=build_teldrive_auth_headers(config),
@@ -1660,7 +1897,8 @@ class Tel2TelDriveService:
                     db_mapping = await asyncio.to_thread(query_db_mapping, config)
                     if db_mapping:
                         telegram_part_mapping.update(db_mapping)
-                items = sorted(files.items(), key=lambda item: item[1].get("path") or item[1].get("name") or "")
+                all_items = sorted(files.items(), key=lambda item: item[1].get("path") or item[1].get("name") or "")
+                items = filter_health_check_items(all_items, scope_mode, scope_paths)
 
                 total = len(items)
                 checked = 0
@@ -1669,6 +1907,7 @@ class Tel2TelDriveService:
                 invalid_count = 0
                 error_count = 0
 
+                logger.info(f"本次巡检对象 {scope_label} 共匹配到 {total} 个文件", stream="health")
                 await broker.update_state(
                     health_check_total_files=total,
                     health_check_checked_files=0,
@@ -1676,8 +1915,11 @@ class Tel2TelDriveService:
                     health_check_suspect_count=0,
                     health_check_invalid_count=0,
                     health_check_error_count=0,
-                    health_check_current_file="正在执行文件 20KB 读取探测..." if total else "当前没有可巡检文件",
+                    health_check_probe_bytes=probe_limit_bytes,
+                    health_check_current_file=f"正在执行 {scope_label} 的文件头读取探测..." if total else f"{scope_label} 范围内没有可巡检文件",
                 )
+
+
 
                 for file_id, info in items:
                     if self.stop_event.is_set() or self.reload_event.is_set():
@@ -1686,7 +1928,8 @@ class Tel2TelDriveService:
                     file_name = str(info.get("name") or file_id)
                     file_path = str(info.get("path") or f"/{file_name}")
                     file_size = int(info.get("size") or 0)
-                    probe_target_bytes = min(max(file_size, 0), HEALTH_CHECK_PROBE_LIMIT_BYTES) if file_size > 0 else HEALTH_CHECK_PROBE_LIMIT_BYTES
+                    probe_target_bytes = min(max(file_size, 0), probe_limit_bytes) if file_size > 0 else probe_limit_bytes
+
                     telegram_part_count = len(telegram_part_mapping.get(file_id) or [])
                     telegram_chunk_mark = f" [Telegram 分片 {telegram_part_count} 块]" if telegram_part_count > 1 else ""
                     await broker.update_state(
@@ -1702,7 +1945,9 @@ class Tel2TelDriveService:
                         file_id,
                         file_size,
                         client=health_client,
+                        probe_limit_bytes=probe_limit_bytes,
                     )
+
 
                     checked_at = probe_result.get("checked_at") or iso_now()
                     previous = previous_by_id.get(file_id) or {}
@@ -1762,22 +2007,41 @@ class Tel2TelDriveService:
                             stream="health",
                         )
 
-            await db.delete_stale_file_health_checks(run_id)
+            if full_scan:
+                await db.delete_stale_file_health_checks(run_id)
             summary = await db.get_file_health_summary()
             finished_at = iso_now()
-            await broker.update_state(
-                health_check_running=False,
-                health_check_current_file=None,
-                health_check_last_finished_at=finished_at,
-                health_check_last_error=None,
-                health_check_checked_files=int(summary.get("total_files") or 0),
-                **health_summary_state_payload(summary),
-            )
+            final_state = {
+                "health_check_running": False,
+                "health_check_current_file": None,
+                "health_check_last_finished_at": finished_at,
+                "health_check_last_checked_at": finished_at,
+                "health_check_last_error": None,
+                "health_check_scope_mode": scope_mode,
+                "health_check_scope_paths": scope_paths,
+                "health_check_scope_label": scope_label,
+            }
+            if full_scan:
+                final_state.update(health_summary_state_payload(summary))
+            else:
+                final_state.update(
+                    {
+                        "health_check_total_files": total,
+                        "health_check_checked_files": checked,
+                        "health_check_ok_count": ok_count,
+                        "health_check_suspect_count": suspect_count,
+                        "health_check_invalid_count": invalid_count,
+                        "health_check_error_count": error_count,
+                    }
+                )
+            await broker.update_state(**final_state)
+
             logger.info(
-                f"文件巡检完成: 共 {summary.get('total_files', 0)} 个文件 | 正常 {summary.get('ok_count', 0)} | "
-                f"可疑 {summary.get('suspect_count', 0)} | 失效 {summary.get('invalid_count', 0)}",
+                f"文件巡检完成: 巡检对象 {scope_label} | 共 {checked} 个文件 | 正常 {ok_count} | "
+                f"可疑 {suspect_count} | 失效 {invalid_count}",
                 stream="health",
             )
+
 
         except asyncio.CancelledError:
             await broker.update_state(
@@ -1874,8 +2138,13 @@ class Tel2TelDriveService:
             self.health_task = None
 
         self.health_trigger_event.clear()
+        self._pending_health_check_probe_bytes = None
+        self._pending_health_check_scope_mode = HEALTH_CHECK_SCOPE_MODE_ALL
+        self._pending_health_check_scope_paths = []
 
         if self.client:
+
+
             with suppress(Exception):
                 if self.client.is_connected():
                     await self.client.disconnect()

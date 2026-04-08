@@ -769,10 +769,17 @@ let lastPageSwitchName = '';
 
 function runPageSideEffects(name) {
     if (name === 'aria2teldrive') loadA2TDTasks();
-    if (name === 'tel2teldrive' || name === 'inspection') loadT2TDState();
+    if (name === 'tel2teldrive') loadT2TDState();
+    if (name === 'inspection') {
+        initT2TDHealthProbeInput();
+        initT2TDHealthScopeInputs();
+        loadT2TDState();
+    }
     if (name === 'settings') loadConfig();
     if (name === 'progress') loadParseWorkspaceSnapshot();
 }
+
+
 
 
 function switchPage(name, options = {}) {
@@ -2515,9 +2522,170 @@ let t2tdQrRefreshPending = false;
 let t2tdHealthRunPending = false;
 let t2tdHealthLastFinishedAt = '';
 let t2tdHealthSnapshot = { summary: {}, issues: [] };
+const T2TD_HEALTH_PROBE_DEFAULT_KB = 20;
+const T2TD_HEALTH_PROBE_MIN_KB = 1;
+const T2TD_HEALTH_PROBE_MAX_KB = 10240;
+const T2TD_HEALTH_PROBE_STORAGE_KEY = 't2tdHealthProbeKb';
+const T2TD_HEALTH_SCOPE_MODE_ALL = 'all';
+const T2TD_HEALTH_SCOPE_MODE_FOLDER = 'folder';
+const T2TD_HEALTH_SCOPE_MODE_FILES = 'files';
+const T2TD_HEALTH_SCOPE_MODE_STORAGE_KEY = 't2tdHealthScopeMode';
+const T2TD_HEALTH_SCOPE_PATHS_STORAGE_KEY = 't2tdHealthScopePaths';
 window.t2tdState = window.t2tdState || {};
 
+function clampT2TDHealthProbeKb(value) {
+    const numeric = Number.parseInt(value, 10);
+    if (!Number.isFinite(numeric)) return T2TD_HEALTH_PROBE_DEFAULT_KB;
+    return Math.min(T2TD_HEALTH_PROBE_MAX_KB, Math.max(T2TD_HEALTH_PROBE_MIN_KB, numeric));
+}
+
+function normalizeT2TDHealthScopeMode(value) {
+    const mode = String(value || T2TD_HEALTH_SCOPE_MODE_ALL).trim().toLowerCase();
+    if ([T2TD_HEALTH_SCOPE_MODE_ALL, T2TD_HEALTH_SCOPE_MODE_FOLDER, T2TD_HEALTH_SCOPE_MODE_FILES].includes(mode)) {
+        return mode;
+    }
+    return T2TD_HEALTH_SCOPE_MODE_ALL;
+}
+
+function parseT2TDHealthScopePaths(value) {
+    return String(value || '')
+        .split(/[\n,，;；]+/)
+        .map(item => item.trim())
+        .filter(Boolean)
+        .map(item => {
+            const normalized = item.replace(/\\/g, '/').replace(/\/+/g, '/');
+            if (!normalized) return '';
+
+            const withLeadingSlash = normalized.startsWith('/') ? normalized : `/${normalized}`;
+            return withLeadingSlash === '/' ? withLeadingSlash : withLeadingSlash.replace(/\/+$/g, '');
+        })
+        .filter(Boolean);
+}
+
+function formatT2TDHealthScopeLabel(mode, paths) {
+    const normalizedMode = normalizeT2TDHealthScopeMode(mode);
+    const normalizedPaths = Array.isArray(paths) ? paths : parseT2TDHealthScopePaths(paths);
+    if (normalizedMode === T2TD_HEALTH_SCOPE_MODE_ALL || !normalizedPaths.length) return '全部文件';
+    const kind = normalizedMode === T2TD_HEALTH_SCOPE_MODE_FOLDER ? '目录' : '文件';
+    if (normalizedPaths.length === 1) {
+        const suffix = normalizedMode === T2TD_HEALTH_SCOPE_MODE_FOLDER ? '（含子目录）' : '';
+        return `${kind} ${normalizedPaths[0]}${suffix}`;
+    }
+    const preview = normalizedPaths.slice(0, 2).join('、');
+    return `${kind} ${preview}${normalizedPaths.length > 2 ? ` 等 ${normalizedPaths.length} 个` : ` 共 ${normalizedPaths.length} 个`}`;
+}
+
+function getT2TDHealthProbeInput() {
+    return document.getElementById('t2tdHealthProbeKb');
+}
+
+function getT2TDHealthScopeModeInput() {
+    return document.getElementById('t2tdHealthScopeMode');
+}
+
+function getT2TDHealthScopePathsInput() {
+    return document.getElementById('t2tdHealthScopePaths');
+}
+
+function getT2TDHealthScopePathsLabel() {
+    return document.getElementById('t2tdHealthScopePathsLabel');
+}
+
+function normalizeT2TDHealthProbeInput() {
+    const input = getT2TDHealthProbeInput();
+    const normalized = clampT2TDHealthProbeKb(input ? input.value : T2TD_HEALTH_PROBE_DEFAULT_KB);
+    if (input) input.value = String(normalized);
+    try {
+        localStorage.setItem(T2TD_HEALTH_PROBE_STORAGE_KEY, String(normalized));
+    } catch (e) {}
+    return normalized;
+}
+
+function syncT2TDHealthScopeInputs() {
+    const modeInput = getT2TDHealthScopeModeInput();
+    const pathsInput = getT2TDHealthScopePathsInput();
+    const label = getT2TDHealthScopePathsLabel();
+    const normalizedMode = normalizeT2TDHealthScopeMode(modeInput ? modeInput.value : T2TD_HEALTH_SCOPE_MODE_ALL);
+    const rawPaths = pathsInput ? String(pathsInput.value || '').replace(/\r\n/g, '\n').trim() : '';
+    if (modeInput) modeInput.value = normalizedMode;
+    if (pathsInput) {
+        pathsInput.value = rawPaths;
+        pathsInput.placeholder = normalizedMode === T2TD_HEALTH_SCOPE_MODE_FILES ? '/movies/demo.mkv\n/series/test.mp4' : '/movies\n/series';
+        pathsInput.disabled = normalizedMode === T2TD_HEALTH_SCOPE_MODE_ALL;
+    }
+    if (label) label.textContent = normalizedMode === T2TD_HEALTH_SCOPE_MODE_FILES ? 'TelDrive 文件路径' : 'TelDrive 目录路径';
+    getT2TDHealthTargets('scope-config-hint').forEach(el => {
+        el.textContent = normalizedMode === T2TD_HEALTH_SCOPE_MODE_ALL
+            ? '当前为全部文件巡检；如需缩小范围，请切换为“指定目录”或“指定文件”。'
+            : normalizedMode === T2TD_HEALTH_SCOPE_MODE_FOLDER
+                ? '支持填写一个或多个目录路径，按回车分行；会巡检目录内及其子目录下的全部文件。'
+                : '支持填写一个或多个文件完整路径，按回车分行；只巡检列出的文件。';
+    });
+    try {
+        localStorage.setItem(T2TD_HEALTH_SCOPE_MODE_STORAGE_KEY, normalizedMode);
+        localStorage.setItem(T2TD_HEALTH_SCOPE_PATHS_STORAGE_KEY, rawPaths);
+    } catch (e) {}
+    return {
+        mode: normalizedMode,
+        rawPaths,
+        paths: parseT2TDHealthScopePaths(rawPaths),
+    };
+}
+
+function initT2TDHealthProbeInput() {
+    const input = getT2TDHealthProbeInput();
+    if (!input || input.dataset.initialized === '1') return;
+    let initialValue = T2TD_HEALTH_PROBE_DEFAULT_KB;
+    try {
+        initialValue = clampT2TDHealthProbeKb(localStorage.getItem(T2TD_HEALTH_PROBE_STORAGE_KEY));
+    } catch (e) {}
+    input.value = String(initialValue);
+    input.addEventListener('change', normalizeT2TDHealthProbeInput);
+    input.addEventListener('blur', normalizeT2TDHealthProbeInput);
+    input.dataset.initialized = '1';
+}
+
+function initT2TDHealthScopeInputs() {
+    const modeInput = getT2TDHealthScopeModeInput();
+    const pathsInput = getT2TDHealthScopePathsInput();
+    if (!modeInput || !pathsInput || modeInput.dataset.initialized === '1') return;
+    let initialMode = T2TD_HEALTH_SCOPE_MODE_ALL;
+    let initialPaths = '';
+    try {
+        initialMode = normalizeT2TDHealthScopeMode(localStorage.getItem(T2TD_HEALTH_SCOPE_MODE_STORAGE_KEY));
+        initialPaths = String(localStorage.getItem(T2TD_HEALTH_SCOPE_PATHS_STORAGE_KEY) || '');
+    } catch (e) {}
+    modeInput.value = initialMode;
+    pathsInput.value = initialPaths;
+    modeInput.addEventListener('change', syncT2TDHealthScopeInputs);
+    pathsInput.addEventListener('change', syncT2TDHealthScopeInputs);
+    pathsInput.addEventListener('blur', syncT2TDHealthScopeInputs);
+    modeInput.dataset.initialized = '1';
+    syncT2TDHealthScopeInputs();
+}
+
+function getSelectedT2TDHealthProbeBytes() {
+    return normalizeT2TDHealthProbeInput() * 1024;
+}
+
+function getSelectedT2TDHealthScope() {
+    const selection = syncT2TDHealthScopeInputs();
+    return {
+        mode: selection.mode,
+        rawPaths: selection.rawPaths,
+        paths: selection.paths,
+        label: formatT2TDHealthScopeLabel(selection.mode, selection.paths),
+    };
+}
+
+function formatT2TDHealthProbeBytes(bytes) {
+    const normalized = Math.max(T2TD_HEALTH_PROBE_MIN_KB * 1024, Number(bytes || T2TD_HEALTH_PROBE_DEFAULT_KB * 1024));
+    return formatBytes(normalized, 0);
+}
+
+
 function formatT2TDExpireAt(expiresAt) {
+
     if (!expiresAt) return '';
     const date = new Date(expiresAt);
     if (Number.isNaN(date.getTime())) return '';
@@ -2560,7 +2728,18 @@ function renderT2TDHealthIssues(issues = []) {
 }
 
 function updateT2TDHealthFromState(state = {}) {
+    initT2TDHealthProbeInput();
+    initT2TDHealthScopeInputs();
     const summary = t2tdHealthSnapshot.summary || {};
+    const selectedProbeBytes = getSelectedT2TDHealthProbeBytes();
+    const selectedProbeText = formatT2TDHealthProbeBytes(selectedProbeBytes);
+    const selectedScope = getSelectedT2TDHealthScope();
+    const activeProbeBytes = Number(state.health_check_probe_bytes || 0) > 0 ? Number(state.health_check_probe_bytes) : selectedProbeBytes;
+    const activeProbeText = formatT2TDHealthProbeBytes(activeProbeBytes);
+    const activeScopeMode = normalizeT2TDHealthScopeMode(state.health_check_scope_mode || selectedScope.mode);
+    const activeScopePaths = Array.isArray(state.health_check_scope_paths) ? state.health_check_scope_paths : selectedScope.paths;
+    const activeScopeLabel = state.health_check_scope_label || formatT2TDHealthScopeLabel(activeScopeMode, activeScopePaths);
+    const selectedScopeLabel = selectedScope.label;
     const total = Number(state.health_check_total_files ?? summary.total_files ?? 0);
     const ok = Number(state.health_check_ok_count ?? summary.ok_count ?? 0);
     const suspect = Number(state.health_check_suspect_count ?? summary.suspect_count ?? 0);
@@ -2571,15 +2750,18 @@ function updateT2TDHealthFromState(state = {}) {
     const intervalHours = Math.max(1, Number(state.health_check_interval_hours || 24));
     const autoEnabled = !!state.health_check_enabled;
     const statusText = running
-        ? `正在执行 20KB 可用性巡检：${checkedFiles}/${Math.max(total, checkedFiles, 1)} | 正常 ${ok} | 可疑 ${suspect} | 失效 ${invalid}`
+        ? `正在巡检 ${activeScopeLabel}：${checkedFiles}/${Math.max(total, checkedFiles, 1)} | 正常 ${ok} | 可疑 ${suspect} | 失效 ${invalid}`
         : state.health_check_last_error
             ? `巡检异常：${state.health_check_last_error}`
             : lastCheckedAt
                 ? `最近一次巡检结果：正常 ${ok} / 可疑 ${suspect} / 失效 ${invalid}`
                 : '尚未执行文件巡检';
     const currentFileText = running
-        ? (state.health_check_current_file || '正在执行 20KB 读取探测...')
-        : `自动巡检：${autoEnabled ? `已开启 / 每 ${intervalHours} 小时` : '未开启'}`;
+        ? (state.health_check_current_file || `正在执行 ${activeScopeLabel} 的文件头读取探测...`)
+        : `自动巡检：${autoEnabled ? `已开启 / 每 ${intervalHours} 小时 / 全部文件` : '未开启'}`;
+    const scopeText = running
+        ? `当前巡检对象：${activeScopeLabel}；文件头读取：每个文件前 ${activeProbeText}`
+        : `手动巡检对象：${selectedScopeLabel}；文件头读取：每个文件前 ${selectedProbeText}`;
     const runBtnHtml = running
         ? '<span class="spinner" style="width:14px;height:14px;border-width:2px;display:inline-block;margin-right:6px;"></span> 巡检中'
         : '<i class="ph ph-activity"></i> 立即巡检';
@@ -2605,16 +2787,26 @@ function updateT2TDHealthFromState(state = {}) {
     getT2TDHealthTargets('current-file').forEach(el => {
         el.textContent = currentFileText;
     });
+    getT2TDHealthTargets('scope').forEach(el => {
+        el.textContent = scopeText;
+    });
     getT2TDHealthTargets('run').forEach(btn => {
         btn.disabled = t2tdHealthRunPending || running;
         btn.innerHTML = runBtnHtml;
     });
+    const probeInput = getT2TDHealthProbeInput();
+    const scopeModeInput = getT2TDHealthScopeModeInput();
+    const scopePathsInput = getT2TDHealthScopePathsInput();
+    if (probeInput) probeInput.disabled = t2tdHealthRunPending || running;
+    if (scopeModeInput) scopeModeInput.disabled = t2tdHealthRunPending || running;
+    if (scopePathsInput) scopePathsInput.disabled = t2tdHealthRunPending || running || selectedScope.mode === T2TD_HEALTH_SCOPE_MODE_ALL;
 
     if (!running && state.health_check_last_finished_at && state.health_check_last_finished_at !== t2tdHealthLastFinishedAt) {
         t2tdHealthLastFinishedAt = state.health_check_last_finished_at;
         loadT2TDHealth();
     }
 }
+
 
 function renderT2TDHealthSnapshot(snapshot = {}) {
     t2tdHealthSnapshot = {
@@ -2646,8 +2838,12 @@ function renderT2TDLogList(containerId, emptyHtml, logs = []) {
 }
 
 async function loadT2TDState() {
+    initT2TDHealthProbeInput();
+    initT2TDHealthScopeInputs();
     try {
+
         const res = await fetch('/api/t2td/bootstrap');
+
         const d = await readJsonSafe(res);
         updateT2TDState(d.state || {});
         renderT2TDHealthSnapshot(d.health || {});
@@ -2669,10 +2865,25 @@ async function runT2TDHealthCheck() {
     t2tdHealthRunPending = true;
     updateT2TDHealthFromState(window.t2tdState || {});
     try {
-        const resp = await fetch('/api/t2td/health/run', { method: 'POST' });
+        const probeBytes = getSelectedT2TDHealthProbeBytes();
+        const selectedScope = getSelectedT2TDHealthScope();
+        if (selectedScope.mode !== T2TD_HEALTH_SCOPE_MODE_ALL && !selectedScope.paths.length) {
+            throw new Error(selectedScope.mode === T2TD_HEALTH_SCOPE_MODE_FOLDER ? '请先填写至少一个 TelDrive 目录路径' : '请先填写至少一个 TelDrive 文件路径');
+        }
+        const resp = await fetch('/api/t2td/health/run', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                probe_bytes: probeBytes,
+                scope_mode: selectedScope.mode,
+                scope_paths: selectedScope.rawPaths,
+            })
+        });
         const data = await readJsonSafe(resp);
         if (!resp.ok || data.ok === false) throw new Error(data.detail || data.message || '启动巡检失败');
-        if (typeof showA2TDToast === 'function') showA2TDToast(data.message || '已开始文件 20KB 可用性巡检', 'info');
+        if (typeof showA2TDToast === 'function') {
+            showA2TDToast(data.message || `已开始巡检：${selectedScope.label}（每个文件仅读取前 ${formatT2TDHealthProbeBytes(probeBytes)}）`, 'info');
+        }
         await loadT2TDState();
     } catch (e) {
         alert(e.message || '启动巡检失败');
@@ -2681,6 +2892,8 @@ async function runT2TDHealthCheck() {
         updateT2TDHealthFromState(window.t2tdState || {});
     }
 }
+
+
 
 async function refreshT2TDQr(manual = false) {
     if (t2tdQrRefreshPending) return;
@@ -2784,9 +2997,15 @@ function updateT2TDState(state) {
     updateT2TDHealthFromState(state || {});
 }
 
+function shouldStickT2TDLogToBottom(container, threshold = 24) {
+    if (!container) return false;
+    return (container.scrollHeight - container.clientHeight - container.scrollTop) <= threshold;
+}
+
 function appendT2TDLogEntry(containerId, emptyId, log) {
     const container = document.getElementById(containerId);
     if (!container) return;
+    const shouldStick = shouldStickT2TDLogToBottom(container);
     const empty = emptyId ? document.getElementById(emptyId) : container.querySelector('.log-empty');
     if (empty) empty.remove();
 
@@ -2805,7 +3024,7 @@ function appendT2TDLogEntry(containerId, emptyId, log) {
 
     entry.innerHTML = `<span style="color:${c}">[${t}] [${logData.level || 'INFO'}] ${logData.message || ''}</span>`;
     container.appendChild(entry);
-    container.scrollTop = container.scrollHeight;
+    if (shouldStick) container.scrollTop = container.scrollHeight;
 }
 
 function appendT2TDLog(log) {
