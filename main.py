@@ -1,7 +1,6 @@
 """TelDriveManager 启动入口"""
 
 import logging
-import os
 import sys
 from pathlib import Path
 
@@ -38,33 +37,13 @@ def main():
   🌐  http://localhost:{port}
 """)
 
-    reload_enabled = os.getenv("TELDRIVE_RELOAD", "0").strip().lower() in {"1", "true", "yes", "on"}
-
-    if reload_enabled:
-        uvicorn.run(
-            "app.main:app",
-            host="0.0.0.0",
-            port=port,
-            log_level="warning",
-            reload=True,
-            reload_dirs=[str(ROOT_DIR / "app")],
-            reload_excludes=[
-                "downloads/*",
-                "*.db",
-                "*.db-*",
-                "*.log",
-                "*.session",
-                "history_*.md",
-            ],
-        )
-    else:
-        uvicorn.run(
-            "app.main:app",
-            host="0.0.0.0",
-            port=port,
-            log_level="warning",
-            reload=False,
-        )
+    uvicorn.run(
+        "app.main:app",
+        host="0.0.0.0",
+        port=port,
+        log_level="warning",
+        reload=False,
+    )
 
 
 if __name__ == "__main__":
