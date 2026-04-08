@@ -2315,8 +2315,10 @@ function collectSettingsConfig() {
             sync_enabled: document.getElementById('cfgTelegramSyncEnabled').checked,
             health_check_enabled: document.getElementById('cfgTelegramHealthCheckEnabled').checked,
             health_check_interval_hours: Math.max(1, parseInt(document.getElementById('cfgTelegramHealthCheckIntervalHours').value, 10) || 24),
-            health_check_workers: Math.max(1, parseInt(document.getElementById('cfgTelegramHealthCheckWorkers').value, 10) || 6)
+            health_check_workers: Math.max(1, parseInt(document.getElementById('cfgTelegramHealthCheckWorkers').value, 10) || 6),
+            health_check_retry_attempts: Math.max(0, parseInt(document.getElementById('cfgTelegramHealthCheckRetryAttempts').value, 10) || 2)
         },
+
 
 
         telegram_db: {
@@ -2380,9 +2382,11 @@ async function loadConfig() {
         document.getElementById('cfgTelegramHealthCheckEnabled').checked = !!cfg.telegram?.health_check_enabled;
         document.getElementById('cfgTelegramHealthCheckIntervalHours').value = cfg.telegram?.health_check_interval_hours || 24;
         document.getElementById('cfgTelegramHealthCheckWorkers').value = cfg.telegram?.health_check_workers || 6;
+        document.getElementById('cfgTelegramHealthCheckRetryAttempts').value = Math.max(0, Number(cfg.telegram?.health_check_retry_attempts ?? 2));
 
 
         document.getElementById('cfgDbHost').value = cfg.telegram_db?.host || '';
+
 
         document.getElementById('cfgDbPort').value = cfg.telegram_db?.port || 5432;
         document.getElementById('cfgDbUser').value = cfg.telegram_db?.user || '';
@@ -2768,8 +2772,10 @@ function updateT2TDHealthFromState(state = {}) {
     const checkedFiles = Number(state.health_check_checked_files || 0);
     const intervalHours = Math.max(1, Number(state.health_check_interval_hours || 24));
     const workers = Math.max(1, Number(state.health_check_workers || window.currentConfig?.telegram?.health_check_workers || 6));
+    const retryAttempts = Math.max(0, Number(state.health_check_retry_attempts ?? window.currentConfig?.telegram?.health_check_retry_attempts ?? 2));
     const autoEnabled = !!state.health_check_enabled;
     const totalForProgress = Math.max(total, checkedFiles, 1);
+
     const statusText = running
         ? `正在巡检 ${activeScopeLabel}：${checkedFiles}/${totalForProgress} | 正常 ${ok} | 可疑 ${suspect} | 失效 ${invalid}`
         : state.health_check_last_error
@@ -2777,13 +2783,14 @@ function updateT2TDHealthFromState(state = {}) {
             : lastCheckedAt
                 ? `最近一次巡检结果：正常 ${ok} / 可疑 ${suspect} / 失效 ${invalid}`
                 : '尚未执行文件巡检';
-    const autoPolicyText = autoEnabled ? `已开启 / 每 ${intervalHours} 小时 / ${workers} 线程` : '未开启';
+    const autoPolicyText = autoEnabled ? `已开启 / 每 ${intervalHours} 小时 / ${workers} 线程 / 失败重试 ${retryAttempts} 次` : '未开启';
     const currentFileText = running
         ? (state.health_check_current_file || `正在执行 ${activeScopeLabel} 的文件头读取探测...`)
         : `自动巡检：${autoPolicyText}`;
     const scopeText = running
-        ? `当前巡检对象：${activeScopeLabel}；文件头读取：每个文件前 ${activeProbeText}；并发线程：${workers}`
-        : `手动巡检对象：${selectedScopeLabel}；文件头读取：每个文件前 ${selectedProbeText}；并发线程：${workers}`;
+        ? `当前巡检对象：${activeScopeLabel}；文件头读取：每个文件前 ${activeProbeText}；并发线程：${workers}；失败重试：${retryAttempts} 次`
+        : `手动巡检对象：${selectedScopeLabel}；文件头读取：每个文件前 ${selectedProbeText}；并发线程：${workers}；失败重试：${retryAttempts} 次`;
+
     const runBtnHtml = running
         ? '<span class="spinner" style="width:14px;height:14px;border-width:2px;display:inline-block;margin-right:6px;"></span> 巡检中'
         : '<i class="ph ph-activity"></i> 立即巡检';

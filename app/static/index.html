@@ -1581,7 +1581,10 @@
                                     <div class="form-group"><label>频道 ID</label><input class="form-input" type="number" id="cfgTelegramChannelId" placeholder="0"></div>
                                     <div class="form-group"><label>同步间隔 (秒)</label><input class="form-input" type="number" id="cfgTelegramSyncInterval" placeholder="10"></div>
                                     <div class="form-group"><label>巡检间隔 (小时)</label><input class="form-input" type="number" id="cfgTelegramHealthCheckIntervalHours" min="1" placeholder="24"></div>
+                                    <div class="form-group"><label>巡检并发线程数</label><input class="form-input" type="number" id="cfgTelegramHealthCheckWorkers" min="1" placeholder="6"></div>
+                                    <div class="form-group"><label>巡检失败重试次数</label><input class="form-input" type="number" id="cfgTelegramHealthCheckRetryAttempts" min="0" placeholder="2"></div>
                                 </div>
+
                                 <div style="margin-top:20px; padding-top:20px; border-top:1px solid var(--border)">
                                     <label class="toggle-row" style="justify-content:space-between">
                                         启用删除同步
@@ -1591,7 +1594,8 @@
                                         启用 TelDrive 文件可用性巡检
                                         <div class="toggle-switch"><input type="checkbox" id="cfgTelegramHealthCheckEnabled"><span class="toggle-slider"></span></div>
                                     </label>
-                                    <div class="wizard-note" style="margin-top:12px;">自动巡检默认检查全部文件并读取每个文件前 20KB；手动巡检可在“文件巡检”页面自定义 TelDrive 文件夹/文件范围以及文件头读取大小，并可在此配置巡检并发线程数。</div>
+                                    <div class="wizard-note" style="margin-top:12px;">自动巡检默认检查全部文件并读取每个文件前 20KB；手动巡检可在“文件巡检”页面自定义 TelDrive 文件夹/文件范围以及文件头读取大小，并可在此配置巡检并发线程数与失败重试次数。</div>
+
 
 
 
@@ -1629,7 +1633,8 @@
 
     <div id="a2tdToastContainer" class="app-toast-container"></div>
 
-    <script src="/static/app.js?v=20260408b"></script>
+    <script src="/static/app.js?v=20260408c"></script>
+
 
 
 
