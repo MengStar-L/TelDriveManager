@@ -7,8 +7,10 @@ import json
 import mimetypes
 import re
 import secrets
+import time
 import tomllib
 import unicodedata
+
 from collections import deque
 from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass
@@ -62,7 +64,10 @@ HEALTH_CHECK_PROBE_LIMIT_BYTES = 20 * 1024
 MIN_HEALTH_CHECK_PROBE_LIMIT_BYTES = 1 * 1024
 MAX_HEALTH_CHECK_PROBE_LIMIT_BYTES = 10 * 1024 * 1024
 HEALTH_CHECK_PROBE_CHUNK_BYTES = 4 * 1024
+HEALTH_CHECK_PROBE_MAX_ATTEMPTS = 3
+HEALTH_CHECK_PROBE_RETRY_DELAY_SECONDS = 0.5
 HEALTH_CHECK_SCOPE_MODE_ALL = "all"
+
 HEALTH_CHECK_SCOPE_MODE_FOLDER = "folder"
 HEALTH_CHECK_SCOPE_MODE_FILES = "files"
 HEALTH_CHECK_SCOPE_MODES = {
@@ -1074,6 +1079,18 @@ async def get_teldrive_files_async(
     return await asyncio.to_thread(get_teldrive_files, config)
 
 
+def is_retryable_health_check_probe_error(error: Any) -> bool:
+    message = str(error or "")
+    if not message:
+        return False
+    retryable_markers = (
+        "Connection broken",
+        "IncompleteRead",
+        "读取字节不足",
+    )
+    return any(marker in message for marker in retryable_markers)
+
+
 async def probe_teldrive_file_download_async(
     config: RuntimeConfig,
     file_id: str,
@@ -1091,15 +1108,14 @@ async def probe_teldrive_file_download_async(
     )
 
 
-def probe_teldrive_file_download(
 
+def probe_teldrive_file_download_once(
     config: RuntimeConfig,
     file_id: str,
     expected_size: int = 0,
     *,
     probe_limit_bytes: int = HEALTH_CHECK_PROBE_LIMIT_BYTES,
 ) -> dict[str, Any]:
-
     checked_at = iso_now()
     started = datetime.now(timezone.utc)
     url = f"{config.teldrive_url}/api/files/{file_id}/download"
@@ -1114,8 +1130,6 @@ def probe_teldrive_file_download(
     content_type = ""
     expected = max(0, int(expected_size or 0))
     target_bytes = min(expected, normalized_probe_limit) if expected > 0 else normalized_probe_limit
-
-
 
     try:
         with requests.get(url, headers=headers, stream=True, timeout=(10, 60)) as response:
@@ -1166,6 +1180,53 @@ def probe_teldrive_file_download(
             "content_type": content_type,
             "error": str(exc),
         }
+
+
+
+def probe_teldrive_file_download(
+    config: RuntimeConfig,
+    file_id: str,
+    expected_size: int = 0,
+    *,
+    probe_limit_bytes: int = HEALTH_CHECK_PROBE_LIMIT_BYTES,
+) -> dict[str, Any]:
+    last_result: dict[str, Any] | None = None
+    for attempt in range(1, HEALTH_CHECK_PROBE_MAX_ATTEMPTS + 1):
+        result = probe_teldrive_file_download_once(
+            config,
+            file_id,
+            expected_size,
+            probe_limit_bytes=probe_limit_bytes,
+        )
+        result["attempts"] = attempt
+        result["max_attempts"] = HEALTH_CHECK_PROBE_MAX_ATTEMPTS
+        last_result = result
+        if result.get("success"):
+            return result
+        if attempt >= HEALTH_CHECK_PROBE_MAX_ATTEMPTS:
+            return result
+        error_message = result.get("error") or "未知错误"
+        if not is_retryable_health_check_probe_error(error_message):
+            return result
+        logger.warning(
+            f"巡检探测遇到可重试错误，准备第 {attempt + 1}/{HEALTH_CHECK_PROBE_MAX_ATTEMPTS} 次尝试: file_id={file_id} -> {error_message}",
+            stream="health",
+        )
+        time.sleep(HEALTH_CHECK_PROBE_RETRY_DELAY_SECONDS)
+    return last_result or {
+        "success": False,
+        "checked_at": iso_now(),
+        "status_code": None,
+        "bytes_read": 0,
+        "chunk_count": 0,
+        "target_bytes": 0,
+        "duration_ms": 0,
+        "content_type": "",
+        "error": "未知错误",
+        "attempts": 1,
+        "max_attempts": HEALTH_CHECK_PROBE_MAX_ATTEMPTS,
+    }
+
 
 
 
@@ -1851,6 +1912,7 @@ class Tel2TelDriveService:
                     probe_limit_bytes=probe_limit_bytes,
                 )
 
+                probe_attempts = max(1, int(probe_result.get("attempts") or 1))
                 checked_at = probe_result.get("checked_at") or iso_now()
                 previous = previous_by_id.get(file_id) or {}
 
@@ -1860,6 +1922,11 @@ class Tel2TelDriveService:
                     last_ok_at = checked_at
                     last_error = None
                     ok_count += 1
+                    if probe_attempts > 1:
+                        logger.info(
+                            f"巡检重试成功: {file_path}{telegram_chunk_mark} | 第 {probe_attempts}/{HEALTH_CHECK_PROBE_MAX_ATTEMPTS} 次尝试成功",
+                            stream="health",
+                        )
                 else:
                     status_code = probe_result.get("status_code")
                     if status_code in {401, 403}:
@@ -1872,10 +1939,12 @@ class Tel2TelDriveService:
                         invalid_count += 1
                     else:
                         suspect_count += 1
+                    retry_suffix = f" | 已重试 {probe_attempts - 1} 次" if probe_attempts > 1 else ""
                     logger.warning(
-                        f"巡检失败: {file_path}{telegram_chunk_mark} -> {last_error} ({consecutive_failures}/{config.confirm_cycles})",
+                        f"巡检失败: {file_path}{telegram_chunk_mark} -> {last_error} ({consecutive_failures}/{config.confirm_cycles}){retry_suffix}",
                         stream="health",
                     )
+
 
                 await db.upsert_file_health_check(
                     file_id=file_id,
