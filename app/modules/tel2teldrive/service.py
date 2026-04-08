@@ -30,8 +30,10 @@ import uvicorn
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 
+from app import database as db
 from fastapi.staticfiles import StaticFiles
 from telethon import TelegramClient, events
+
 from telethon.errors import PasswordHashInvalidError, SessionPasswordNeededError
 from telethon.password import compute_check
 from telethon.tl.functions.account import GetPasswordRequest
@@ -59,16 +61,17 @@ DEFAULT_CONFIG: dict[str, dict[str, Any]] = {
         "api_hash": "",
         "channel_id": None,
         "session_name": "tel2teldrive_session",
+        "sync_interval": 10,
+        "sync_enabled": True,
+        "max_scan_messages": 10000,
+        "confirm_cycles": 3,
+        "health_check_enabled": False,
+        "health_check_interval_hours": 24,
     },
     "teldrive": {
         "api_host": "",
         "access_token": "",
         "channel_id": None,
-        "sync_interval": 10,
-        "sync_enabled": True,
-        "max_scan_messages": 10000,
-        "confirm_cycles": 3,
-
     },
     "telegram_db": {
         "host": "",
@@ -84,8 +87,8 @@ DEFAULT_CONFIG: dict[str, dict[str, Any]] = {
         "log_buffer_size": 400,
         "log_file": "runtime.log",
     },
-
 }
+
 
 FIELD_LABELS = {
     "telegram.api_id": "Telegram API ID",
@@ -127,6 +130,8 @@ class RuntimeConfig:
     sync_enabled: bool
     max_scan_messages: int
     confirm_cycles: int
+    health_check_enabled: bool
+    health_check_interval_hours: int
     db_host: str
     db_port: int
     db_user: str
@@ -139,6 +144,7 @@ class RuntimeConfig:
     log_file: str
 
     missing_fields: list[str]
+
 
     @property
     def session_file(self) -> str:
@@ -162,6 +168,11 @@ class RuntimeConfig:
         if not log_path.is_absolute():
             log_path = BASE_DIR / log_path
         return log_path
+
+    @property
+    def health_check_interval_seconds(self) -> int:
+        return max(1, self.health_check_interval_hours) * 3600
+
 
 
 class ConfigStore:
@@ -214,10 +225,12 @@ class ConfigStore:
             teldrive_url=teldrive["api_host"],
             bearer_token=teldrive["access_token"],
             teldrive_channel_id=teldrive["channel_id"],
-            sync_interval=teldrive["sync_interval"],
-            sync_enabled=teldrive["sync_enabled"],
-            max_scan_messages=teldrive["max_scan_messages"],
-            confirm_cycles=teldrive["confirm_cycles"],
+            sync_interval=telegram["sync_interval"],
+            sync_enabled=telegram["sync_enabled"],
+            max_scan_messages=telegram["max_scan_messages"],
+            confirm_cycles=telegram["confirm_cycles"],
+            health_check_enabled=telegram["health_check_enabled"],
+            health_check_interval_hours=telegram["health_check_interval_hours"],
             db_host=data.get("telegram_db", {}).get("host", ""),
             db_port=data.get("telegram_db", {}).get("port", 5432),
             db_user=data.get("telegram_db", {}).get("user", ""),
@@ -240,6 +253,17 @@ class ConfigStore:
                 "api_hash": runtime.telegram_api_hash,
                 "channel_id": "" if runtime.telegram_channel_id is None else runtime.telegram_channel_id,
                 "session_name": runtime.session_name,
+                "sync_interval": runtime.sync_interval,
+                "sync_enabled": runtime.sync_enabled,
+                "max_scan_messages": runtime.max_scan_messages,
+                "confirm_cycles": runtime.confirm_cycles,
+                "health_check_enabled": runtime.health_check_enabled,
+                "health_check_interval_hours": runtime.health_check_interval_hours,
+            },
+            "teldrive": {
+                "api_host": runtime.teldrive_url,
+                "access_token": runtime.bearer_token,
+                "channel_id": "" if runtime.teldrive_channel_id is None else runtime.teldrive_channel_id,
             },
             "telegram_db": {
                 "host": runtime.db_host,
@@ -248,31 +272,13 @@ class ConfigStore:
                 "password": runtime.db_password,
                 "name": runtime.db_name,
             },
-            "teldrive": {
-                "api_host": runtime.teldrive_url,
-                "access_token": runtime.bearer_token,
-                "channel_id": "" if runtime.teldrive_channel_id is None else runtime.teldrive_channel_id,
-                "sync_interval": runtime.sync_interval,
-                "sync_enabled": runtime.sync_enabled,
-                "max_scan_messages": runtime.max_scan_messages,
-                "confirm_cycles": runtime.confirm_cycles,
-
-            },
-            "telegram_db": {
-        "host": "",
-        "port": 5432,
-        "user": "",
-        "password": "",
-        "name": "postgres",
-    },
-    "web": {
+            "web": {
                 "host": runtime.web_host,
                 "frontend_password": runtime.frontend_password,
                 "frontend_monitor_port": runtime.frontend_monitor_port,
                 "log_buffer_size": runtime.log_buffer_size,
                 "log_file": runtime.log_file,
             },
-
             "meta": {
                 "config_exists": runtime.config_exists,
                 "config_ready": runtime.is_ready,
@@ -306,34 +312,44 @@ class ConfigStore:
             telegram_payload.get("session_name"),
             fallback=DEFAULT_CONFIG["telegram"]["session_name"],
         )
+        telegram["sync_interval"] = self._parse_positive_int(
+            telegram_payload.get("sync_interval", teldrive_payload.get("sync_interval")),
+            "删除同步轮询间隔",
+            default=DEFAULT_CONFIG["telegram"]["sync_interval"],
+            strict=strict,
+        )
+        telegram["sync_enabled"] = self._parse_bool(
+            telegram_payload.get("sync_enabled", teldrive_payload.get("sync_enabled")),
+            default=DEFAULT_CONFIG["telegram"]["sync_enabled"],
+        )
+        telegram["max_scan_messages"] = self._parse_positive_int(
+            telegram_payload.get("max_scan_messages", teldrive_payload.get("max_scan_messages")),
+            "历史扫描上限",
+            default=DEFAULT_CONFIG["telegram"]["max_scan_messages"],
+            strict=strict,
+        )
+        telegram["confirm_cycles"] = self._parse_positive_int(
+            telegram_payload.get("confirm_cycles", teldrive_payload.get("confirm_cycles")),
+            "确认周期",
+            default=DEFAULT_CONFIG["telegram"]["confirm_cycles"],
+            strict=strict,
+        )
+        telegram["health_check_enabled"] = self._parse_bool(
+            telegram_payload.get("health_check_enabled"),
+            default=DEFAULT_CONFIG["telegram"]["health_check_enabled"],
+        )
+        telegram["health_check_interval_hours"] = self._parse_positive_int(
+            telegram_payload.get("health_check_interval_hours"),
+            "文件巡检间隔",
+            default=DEFAULT_CONFIG["telegram"]["health_check_interval_hours"],
+            strict=strict,
+        )
 
         teldrive = data["teldrive"]
         teldrive["api_host"] = self._parse_string(teldrive_payload.get("api_host"))
         teldrive["access_token"] = self._parse_string(teldrive_payload.get("access_token"))
         teldrive["channel_id"] = self._parse_optional_int(teldrive_payload.get("channel_id"), "TelDrive 频道 ID", strict=strict)
-        teldrive["sync_interval"] = self._parse_positive_int(
-            teldrive_payload.get("sync_interval"),
-            "删除同步轮询间隔",
-            default=DEFAULT_CONFIG["teldrive"]["sync_interval"],
-            strict=strict,
-        )
-        teldrive["sync_enabled"] = self._parse_bool(
-            teldrive_payload.get("sync_enabled"),
-            default=DEFAULT_CONFIG["teldrive"]["sync_enabled"],
-        )
-        teldrive["max_scan_messages"] = self._parse_positive_int(
-            teldrive_payload.get("max_scan_messages"),
-            "历史扫描上限",
-            default=DEFAULT_CONFIG["teldrive"]["max_scan_messages"],
-            strict=strict,
-        )
-        teldrive["confirm_cycles"] = self._parse_positive_int(
-            teldrive_payload.get("confirm_cycles"),
-            "确认周期",
-            default=DEFAULT_CONFIG["teldrive"]["confirm_cycles"],
-            strict=strict,
-        )
-        
+
         data.setdefault("telegram_db", {})
         telegram_db = data["telegram_db"]
         telegram_db["host"] = self._parse_string(telegram_db_payload.get("host"))
@@ -360,6 +376,7 @@ class ConfigStore:
         )
         web["log_file"] = self._parse_string(web_payload.get("log_file"), fallback=DEFAULT_CONFIG["web"]["log_file"])
         return data
+
 
 
     def _collect_missing_fields(self, data: dict[str, dict[str, Any]]) -> list[str]:
@@ -498,14 +515,42 @@ def state_config_payload(config: RuntimeConfig) -> dict[str, Any]:
         "sync_interval": config.sync_interval,
         "confirm_cycles": config.confirm_cycles,
         "max_scan_messages": config.max_scan_messages,
+        "health_check_enabled": config.health_check_enabled,
+        "health_check_interval_hours": config.health_check_interval_hours,
         "log_file": config.log_file_path.name,
     }
+
+
+def health_summary_state_payload(summary: dict[str, Any] | None = None) -> dict[str, Any]:
+    summary = summary or {}
+    return {
+        "health_check_total_files": int(summary.get("total_files") or 0),
+        "health_check_ok_count": int(summary.get("ok_count") or 0),
+        "health_check_suspect_count": int(summary.get("suspect_count") or 0),
+        "health_check_invalid_count": int(summary.get("invalid_count") or 0),
+        "health_check_error_count": int(summary.get("error_count") or 0),
+        "health_check_last_checked_at": summary.get("last_checked_at"),
+        "health_check_last_ok_at": summary.get("last_ok_at"),
+        "health_check_checked_files": int(summary.get("checked_files") or 0),
+    }
+
+
+async def build_health_snapshot(limit: int = 50) -> dict[str, Any]:
+    return {
+        "summary": await db.get_file_health_summary(),
+        "issues": await db.get_file_health_issues(limit=limit),
+    }
+
 
 
 class DashboardBroker:
     def __init__(self, log_limit: int, config: RuntimeConfig):
         now = iso_now()
-        self._logs: deque[dict[str, Any]] = deque(maxlen=log_limit)
+        self._log_limit = log_limit
+        self._logs: dict[str, deque[dict[str, Any]]] = {
+            "service": deque(maxlen=log_limit),
+            "health": deque(maxlen=log_limit),
+        }
         self._subscribers: set[asyncio.Queue[dict[str, Any]]] = set()
         self._state: dict[str, Any] = {
             "phase": "starting",
@@ -519,14 +564,22 @@ class DashboardBroker:
             "service_started_at": now,
             "log_count": 0,
             "last_log_at": None,
+            "health_check_running": False,
+            "health_check_current_file": None,
+            "health_check_trigger": None,
+            "health_check_last_started_at": None,
+            "health_check_last_finished_at": None,
+            "health_check_last_error": None,
             **state_config_payload(config),
+            **health_summary_state_payload(),
         }
+
 
     def snapshot(self) -> dict[str, Any]:
         return dict(self._state)
 
-    def logs_snapshot(self, limit: int = 200) -> list[dict[str, Any]]:
-        data = list(self._logs)
+    def logs_snapshot(self, limit: int = 200, *, stream: str = "service") -> list[dict[str, Any]]:
+        data = list(self._logs.get(stream, ()))
         return data[-limit:]
 
     async def update_state(self, **kwargs: Any):
@@ -536,11 +589,15 @@ class DashboardBroker:
         self._state["updated_at"] = iso_now()
         await self._broadcast({"type": "state", "payload": self.snapshot()})
 
-    def push_log(self, entry: dict[str, Any]):
-        self._logs.append(entry)
-        self._state["log_count"] = int(self._state.get("log_count", 0)) + 1
-        self._state["last_log_at"] = entry["timestamp"]
-        self._schedule_broadcast({"type": "log", "payload": entry})
+    def push_log(self, entry: dict[str, Any], *, stream: str = "service"):
+        normalized_stream = "health" if stream == "health" else "service"
+        payload = {**entry, "stream": normalized_stream}
+        buffer = self._logs.setdefault(normalized_stream, deque(maxlen=self._log_limit))
+        buffer.append(payload)
+        if normalized_stream == "service":
+            self._state["log_count"] = int(self._state.get("log_count", 0)) + 1
+            self._state["last_log_at"] = payload["timestamp"]
+        self._schedule_broadcast({"type": "log", "payload": payload})
 
     def subscribe(self) -> asyncio.Queue[dict[str, Any]]:
         queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=256)
@@ -584,16 +641,16 @@ class ActivityLogger:
         self.log_path = log_path
         self.log_path.parent.mkdir(parents=True, exist_ok=True)
 
-    def info(self, message: str):
-        self._write("INFO", message)
+    def info(self, message: str, *, stream: str = "service"):
+        self._write("INFO", message, stream=stream)
 
-    def warning(self, message: str):
-        self._write("WARN", message)
+    def warning(self, message: str, *, stream: str = "service"):
+        self._write("WARN", message, stream=stream)
 
-    def error(self, message: str):
-        self._write("ERROR", message)
+    def error(self, message: str, *, stream: str = "service"):
+        self._write("ERROR", message, stream=stream)
 
-    def _write(self, level: str, message: str):
+    def _write(self, level: str, message: str, *, stream: str = "service"): 
         timestamp = iso_now()
         line = f"{format_local_time(timestamp)} [{level}] {message}"
         print(line, flush=True)
@@ -605,7 +662,8 @@ class ActivityLogger:
                 "timestamp": timestamp,
                 "level": level,
                 "message": message,
-            }
+            },
+            stream=stream,
         )
 
 
@@ -652,7 +710,25 @@ def build_qr_data_uri(login_url: str) -> str:
     return f"data:image/svg+xml;base64,{encoded}"
 
 
+def build_teldrive_auth_headers(config: RuntimeConfig) -> dict[str, str]:
+    token = str(config.bearer_token or "").strip()
+    if not token:
+        return {}
+    return {
+        "Authorization": f"Bearer {token}",
+        "Cookie": f"access_token={token}",
+    }
+
+
+def build_teldrive_file_path(parent_path: str, name: str) -> str:
+    base = (parent_path or "/").strip() or "/"
+    if base == "/":
+        return f"/{name}"
+    return f"{base.rstrip('/')}/{name}"
+
+
 def add_file_to_teldrive(
+
     config: RuntimeConfig,
     file_name: str,
     file_size: int,
@@ -661,9 +737,10 @@ def add_file_to_teldrive(
     message_id: int,
 ) -> str | None:
     headers = {
-        "Authorization": f"Bearer {config.bearer_token}",
+        **build_teldrive_auth_headers(config),
         "Content-Type": "application/json",
     }
+
     payload = {
         "name": file_name,
         "type": "file",
@@ -748,7 +825,7 @@ def extract_file_info(msg: Any) -> dict[str, Any] | None:
 
 
 def list_teldrive_dir(config: RuntimeConfig, path: str) -> list[dict[str, Any]]:
-    headers = {"Authorization": f"Bearer {config.bearer_token}"}
+    headers = build_teldrive_auth_headers(config)
     items: list[dict[str, Any]] = []
     page = 1
 
@@ -788,14 +865,68 @@ def get_teldrive_files(config: RuntimeConfig) -> dict[str, dict[str, Any]]:
             item_type = item.get("type", "")
             item_id = item.get("id", "")
             item_name = item.get("name", "")
-            item_size = item.get("size", 0)
+            item_size = int(item.get("size") or 0)
+            item_path = build_teldrive_file_path(current_path, item_name)
             if item_type == "folder":
-                sub_path = current_path.rstrip("/") + "/" + item_name
-                dirs_to_scan.append(sub_path)
+                dirs_to_scan.append(item_path)
             elif item_id:
-                result[item_id] = {"name": item_name, "size": item_size}
+                result[item_id] = {
+                    "name": item_name,
+                    "size": item_size,
+                    "path": item_path,
+                    "mime_type": item.get("mimeType") or item.get("mime_type") or "",
+                }
 
     return result
+
+
+def probe_teldrive_file_download(config: RuntimeConfig, file_id: str, expected_size: int = 0) -> dict[str, Any]:
+    checked_at = iso_now()
+    started = datetime.now(timezone.utc)
+    url = f"{config.teldrive_url}/api/files/{file_id}/download"
+    headers = build_teldrive_auth_headers(config)
+    bytes_read = 0
+    status_code: int | None = None
+    content_type = ""
+
+    try:
+        with requests.get(url, headers=headers, stream=True, timeout=(10, 60)) as response:
+            status_code = response.status_code
+            content_type = response.headers.get("Content-Type", "")
+            if response.status_code >= 400:
+                message = response.text[:300].strip()
+                raise RuntimeError(message or f"HTTP {response.status_code}")
+
+            for chunk in response.iter_content(chunk_size=1024 * 1024):
+                if chunk:
+                    bytes_read += len(chunk)
+
+        expected = max(0, int(expected_size or 0))
+        if expected > 0 and bytes_read != expected:
+            raise RuntimeError(f"下载字节数不匹配: expected={expected}, actual={bytes_read}")
+
+        duration_ms = int((datetime.now(timezone.utc) - started).total_seconds() * 1000)
+        return {
+            "success": True,
+            "checked_at": checked_at,
+            "status_code": status_code,
+            "bytes_read": bytes_read,
+            "duration_ms": duration_ms,
+            "content_type": content_type,
+            "error": None,
+        }
+    except Exception as exc:
+        duration_ms = int((datetime.now(timezone.utc) - started).total_seconds() * 1000)
+        return {
+            "success": False,
+            "checked_at": checked_at,
+            "status_code": status_code,
+            "bytes_read": bytes_read,
+            "duration_ms": duration_ms,
+            "content_type": content_type,
+            "error": str(exc),
+        }
+
 
 
 def query_db_mapping(config: RuntimeConfig) -> dict[str, list[int]]:
@@ -1112,9 +1243,11 @@ class Tel2TelDriveService:
     def __init__(self):
         self.client: TelegramClient | None = None
         self.sync_task: asyncio.Task[Any] | None = None
+        self.health_task: asyncio.Task[Any] | None = None
         self.stop_event = asyncio.Event()
         self.reload_event = asyncio.Event()
         self.refresh_qr_event = asyncio.Event()
+        self.health_trigger_event = asyncio.Event()
         self.password_future: asyncio.Future[str] | None = None
 
     async def run_forever(self):
@@ -1126,6 +1259,7 @@ class Tel2TelDriveService:
             config = config_store.runtime()
             logger.set_log_path(config.log_file_path)
             await broker.update_state(**state_config_payload(config))
+            await self.refresh_health_state()
 
             if config.db_configured and not config.db_enabled:
                 logger.warning("检测到已配置 TelDrive 数据库，但本地未安装 psycopg2-binary，将回退到频道扫描模式")
@@ -1182,6 +1316,8 @@ class Tel2TelDriveService:
                     self.sync_task = asyncio.create_task(sync_deletions(self.client, config))
                 else:
                     logger.info("删除同步已关闭 (sync_enabled = false)")
+
+                self.health_task = asyncio.create_task(self._health_check_loop(config))
 
                 await broker.update_state(
                     phase="running",
@@ -1248,16 +1384,21 @@ class Tel2TelDriveService:
         self.stop_event.set()
         self.reload_event.set()
         self.refresh_qr_event.set()
+        self.health_trigger_event.set()
         if self.password_future and not self.password_future.done():
             self.password_future.cancel()
-        # 取消同步任务
         if self.sync_task and not self.sync_task.done():
             self.sync_task.cancel()
             try:
                 await self.sync_task
             except (asyncio.CancelledError, Exception):
                 pass
-        # 断开 Telegram 客户端连接，解除 run_until_disconnected 阻塞
+        if self.health_task and not self.health_task.done():
+            self.health_task.cancel()
+            try:
+                await self.health_task
+            except (asyncio.CancelledError, Exception):
+                pass
         if self.client:
             try:
                 await self.client.disconnect()
@@ -1267,6 +1408,7 @@ class Tel2TelDriveService:
     async def request_reload(self):
         self.reload_event.set()
         self.refresh_qr_event.set()
+        self.health_trigger_event.set()
         if self.password_future and not self.password_future.done():
             self.password_future.cancel()
         if self.client and self.client.is_connected():
@@ -1288,6 +1430,23 @@ class Tel2TelDriveService:
         self.refresh_qr_event.set()
         logger.info("管理员发起二维码刷新请求")
 
+    async def request_health_check(self) -> dict[str, Any]:
+        if not self.client or not self.client.is_connected() or not broker.snapshot().get("authorized"):
+            raise RuntimeError("Telegram 服务尚未就绪，暂时无法执行文件巡检")
+        already_running = bool(broker.snapshot().get("health_check_running"))
+        self.health_trigger_event.set()
+        return {
+            "accepted": not already_running,
+            "already_running": already_running,
+            "message": "文件真实下载巡检已在运行中" if already_running else "已开始文件真实下载巡检",
+        }
+
+    async def get_health_snapshot(self, limit: int = 50) -> dict[str, Any]:
+        return await build_health_snapshot(limit=limit)
+
+    async def refresh_health_state(self):
+        summary = await db.get_file_health_summary()
+        await broker.update_state(**health_summary_state_payload(summary))
 
     async def submit_password(self, password: str):
         if not password:
@@ -1296,6 +1455,190 @@ class Tel2TelDriveService:
             raise RuntimeError("当前无需输入两步验证密码")
         self.password_future.set_result(password)
         logger.info("已收到管理员提交的两步验证密码")
+
+    async def _health_check_loop(self, config: RuntimeConfig):
+        try:
+            while not self.stop_event.is_set() and not self.reload_event.is_set():
+                trigger = await self._wait_for_health_signal(
+                    timeout=config.health_check_interval_seconds if config.health_check_enabled else None
+                )
+                if trigger in {"stop", "reload", None}:
+                    if trigger in {"stop", "reload"}:
+                        break
+                    continue
+                await self._run_health_check(config, trigger=trigger)
+        except asyncio.CancelledError:
+            raise
+
+    async def _run_health_check(self, config: RuntimeConfig, *, trigger: str):
+        run_id = secrets.token_hex(8)
+        started_at = iso_now()
+        await broker.update_state(
+            health_check_running=True,
+            health_check_trigger=trigger,
+            health_check_last_started_at=started_at,
+            health_check_last_finished_at=None,
+            health_check_last_error=None,
+            health_check_current_file="正在获取 TelDrive 文件清单...",
+        )
+        logger.info(f"开始执行文件真实下载巡检（触发方式: {trigger}）", stream="health")
+
+        try:
+            files = await asyncio.to_thread(get_teldrive_files, config)
+            previous_rows = await db.get_all_file_health_checks()
+            previous_by_id = {row.get("file_id"): row for row in previous_rows if row.get("file_id")}
+            items = sorted(files.items(), key=lambda item: item[1].get("path") or item[1].get("name") or "")
+            total = len(items)
+            checked = 0
+            ok_count = 0
+            suspect_count = 0
+            invalid_count = 0
+            error_count = 0
+
+            await broker.update_state(
+                health_check_total_files=total,
+                health_check_checked_files=0,
+                health_check_ok_count=0,
+                health_check_suspect_count=0,
+                health_check_invalid_count=0,
+                health_check_error_count=0,
+                health_check_current_file="正在执行文件真实下载探测..." if total else "当前没有可巡检文件",
+            )
+
+            for file_id, info in items:
+                if self.stop_event.is_set() or self.reload_event.is_set():
+                    raise asyncio.CancelledError()
+
+                file_name = str(info.get("name") or file_id)
+                file_path = str(info.get("path") or f"/{file_name}")
+                file_size = int(info.get("size") or 0)
+                await broker.update_state(health_check_current_file=f"{file_path} ({checked + 1}/{max(total, 1)})")
+
+                probe_result = await asyncio.to_thread(probe_teldrive_file_download, config, file_id, file_size)
+                checked_at = probe_result.get("checked_at") or iso_now()
+                previous = previous_by_id.get(file_id) or {}
+
+                if probe_result.get("success"):
+                    status = "ok"
+                    consecutive_failures = 0
+                    last_ok_at = checked_at
+                    last_error = None
+                    ok_count += 1
+                else:
+                    status_code = probe_result.get("status_code")
+                    if status_code in {401, 403}:
+                        raise RuntimeError(f"TelDrive 下载鉴权失败：HTTP {status_code}")
+                    consecutive_failures = int(previous.get("consecutive_failures") or 0) + 1
+                    status = "invalid" if consecutive_failures >= config.confirm_cycles else "suspect"
+                    last_ok_at = previous.get("last_ok_at")
+                    last_error = probe_result.get("error") or "未知错误"
+                    if status == "invalid":
+                        invalid_count += 1
+                    else:
+                        suspect_count += 1
+                    logger.warning(
+                        f"巡检失败: {file_path} -> {last_error} ({consecutive_failures}/{config.confirm_cycles})",
+                        stream="health",
+                    )
+
+                await db.upsert_file_health_check(
+                    file_id=file_id,
+                    file_name=file_name,
+                    file_path=file_path,
+                    file_size=file_size,
+                    status=status,
+                    consecutive_failures=consecutive_failures,
+                    last_checked_at=checked_at,
+                    last_ok_at=last_ok_at,
+                    last_error=last_error,
+                    last_run_id=run_id,
+                    last_probe_status=probe_result.get("status_code"),
+                    last_probe_bytes=int(probe_result.get("bytes_read") or 0),
+                    last_probe_duration_ms=int(probe_result.get("duration_ms") or 0),
+                    last_probe_content_type=probe_result.get("content_type"),
+                )
+
+                checked += 1
+                if checked == total or checked % 5 == 0 or status != "ok":
+                    await broker.update_state(
+                        health_check_checked_files=checked,
+                        health_check_total_files=total,
+                        health_check_ok_count=ok_count,
+                        health_check_suspect_count=suspect_count,
+                        health_check_invalid_count=invalid_count,
+                        health_check_error_count=error_count,
+                    )
+                    if checked == total or checked % 20 == 0:
+                        logger.info(
+                            f"巡检进度: {checked}/{total} | 正常 {ok_count} | 可疑 {suspect_count} | 失效 {invalid_count}",
+                            stream="health",
+                        )
+
+            await db.delete_stale_file_health_checks(run_id)
+            summary = await db.get_file_health_summary()
+            finished_at = iso_now()
+            await broker.update_state(
+                health_check_running=False,
+                health_check_current_file=None,
+                health_check_last_finished_at=finished_at,
+                health_check_last_error=None,
+                health_check_checked_files=int(summary.get("total_files") or 0),
+                **health_summary_state_payload(summary),
+            )
+            logger.info(
+                f"文件巡检完成: 共 {summary.get('total_files', 0)} 个文件 | 正常 {summary.get('ok_count', 0)} | "
+                f"可疑 {summary.get('suspect_count', 0)} | 失效 {summary.get('invalid_count', 0)}",
+                stream="health",
+            )
+        except asyncio.CancelledError:
+            await broker.update_state(
+                health_check_running=False,
+                health_check_current_file=None,
+                health_check_last_finished_at=iso_now(),
+            )
+            raise
+        except Exception as exc:
+            logger.error(f"文件巡检异常: {exc}", stream="health")
+            await broker.update_state(
+                health_check_running=False,
+                health_check_current_file=None,
+                health_check_last_finished_at=iso_now(),
+                health_check_last_error=str(exc),
+            )
+
+    async def _wait_for_health_signal(self, timeout: float | None = None) -> str | None:
+        stop_task = asyncio.create_task(self.stop_event.wait())
+        reload_task = asyncio.create_task(self.reload_event.wait())
+        trigger_task = asyncio.create_task(self.health_trigger_event.wait())
+        try:
+            done, pending = await asyncio.wait(
+                {stop_task, reload_task, trigger_task},
+                timeout=timeout,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+        finally:
+            pass
+
+        if not done:
+            for task in (stop_task, reload_task, trigger_task):
+                task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await task
+            return "auto" if timeout is not None else None
+
+        for task in pending:
+            task.cancel()
+            with suppress(asyncio.CancelledError):
+                await task
+
+        if stop_task in done and stop_task.result():
+            return "stop"
+        if reload_task in done and reload_task.result():
+            return "reload"
+        if trigger_task in done and trigger_task.result():
+            self.health_trigger_event.clear()
+            return "manual"
+        return None
 
     async def _wait_for_signal(self, timeout: float | None = None) -> str | None:
         stop_task = asyncio.create_task(self.stop_event.wait())
@@ -1335,11 +1678,20 @@ class Tel2TelDriveService:
                 await self.sync_task
             self.sync_task = None
 
+        if self.health_task:
+            self.health_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await self.health_task
+            self.health_task = None
+
+        self.health_trigger_event.clear()
+
         if self.client:
             with suppress(Exception):
                 if self.client.is_connected():
                     await self.client.disconnect()
             self.client = None
+
 
     def register_handlers(self, client: TelegramClient, config: RuntimeConfig):
         @client.on(events.NewMessage(chats=config.telegram_channel_id))

@@ -769,7 +769,7 @@ let lastPageSwitchName = '';
 
 function runPageSideEffects(name) {
     if (name === 'aria2teldrive') loadA2TDTasks();
-    if (name === 'tel2teldrive') loadT2TDState();
+    if (name === 'tel2teldrive' || name === 'inspection') loadT2TDState();
     if (name === 'settings') loadConfig();
     if (name === 'progress') loadParseWorkspaceSnapshot();
 }
@@ -2305,8 +2305,11 @@ function collectSettingsConfig() {
             api_hash: document.getElementById('cfgTelegramApiHash').value,
             channel_id: parseInt(document.getElementById('cfgTelegramChannelId').value, 10) || 0,
             sync_interval: parseInt(document.getElementById('cfgTelegramSyncInterval').value, 10) || 10,
-            sync_enabled: document.getElementById('cfgTelegramSyncEnabled').checked
+            sync_enabled: document.getElementById('cfgTelegramSyncEnabled').checked,
+            health_check_enabled: document.getElementById('cfgTelegramHealthCheckEnabled').checked,
+            health_check_interval_hours: Math.max(1, parseInt(document.getElementById('cfgTelegramHealthCheckIntervalHours').value, 10) || 24)
         },
+
         telegram_db: {
             host: document.getElementById('cfgDbHost').value,
             port: parseInt(document.getElementById('cfgDbPort').value, 10) || 5432,
@@ -2365,6 +2368,9 @@ async function loadConfig() {
         document.getElementById('cfgTelegramChannelId').value = cfg.telegram?.channel_id || 0;
         document.getElementById('cfgTelegramSyncInterval').value = cfg.telegram?.sync_interval || 10;
         document.getElementById('cfgTelegramSyncEnabled').checked = cfg.telegram?.sync_enabled !== false;
+        document.getElementById('cfgTelegramHealthCheckEnabled').checked = !!cfg.telegram?.health_check_enabled;
+        document.getElementById('cfgTelegramHealthCheckIntervalHours').value = cfg.telegram?.health_check_interval_hours || 24;
+
 
         document.getElementById('cfgDbHost').value = cfg.telegram_db?.host || '';
         document.getElementById('cfgDbPort').value = cfg.telegram_db?.port || 5432;
@@ -2492,18 +2498,24 @@ window.onload = async () => {
     es.onmessage = (e) => {
         try {
             const data = JSON.parse(e.data);
-            if(data.type === "state" || data.type === "qr" || data.type === "password_required") {
+            if (data.type === "state" || data.type === "qr" || data.type === "password_required") {
                 updateT2TDState(data.payload || data);
-            } else if(data.type === "log") {
-                appendT2TDLog(data.payload || data);
+            } else if (data.type === "log") {
+                const logPayload = data.payload || data;
+                if (logPayload.stream === 'health') appendT2TDHealthLog(logPayload);
+                else appendT2TDLog(logPayload);
             }
-        }catch(e){}
+        } catch (e) {}
     };
 };
 
 
 // ── Tel2TelDrive Integration ──
 let t2tdQrRefreshPending = false;
+let t2tdHealthRunPending = false;
+let t2tdHealthLastFinishedAt = '';
+let t2tdHealthSnapshot = { summary: {}, issues: [] };
+window.t2tdState = window.t2tdState || {};
 
 function formatT2TDExpireAt(expiresAt) {
     if (!expiresAt) return '';
@@ -2512,17 +2524,162 @@ function formatT2TDExpireAt(expiresAt) {
     return date.toLocaleString('zh-CN', { hour12: false });
 }
 
+function formatT2TDDateTime(value) {
+    return formatT2TDExpireAt(value) || '--';
+}
+
+function getT2TDHealthTargets(key) {
+    return Array.from(document.querySelectorAll(`[data-t2td-health="${key}"]`));
+}
+
+function renderT2TDHealthIssues(issues = []) {
+    const containers = getT2TDHealthTargets('issues');
+    if (!containers.length) return;
+
+    if (!issues.length) {
+        const emptyHtml = '<div class="log-empty"><i class="ph ph-shield-check"></i> 暂无失效或可疑文件</div>';
+        containers.forEach(container => {
+            container.innerHTML = emptyHtml;
+        });
+        return;
+    }
+
+    const html = issues.map(item => {
+        const status = item.status === 'invalid' ? '失效' : item.status === 'suspect' ? '可疑' : '异常';
+        const color = item.status === 'invalid' ? '#f87171' : item.status === 'suspect' ? '#f59e0b' : '#60a5fa';
+        const sizeText = Number(item.file_size || 0) > 0 ? formatBytes(Number(item.file_size || 0), 0) : '--';
+        const path = escapeA2TDHtml(item.file_path || item.file_name || item.file_id || '--');
+        const message = escapeA2TDHtml(item.last_error || '未知错误');
+        const checkedAt = formatT2TDDateTime(item.last_checked_at);
+        return `<div class="log-entry"><span style="color:${color}">[${status}]</span> <span>${path}</span> <span style="color:var(--text-secondary)">(${sizeText} · ${checkedAt})</span><br><span style="color:var(--text-secondary)">${message}</span></div>`;
+    }).join('');
+
+    containers.forEach(container => {
+        container.innerHTML = html;
+    });
+}
+
+function updateT2TDHealthFromState(state = {}) {
+    const summary = t2tdHealthSnapshot.summary || {};
+    const total = Number(state.health_check_total_files ?? summary.total_files ?? 0);
+    const ok = Number(state.health_check_ok_count ?? summary.ok_count ?? 0);
+    const suspect = Number(state.health_check_suspect_count ?? summary.suspect_count ?? 0);
+    const invalid = Number(state.health_check_invalid_count ?? summary.invalid_count ?? 0);
+    const lastCheckedAt = state.health_check_last_checked_at || summary.last_checked_at;
+    const running = !!state.health_check_running;
+    const checkedFiles = Number(state.health_check_checked_files || 0);
+    const intervalHours = Math.max(1, Number(state.health_check_interval_hours || 24));
+    const autoEnabled = !!state.health_check_enabled;
+    const statusText = running
+        ? `正在执行真实下载巡检：${checkedFiles}/${Math.max(total, checkedFiles, 1)} | 正常 ${ok} | 可疑 ${suspect} | 失效 ${invalid}`
+        : state.health_check_last_error
+            ? `巡检异常：${state.health_check_last_error}`
+            : lastCheckedAt
+                ? `最近一次巡检结果：正常 ${ok} / 可疑 ${suspect} / 失效 ${invalid}`
+                : '尚未执行文件巡检';
+    const currentFileText = running
+        ? (state.health_check_current_file || '正在执行真实下载探测...')
+        : `自动巡检：${autoEnabled ? `已开启 / 每 ${intervalHours} 小时` : '未开启'}`;
+    const runBtnHtml = running
+        ? '<span class="spinner" style="width:14px;height:14px;border-width:2px;display:inline-block;margin-right:6px;"></span> 巡检中'
+        : '<i class="ph ph-activity"></i> 立即巡检';
+
+    getT2TDHealthTargets('total').forEach(el => {
+        el.textContent = String(total);
+    });
+    getT2TDHealthTargets('ok').forEach(el => {
+        el.textContent = String(ok);
+    });
+    getT2TDHealthTargets('suspect').forEach(el => {
+        el.textContent = String(suspect);
+    });
+    getT2TDHealthTargets('invalid').forEach(el => {
+        el.textContent = String(invalid);
+    });
+    getT2TDHealthTargets('last-checked').forEach(el => {
+        el.textContent = formatT2TDDateTime(lastCheckedAt);
+    });
+    getT2TDHealthTargets('status').forEach(el => {
+        el.textContent = statusText;
+    });
+    getT2TDHealthTargets('current-file').forEach(el => {
+        el.textContent = currentFileText;
+    });
+    getT2TDHealthTargets('run').forEach(btn => {
+        btn.disabled = t2tdHealthRunPending || running;
+        btn.innerHTML = runBtnHtml;
+    });
+
+    if (!running && state.health_check_last_finished_at && state.health_check_last_finished_at !== t2tdHealthLastFinishedAt) {
+        t2tdHealthLastFinishedAt = state.health_check_last_finished_at;
+        loadT2TDHealth();
+    }
+}
+
+function renderT2TDHealthSnapshot(snapshot = {}) {
+    t2tdHealthSnapshot = {
+        summary: snapshot.summary || {},
+        issues: Array.isArray(snapshot.issues) ? snapshot.issues : []
+    };
+    renderT2TDHealthIssues(t2tdHealthSnapshot.issues);
+    updateT2TDHealthFromState(window.t2tdState || {});
+}
+
+async function loadT2TDHealth() {
+    try {
+        const resp = await fetch('/api/t2td/health');
+        const data = await readJsonSafe(resp);
+        if (!resp.ok) throw new Error(data.detail || data.message || '读取巡检状态失败');
+        renderT2TDHealthSnapshot(data);
+    } catch (e) {}
+}
+
+function renderT2TDLogList(containerId, emptyHtml, logs = []) {
+    const container = document.getElementById(containerId);
+    if (!container) return;
+    container.innerHTML = '';
+    if (!Array.isArray(logs) || !logs.length) {
+        container.innerHTML = emptyHtml;
+        return;
+    }
+    logs.forEach(log => appendT2TDLogEntry(containerId, '', log));
+}
+
 async function loadT2TDState() {
     try {
         const res = await fetch('/api/t2td/bootstrap');
-        const d = await res.json();
-        updateT2TDState(d.state);
-        const container = document.getElementById('t2tdLogContainer');
-        if (container && d.logs) {
-            container.innerHTML = '';
-            d.logs.forEach(l => appendT2TDLog(l));
-        }
-    } catch(e) {}
+        const d = await readJsonSafe(res);
+        updateT2TDState(d.state || {});
+        renderT2TDHealthSnapshot(d.health || {});
+        renderT2TDLogList(
+            't2tdLogContainer',
+            '<div class="log-empty" id="t2tdLogEmpty"><i class="ph ph-ghost"></i> 等待系统服务启动</div>',
+            d.logs || []
+        );
+        renderT2TDLogList(
+            't2tdHealthLogContainer',
+            '<div class="log-empty" id="t2tdHealthLogEmpty"><i class="ph ph-shield-check"></i> 暂无巡检日志</div>',
+            d.health_logs || []
+        );
+    } catch (e) {}
+}
+
+async function runT2TDHealthCheck() {
+    if (t2tdHealthRunPending) return;
+    t2tdHealthRunPending = true;
+    updateT2TDHealthFromState(window.t2tdState || {});
+    try {
+        const resp = await fetch('/api/t2td/health/run', { method: 'POST' });
+        const data = await readJsonSafe(resp);
+        if (!resp.ok || data.ok === false) throw new Error(data.detail || data.message || '启动巡检失败');
+        if (typeof showA2TDToast === 'function') showA2TDToast(data.message || '已开始文件真实下载巡检', 'info');
+        await loadT2TDState();
+    } catch (e) {
+        alert(e.message || '启动巡检失败');
+    } finally {
+        t2tdHealthRunPending = false;
+        updateT2TDHealthFromState(window.t2tdState || {});
+    }
 }
 
 async function refreshT2TDQr(manual = false) {
@@ -2547,7 +2704,7 @@ async function refreshT2TDQr(manual = false) {
         }
         const resp = await fetch('/api/t2td/login/refresh', { method: 'POST' });
         if (!resp.ok) {
-            const err = await resp.json().catch(() => ({}));
+            const err = await readJsonSafe(resp);
             throw new Error(err.detail || '刷新二维码失败');
         }
     } catch (e) {
@@ -2559,6 +2716,7 @@ async function refreshT2TDQr(manual = false) {
 }
 
 function updateT2TDState(state) {
+    window.t2tdState = state || {};
     const area = document.getElementById('t2tdQrArea');
     const qrImg = document.getElementById('t2tdQrImg');
     const form = document.getElementById('t2td2faForm');
@@ -2589,7 +2747,7 @@ function updateT2TDState(state) {
                 hint.textContent = '正在获取新二维码...';
             }
         }
-    } else if (state.type === 'password_required' || (state.phase === 'awaiting_password')) {
+    } else if (state.type === 'password_required' || state.phase === 'awaiting_password') {
         t2tdQrRefreshPending = false;
         qrImg.style.display = 'none';
         qrImg.removeAttribute('src');
@@ -2600,8 +2758,8 @@ function updateT2TDState(state) {
         form.onsubmit = async (e) => {
             e.preventDefault();
             const pass = document.getElementById('t2tdPassword').value;
-            await fetch('/api/t2td/login/password', { method:'POST', body: JSON.stringify({password: pass}), headers: {'Content-Type': 'application/json'}});
-        }
+            await fetch('/api/t2td/login/password', { method: 'POST', body: JSON.stringify({ password: pass }), headers: { 'Content-Type': 'application/json' } });
+        };
     } else if (state.authorized || state.phase === 'running' || state.phase === 'authorized') {
         t2tdQrRefreshPending = false;
         qrImg.style.display = 'none';
@@ -2609,7 +2767,7 @@ function updateT2TDState(state) {
         qrImg.style.pointerEvents = 'auto';
         form.style.display = 'none';
         if (hint) hint.style.display = 'none';
-        if (text) text.innerHTML = `<span style="color:var(--success)"><b><i class="ph-fill ph-check-circle"></i> 服务运行中</b></span> - 频道监听已激活`;
+        if (text) text.innerHTML = '<span style="color:var(--success)"><b><i class="ph-fill ph-check-circle"></i> 服务运行中</b></span> - 频道监听已激活';
     } else {
         t2tdQrRefreshPending = false;
         qrImg.style.display = 'none';
@@ -2622,35 +2780,42 @@ function updateT2TDState(state) {
         }
         if (text) text.textContent = state.last_error || state.phase_label || '服务准备中...';
     }
+
+    updateT2TDHealthFromState(state || {});
 }
 
-
-function appendT2TDLog(log) {
-    const container = document.getElementById('t2tdLogContainer');
+function appendT2TDLogEntry(containerId, emptyId, log) {
+    const container = document.getElementById(containerId);
     if (!container) return;
-    const empty = document.getElementById('t2tdLogEmpty');
+    const empty = emptyId ? document.getElementById(emptyId) : container.querySelector('.log-empty');
     if (empty) empty.remove();
-    
-    // Normalize log fields (handle both direct object and payload wrapper)
+
     const logData = log.payload || log;
-    
     const entry = document.createElement('div');
     entry.className = 'log-entry';
     let c = '#fff';
-    if(logData.level === 'ERROR') c = '#f87171';
-    else if(logData.level === 'WARN' || logData.level === 'WARNING') c = '#f59e0b';
-    
-    // Extract time from timestamp
+    if (logData.level === 'ERROR') c = '#f87171';
+    else if (logData.level === 'WARN' || logData.level === 'WARNING') c = '#f59e0b';
+
     let t = logData.time || logData.timestamp || '(none)';
     if (t && t.includes('T')) {
         t = t.split('T')[1].split('.')[0] || t;
-        t = t.replace('Z', '').replace(/[+-]\d+:\d+$/, ''); // Strip extra timezone fragments visually
+        t = t.replace('Z', '').replace(/[+-]\d+:\d+$/, '');
     }
 
     entry.innerHTML = `<span style="color:${c}">[${t}] [${logData.level || 'INFO'}] ${logData.message || ''}</span>`;
     container.appendChild(entry);
     container.scrollTop = container.scrollHeight;
 }
+
+function appendT2TDLog(log) {
+    appendT2TDLogEntry('t2tdLogContainer', 't2tdLogEmpty', log);
+}
+
+function appendT2TDHealthLog(log) {
+    appendT2TDLogEntry('t2tdHealthLogContainer', 't2tdHealthLogEmpty', log);
+}
+
 // ==========================================
 
 

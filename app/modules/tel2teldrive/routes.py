@@ -30,8 +30,10 @@ async def bootstrap():
     service, broker, config_store, _ = _get_deps()
     return {
         "state": broker.snapshot(),
-        "logs": broker.logs_snapshot(),
+        "logs": broker.logs_snapshot(stream="service"),
+        "health_logs": broker.logs_snapshot(stream="health"),
         "config": config_store.payload(),
+        "health": await service.get_health_snapshot(limit=20),
     }
 
 
@@ -100,6 +102,23 @@ async def submit_password(request: Request):
     except RuntimeError as exc:
         raise HTTPException(status_code=409, detail=str(exc))
     return {"ok": True}
+
+
+@router.get("/health")
+async def get_health_snapshot(limit: int = 50):
+    service, _, _, _ = _get_deps()
+    normalized_limit = max(1, min(int(limit or 50), 200))
+    return await service.get_health_snapshot(limit=normalized_limit)
+
+
+@router.post("/health/run")
+async def run_health_check():
+    service, _, _, _ = _get_deps()
+    try:
+        result = await service.request_health_check()
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    return {"ok": True, **result}
 
 
 @router.get("/stream")

@@ -870,6 +870,10 @@
                 <i class="ph ph-telegram-logo"></i>
             </div>
 
+            <div class="nav-item" data-page="inspection" data-tooltip="文件巡检" onclick="switchPage('inspection', { animated: true, source: 'user' })">
+                <i class="ph ph-shield-check"></i>
+            </div>
+
             <div class="nav-item" data-page="test" data-tooltip="连接自检" onclick="switchPage('test', { animated: true, source: 'user' })">
                 <i class="ph ph-plugs-connected"></i>
             </div>
@@ -1155,6 +1159,49 @@
                                 <div class="log-empty" id="t2tdLogEmpty"><i class="ph ph-ghost"></i> 等待系统服务启动</div>
                             </div>
                         </div>
+
+                    </div>
+                </div>
+
+                <!-- Inspection -->
+                <div class="page" id="page-inspection">
+                    <div class="card">
+                        <div class="card-header">
+                            <h3><i class="ph ph-shield-check"></i> TelDrive 文件巡检</h3>
+                        </div>
+                        <div class="card-body">
+                            <div class="wizard-status-card" style="margin-top:8px;">
+                                <div class="wizard-status-row">
+                                    <div>
+                                        <div style="font-size:13px; font-weight:600; color:var(--text-primary); margin-bottom:4px;">TelDrive 全文件真实下载巡检</div>
+                                        <div class="wizard-note" data-t2td-health="status">尚未执行文件巡检</div>
+                                    </div>
+                                    <button type="button" class="btn btn-ghost btn-sm" data-t2td-health="run" onclick="runT2TDHealthCheck()"><i class="ph ph-activity"></i> 立即巡检</button>
+                                </div>
+                                <div class="wizard-meta-list">
+                                    <div class="wizard-meta-item"><span>最近巡检</span><strong data-t2td-health="last-checked">--</strong></div>
+                                    <div class="wizard-meta-item"><span>总文件</span><strong data-t2td-health="total">0</strong></div>
+                                    <div class="wizard-meta-item"><span>正常</span><strong data-t2td-health="ok">0</strong></div>
+                                    <div class="wizard-meta-item"><span>可疑</span><strong data-t2td-health="suspect">0</strong></div>
+                                    <div class="wizard-meta-item"><span>失效</span><strong data-t2td-health="invalid">0</strong></div>
+                                </div>
+                                <div class="wizard-note" data-t2td-health="current-file" style="margin-top:10px;">自动巡检：未开启</div>
+                                <div class="log-container" data-t2td-health="issues" style="height:auto; max-height:240px; margin-top:16px;">
+                                    <div class="log-empty"><i class="ph ph-shield-check"></i> 暂无失效或可疑文件</div>
+                                </div>
+                            </div>
+
+                            <div class="card" style="margin-top:20px; border:1px solid var(--border); box-shadow:none;">
+                                <div class="card-header">
+                                    <h3><i class="ph ph-terminal-window"></i> 巡检日志</h3>
+                                </div>
+                                <div class="card-body" style="padding:12px;">
+                                    <div class="log-container" id="t2tdHealthLogContainer" style="height: 40vh; max-height: 52vh;">
+                                        <div class="log-empty" id="t2tdHealthLogEmpty"><i class="ph ph-shield-check"></i> 暂无巡检日志</div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
                     </div>
                 </div>
 <!-- Test -->
@@ -1359,13 +1406,20 @@
                                     <div class="form-group"><label>API Hash</label><input class="form-input" type="text" id="cfgTelegramApiHash" placeholder="在 my.telegram.org 获取"></div>
                                     <div class="form-group"><label>频道 ID</label><input class="form-input" type="number" id="cfgTelegramChannelId" placeholder="0"></div>
                                     <div class="form-group"><label>同步间隔 (秒)</label><input class="form-input" type="number" id="cfgTelegramSyncInterval" placeholder="10"></div>
+                                    <div class="form-group"><label>巡检间隔 (小时)</label><input class="form-input" type="number" id="cfgTelegramHealthCheckIntervalHours" min="1" placeholder="24"></div>
                                 </div>
                                 <div style="margin-top:20px; padding-top:20px; border-top:1px solid var(--border)">
                                     <label class="toggle-row" style="justify-content:space-between">
                                         启用删除同步
                                         <div class="toggle-switch"><input type="checkbox" id="cfgTelegramSyncEnabled" checked><span class="toggle-slider"></span></div>
                                     </label>
+                                    <label class="toggle-row" style="justify-content:space-between; margin-top:12px;">
+                                        启用 TelDrive 全文件真实下载巡检
+                                        <div class="toggle-switch"><input type="checkbox" id="cfgTelegramHealthCheckEnabled"><span class="toggle-slider"></span></div>
+                                    </label>
+                                    <div class="wizard-note" style="margin-top:12px;">巡检会逐个真实下载全部 TelDrive 文件并丢弃数据，用于判断文件是否仍可播放或下载。</div>
                                 </div>
+
                             </div>
                         </div>
 
@@ -1398,7 +1452,8 @@
 
     <div id="a2tdToastContainer" class="app-toast-container"></div>
 
-    <script src="/static/app.js?v=20260405c"></script>
+    <script src="/static/app.js?v=20260408a"></script>
+
 
 
 

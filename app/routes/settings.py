@@ -46,7 +46,14 @@ async def update_settings(request_body: dict):
     await task_manager.reload_config()
     await pikpak_routes.reset_clients()
     await db.prune_progress_logs(current.get("log", {}).get("buffer_size", 400), stream="pikpak")
+    try:
+        from app.modules.tel2teldrive.service import service as t2td_service
+
+        await t2td_service.request_reload()
+    except Exception:
+        pass
     return {"success": True, "message": "设置已保存"}
+
 
 
 

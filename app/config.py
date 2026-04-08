@@ -70,6 +70,7 @@ DEFAULTS: dict[str, Any] = {
         "session_name": "tel2teldrive_session",
         "sync_interval": 10, "sync_enabled": True,
         "max_scan_messages": 10000, "confirm_cycles": 3,
+        "health_check_enabled": False, "health_check_interval_hours": 24,
     },
     "telegram_db": {
         "host": "", "port": 5432, "user": "", "password": "", "name": "postgres",

@@ -65,6 +65,8 @@ sync_interval = 10
 sync_enabled = true
 max_scan_messages = 10000
 confirm_cycles = 3
+health_check_enabled = false          # 启用 TelDrive 全文件真实下载巡检
+health_check_interval_hours = 24      # 自动巡检间隔（小时）
 
 # ─── TelDrive 数据库（Telegram同步可选） ───
 [telegram_db]
