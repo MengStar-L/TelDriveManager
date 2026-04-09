@@ -203,23 +203,30 @@ class PikPakClient:
 
     async def wait_for_download_urls(self, file_id: str, timeout: float = 60.0,
                                      poll_interval: float = 3.0) -> List[Dict[str, str]]:
-        deadline = time.time() + max(timeout, 0.0)
+        timeout = max(float(timeout or 0.0), 0.0)
+        poll_interval = max(float(poll_interval or 0.0), 0.1)
+        request_timeout = max(8.0, min(timeout if timeout > 0 else 15.0, 15.0))
+        deadline = time.time() + timeout
         last_error: Optional[Exception] = None
         attempt = 0
         while True:
             attempt += 1
             try:
-                urls = await self.get_download_urls(file_id)
+                urls = await asyncio.wait_for(self.get_download_urls(file_id), timeout=request_timeout)
                 if urls:
                     return urls
+            except asyncio.TimeoutError:
+                last_error = RuntimeError(f"获取直链请求超时（>{int(request_timeout)}s）")
+                logger.warning(f"获取直链请求超时: file_id={file_id}, attempt={attempt}, request_timeout={request_timeout}")
             except Exception as e:
                 last_error = e
                 logger.warning(f"获取直链失败，等待重试: file_id={file_id}, attempt={attempt}, error={e}")
             if time.time() >= deadline:
                 break
-            await asyncio.sleep(max(poll_interval, 0.1))
+            await asyncio.sleep(poll_interval)
         if last_error is not None:
-            raise last_error
+            detail = str(last_error).strip()
+            raise RuntimeError(f"等待 PikPak 直链超时，可能触发风控或分享暂不可用{f'：{detail}' if detail else ''}")
         return []
 
     async def _list_folder_files(self, folder_id: str, prefix: str = "") -> List[Dict[str, str]]:

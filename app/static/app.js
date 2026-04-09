@@ -973,6 +973,13 @@ function connectWS() {
     };
 }
 
+function maybeShowWSMessageToast(msg) {
+    const toastMessage = String(msg?.toast_message || '').trim();
+    if (!toastMessage || typeof showA2TDToast !== 'function') return;
+    const toastType = String(msg?.toast_type || 'error').trim() || 'error';
+    showA2TDToast(toastMessage, toastType);
+}
+
 function handleWSMessage(msg) {
     if (msg.type === "init") {
         if (msg.data.tasks) setA2TDTasks(msg.data.tasks);
@@ -997,6 +1004,7 @@ function handleWSMessage(msg) {
     }
     if (msg.type === 'parse_job_state') {
         applyParseJobState(msg.job || null);
+        maybeShowWSMessageToast(msg);
         return;
     }
 
@@ -1045,6 +1053,7 @@ function handleWSMessage(msg) {
     }
 
     appendProgressLogMessage(msg);
+    maybeShowWSMessageToast(msg);
 
     if (!document.getElementById('page-progress').classList.contains('active') && msg.type === 'task_start' && msg.auto_open_progress === true) {
         switchPage('progress', { animated: true });

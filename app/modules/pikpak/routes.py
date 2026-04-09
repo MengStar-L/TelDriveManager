@@ -32,6 +32,15 @@ _share_download_jobs_lock = asyncio.Lock()
 _parse_job_lock = asyncio.Lock()
 _active_parse_job_id: Optional[str] = None
 _PARSE_JOB_TYPES = ("magnet", "share", "rss")
+_SHARE_FALLBACK_TOAST = "分享暂时无法使用，请改用磁链解析下载"
+
+
+def _build_share_fallback_message(prefix: str, detail: str = "") -> str:
+    suffix = "可能触发 PikPak 风控，分享暂时无法使用，请改用磁链解析下载。"
+    detail_text = str(detail or "").strip().replace("\n", " ")
+    if detail_text:
+        return f"{prefix}，{suffix} 详情：{detail_text}"
+    return f"{prefix}，{suffix}"
 
 
 def _format_size(size: int) -> str:
@@ -480,6 +489,9 @@ async def _run_share_parse_job(job_id: str, share_link: str, pass_code: str):
         "workflow": "parse",
     })
     try:
+        cfg = load_config()
+        pikpak_cfg = cfg.get("pikpak", {})
+        share_parse_timeout = max(float(pikpak_cfg.get("share_parse_timeout", pikpak_cfg.get("share_download_url_timeout", 60)) or 60), 5.0)
         await _ensure_clients()
         await _broadcast({
             "type": "task_status",
@@ -487,7 +499,10 @@ async def _run_share_parse_job(job_id: str, share_link: str, pass_code: str):
             "status": "正在读取分享内容并递归解析文件列表...",
             "parse_job_id": job_id,
         })
-        result = await _pikpak.get_share_file_list(share_link, pass_code)
+        try:
+            result = await asyncio.wait_for(_pikpak.get_share_file_list(share_link, pass_code), timeout=share_parse_timeout)
+        except asyncio.TimeoutError as exc:
+            raise RuntimeError(_build_share_fallback_message(f"分享解析超时 ({int(share_parse_timeout)}s)")) from exc
         for item in result.get("files", []):
             item["size_str"] = _format_size(item.get("size", 0))
         result["files"] = _sort_file_entries_by_name(result.get("files", []))
@@ -502,8 +517,17 @@ async def _run_share_parse_job(job_id: str, share_link: str, pass_code: str):
         await _broadcast({"type": "all_done", "total": 1, "parse_job_id": job_id})
         await _finish_parse_job(job_id, "completed", result_payload=result)
     except Exception as e:
-        await _broadcast({"type": "error", "message": f"分享解析失败: {e}", "parse_job_id": job_id})
-        await _finish_parse_job(job_id, "failed", error=str(e))
+        message = str(e)
+        if "请改用磁链解析下载" not in message:
+            message = _build_share_fallback_message("分享解析失败", message)
+        await _broadcast({
+            "type": "error",
+            "message": f"分享解析失败: {message}",
+            "parse_job_id": job_id,
+            "toast_message": _SHARE_FALLBACK_TOAST,
+            "toast_type": "error",
+        })
+        await _finish_parse_job(job_id, "failed", error=message)
 
 
 async def _run_rss_parse_job(job_id: str, rss_url: str):
@@ -1066,8 +1090,9 @@ async def _process_share_download(share_id: str, file_ids: List[str], pass_code_
         total = len(file_ids)
         cfg = load_config()
         pikpak_cfg = cfg.get("pikpak", {})
-        share_url_timeout = float(pikpak_cfg.get("share_download_url_timeout", 60))
-        share_poll_interval = float(pikpak_cfg.get("share_download_url_poll_interval", 3))
+        share_parse_timeout = max(float(pikpak_cfg.get("share_parse_timeout", pikpak_cfg.get("share_download_url_timeout", 60)) or 60), 5.0)
+        share_url_timeout = max(float(pikpak_cfg.get("share_download_url_timeout", 60) or 60), 5.0)
+        share_poll_interval = max(float(pikpak_cfg.get("share_download_url_poll_interval", 3) or 3), 0.1)
         base_teldrive_path = _normalize_teldrive_path(
             cfg.get("teldrive", {}).get("target_path", "/") if teldrive_path is None else teldrive_path
         )
@@ -1076,7 +1101,13 @@ async def _process_share_download(share_id: str, file_ids: List[str], pass_code_
                           "magnet": f"分享文件 ({total} 个)"})
         await _broadcast({"type": "task_status", "index": 1,
                           "status": "正在保存分享内容到 PikPak 网盘..."})
-        saved_ids = _normalize_selected_ids(await _pikpak.save_share_files(share_id, file_ids, pass_code_token))
+        try:
+            saved_ids = _normalize_selected_ids(await asyncio.wait_for(
+                _pikpak.save_share_files(share_id, file_ids, pass_code_token),
+                timeout=share_parse_timeout,
+            ))
+        except asyncio.TimeoutError as exc:
+            raise RuntimeError(_build_share_fallback_message(f"分享转存超时 ({int(share_parse_timeout)}s)")) from exc
         if not saved_ids:
             await _broadcast({"type": "task_error", "index": 1, "message": "保存失败，未获取到文件"})
             return
@@ -1094,6 +1125,7 @@ async def _process_share_download(share_id: str, file_ids: List[str], pass_code_
                 paths.sort(key=_natural_sort_key)
 
         all_urls: List[dict] = []
+        share_timeout_hits = 0
         for i, fid in enumerate(saved_ids, 1):
             await _broadcast({"type": "task_status", "index": i, "status": f"获取下载链接 [{i}/{len(saved_ids)}]"})
             try:
@@ -1104,12 +1136,21 @@ async def _process_share_download(share_id: str, file_ids: List[str], pass_code_
                 )
             except Exception as e:
                 logger.error(f"分享文件直链获取失败: file_id={fid}, error={e}")
-                await _broadcast({"type": "task_error", "index": i, "message": f"获取链接失败: {e}"})
+                share_timeout_hits += 1
+                await _broadcast({
+                    "type": "task_error",
+                    "index": i,
+                    "message": _build_share_fallback_message("获取下载直链失败", str(e)),
+                })
                 continue
 
             if not urls:
-                await _broadcast({"type": "task_error", "index": i,
-                                  "message": f"获取链接失败 ({int(share_url_timeout)}s 内未就绪)"})
+                share_timeout_hits += 1
+                await _broadcast({
+                    "type": "task_error",
+                    "index": i,
+                    "message": _build_share_fallback_message(f"获取下载直链超时 ({int(share_url_timeout)}s 内未就绪)"),
+                })
                 continue
 
             await _broadcast({"type": "task_status", "index": i,
@@ -1119,7 +1160,12 @@ async def _process_share_download(share_id: str, file_ids: List[str], pass_code_
 
         all_urls = _sort_file_entries_by_name(_dedupe_file_entries(all_urls))
         if not all_urls:
-            await _broadcast({"type": "error", "message": "所有文件链接获取失败"})
+            await _broadcast({
+                "type": "error",
+                "message": _build_share_fallback_message("所有文件直链获取失败", f"共 {share_timeout_hits} 项失败" if share_timeout_hits else ""),
+                "toast_message": _SHARE_FALLBACK_TOAST,
+                "toast_type": "error",
+            })
             return
 
         push_target = _get_push_target_label("aria2")
@@ -1169,15 +1215,18 @@ async def _process_share_download(share_id: str, file_ids: List[str], pass_code_
         await _broadcast({"type": "push_done", "index": 1,
                           "success_count": success_count, "total_count": len(all_urls),
                           "target": push_target})
-
+        await _broadcast({"type": "all_done", "total": total})
+    except Exception as e:
+        await _broadcast({
+            "type": "error",
+            "message": f"分享下载失败: {e}",
+            "toast_message": _SHARE_FALLBACK_TOAST,
+            "toast_type": "error",
+        })
+    finally:
         if saved_ids:
             try:
                 await _pikpak.delete_files(saved_ids)
             except Exception as e:
                 logger.warning(f"清理分享临时文件失败: {e}")
-
-        await _broadcast({"type": "all_done", "total": total})
-    except Exception as e:
-        await _broadcast({"type": "error", "message": f"分享下载失败: {e}"})
-    finally:
         await _release_share_download_job(job_key)

@@ -19,6 +19,7 @@ save_dir = "/"
 delete_after_download = true
 poll_interval = 3
 max_wait_time = 3600
+share_parse_timeout = 45             # 分享解析/转存请求超时（秒）
 share_download_url_timeout = 60      # 分享转存后等待直链就绪超时（秒）
 share_download_url_poll_interval = 3 # 分享直链轮询间隔（秒）
 
