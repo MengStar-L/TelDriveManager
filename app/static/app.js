@@ -2517,6 +2517,8 @@ const T2TD_RUNTIME_LOG_LIMIT = 400;
 
 let teldriveFolderTreeSnapshot = null;
 let teldriveFolderTreeLoading = false;
+const TELDRIVE_FOLDER_TOGGLE_MS = 280;
+const teldriveFolderAnimationTimers = new WeakMap();
 
 function formatT2TDExpireAt(expiresAt) {
     if (!expiresAt) return '';
@@ -2886,6 +2888,87 @@ function buildTelDriveFolderFileNode(file, depth = 0) {
     </div>`;
 }
 
+function getTelDriveFolderNodeRow(node) {
+    return Array.from(node?.children || []).find(child => child.classList?.contains('folder-tree-row')) || null;
+}
+
+function getTelDriveFolderNodeChildren(node) {
+    return Array.from(node?.children || []).find(child => child.classList?.contains('folder-tree-children')) || null;
+}
+
+function refreshTelDriveFolderAncestorHeights(startNode) {
+    let current = startNode;
+    while (current?.classList?.contains('folder-tree-node')) {
+        const children = getTelDriveFolderNodeChildren(current);
+        if (children && !current.classList.contains('is-collapsed')) {
+            children.style.maxHeight = `${children.scrollHeight}px`;
+            children.style.opacity = '1';
+            children.style.transform = 'translateY(0)';
+        }
+        current = current.parentElement?.closest('.folder-tree-node') || null;
+    }
+}
+
+function syncTelDriveFolderNodeState(node, animate = false) {
+    const children = getTelDriveFolderNodeChildren(node);
+    const row = getTelDriveFolderNodeRow(node);
+    if (!children || !row) return;
+
+    const collapsed = node.classList.contains('is-collapsed');
+    row.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
+
+    const existingTimer = teldriveFolderAnimationTimers.get(children);
+    if (existingTimer) {
+        window.clearTimeout(existingTimer);
+        teldriveFolderAnimationTimers.delete(children);
+    }
+
+    if (!animate) {
+        children.style.maxHeight = collapsed ? '0px' : `${children.scrollHeight}px`;
+        children.style.opacity = collapsed ? '0' : '1';
+        children.style.transform = collapsed ? 'translateY(-6px)' : 'translateY(0)';
+        refreshTelDriveFolderAncestorHeights(node.parentElement?.closest('.folder-tree-node') || null);
+        return;
+    }
+
+    if (collapsed) {
+        children.style.maxHeight = `${children.scrollHeight}px`;
+        children.style.opacity = '1';
+        children.style.transform = 'translateY(0)';
+        requestAnimationFrame(() => {
+            children.style.maxHeight = '0px';
+            children.style.opacity = '0';
+            children.style.transform = 'translateY(-6px)';
+            refreshTelDriveFolderAncestorHeights(node.parentElement?.closest('.folder-tree-node') || null);
+        });
+    } else {
+        children.style.maxHeight = '0px';
+        children.style.opacity = '0';
+        children.style.transform = 'translateY(-6px)';
+        requestAnimationFrame(() => {
+            children.style.maxHeight = `${children.scrollHeight}px`;
+            children.style.opacity = '1';
+            children.style.transform = 'translateY(0)';
+            refreshTelDriveFolderAncestorHeights(node);
+        });
+    }
+
+    const timer = window.setTimeout(() => {
+        if (!node.classList.contains('is-collapsed')) {
+            children.style.maxHeight = `${children.scrollHeight}px`;
+            children.style.opacity = '1';
+            children.style.transform = 'translateY(0)';
+        }
+        refreshTelDriveFolderAncestorHeights(node.parentElement?.closest('.folder-tree-node') || null);
+        teldriveFolderAnimationTimers.delete(children);
+    }, TELDRIVE_FOLDER_TOGGLE_MS + 40);
+    teldriveFolderAnimationTimers.set(children, timer);
+}
+
+function initializeTelDriveFolderTreeState(container) {
+    container?.querySelectorAll('.folder-tree-node').forEach(node => syncTelDriveFolderNodeState(node, false));
+}
+
 function buildTelDriveFolderTreeNode(node, depth = 0) {
     const children = Array.isArray(node?.children) ? node.children : [];
     const files = Array.isArray(node?.files) ? node.files : [];
@@ -2927,11 +3010,9 @@ function toggleTelDriveFolderNode(trigger, event) {
     event?.stopPropagation();
     const node = trigger?.closest('.folder-tree-node');
     if (!node) return;
-    const children = Array.from(node.children || []).find(child => child.classList?.contains('folder-tree-children'));
-    if (!children) return;
-    const collapsed = node.classList.toggle('is-collapsed');
-    const row = Array.from(node.children || []).find(child => child.classList?.contains('folder-tree-row'));
-    if (row) row.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
+    if (!getTelDriveFolderNodeChildren(node)) return;
+    node.classList.toggle('is-collapsed');
+    syncTelDriveFolderNodeState(node, true);
 }
 
 function handleTelDriveFolderNodeKeydown(trigger, event) {
@@ -2949,6 +3030,7 @@ function renderTelDriveFolderTree(snapshot) {
         return;
     }
     container.innerHTML = buildTelDriveFolderTreeNode(root, 0);
+    initializeTelDriveFolderTreeState(container);
 }
 
 async function loadTelDriveFolderTree(force = false) {
