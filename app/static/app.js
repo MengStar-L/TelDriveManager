@@ -2865,18 +2865,45 @@ function makeTelDriveFolderNodeId(path) {
     }
 }
 
+function buildTelDriveFolderFileNode(file, depth = 0) {
+    const rawFileSize = Number(file?.size);
+    const fileSize = Number.isFinite(rawFileSize) ? rawFileSize : getA2TDNumber(file?.size);
+    const fileSizeText = fileSize > 0 ? formatBytes(fileSize, 0) : '--';
+    return `<div class="folder-tree-file" style="--folder-depth:${escapeA2TDHtml(depth)};">
+        <div class="folder-tree-row is-file">
+            <span class="folder-tree-toggle is-leaf folder-tree-file-icon"><i class="ph ph-file"></i></span>
+            <div class="folder-tree-label">
+                <i class="ph ph-file-text" style="color:#94a3b8;"></i>
+                <div style="min-width:0;">
+                    <div class="folder-tree-name">${escapeA2TDHtml(file?.name || '未命名文件')}</div>
+                    <div class="folder-tree-path">${escapeA2TDHtml(file?.path || '/')}</div>
+                </div>
+            </div>
+            <div class="folder-tree-meta is-file">
+                <span class="folder-tree-count">大小 ${escapeA2TDHtml(fileSizeText)}</span>
+            </div>
+        </div>
+    </div>`;
+}
+
 function buildTelDriveFolderTreeNode(node, depth = 0) {
     const children = Array.isArray(node?.children) ? node.children : [];
-    const hasChildren = children.length > 0;
+    const files = Array.isArray(node?.files) ? node.files : [];
+    const hasChildren = children.length > 0 || files.length > 0;
     const collapsed = hasChildren && depth >= 2;
     const nodeId = makeTelDriveFolderNodeId(node.path || node.name || String(depth));
     const tone = getTelDriveFolderStatusTone(node.status);
     const statusLabel = getTelDriveFolderStatusLabel(node.status);
     const iconColor = tone === 'error' ? '#ef4444' : (tone === 'warning' ? '#f59e0b' : '#10b981');
-    const childrenHtml = hasChildren ? children.map(child => buildTelDriveFolderTreeNode(child, depth + 1)).join('') : '';
+    const childFolderHtml = children.map(child => buildTelDriveFolderTreeNode(child, depth + 1)).join('');
+    const childFileHtml = files.map(file => buildTelDriveFolderFileNode(file, depth + 1)).join('');
+    const childrenHtml = hasChildren ? `${childFolderHtml}${childFileHtml}` : '';
+    const rowAttrs = hasChildren
+        ? ` role="button" tabindex="0" aria-expanded="${collapsed ? 'false' : 'true'}" onclick="toggleTelDriveFolderNode(this, event)" onkeydown="handleTelDriveFolderNodeKeydown(this, event)"`
+        : '';
     return `<div class="folder-tree-node ${collapsed ? 'is-collapsed' : ''}" id="${escapeA2TDHtml(nodeId)}" style="--folder-depth:${escapeA2TDHtml(depth)};">
-        <div class="folder-tree-row">
-            <button class="folder-tree-toggle ${hasChildren ? '' : 'is-leaf'}" type="button" onclick="toggleTelDriveFolderNode(this)">${hasChildren ? '<i class="ph ph-caret-down"></i>' : '<i class="ph ph-dot-outline"></i>'}</button>
+        <div class="folder-tree-row ${hasChildren ? 'is-expandable' : 'is-leaf'}"${rowAttrs}>
+            <button class="folder-tree-toggle ${hasChildren ? '' : 'is-leaf'}" type="button" ${hasChildren ? `onclick="toggleTelDriveFolderNode(this, event)" aria-label="切换 ${escapeA2TDHtml(node.name || '文件夹')} 折叠状态"` : 'tabindex="-1" aria-hidden="true"'}>${hasChildren ? '<i class="ph ph-caret-down"></i>' : '<i class="ph ph-dot-outline"></i>'}</button>
             <div class="folder-tree-label">
                 <i class="ph ph-folder-open" style="color:${iconColor};"></i>
                 <div style="min-width:0;">
@@ -2895,12 +2922,21 @@ function buildTelDriveFolderTreeNode(node, depth = 0) {
     </div>`;
 }
 
-function toggleTelDriveFolderNode(trigger) {
+function toggleTelDriveFolderNode(trigger, event) {
+    event?.preventDefault();
+    event?.stopPropagation();
     const node = trigger?.closest('.folder-tree-node');
     if (!node) return;
-    const children = node.querySelector(':scope > .folder-tree-children');
+    const children = Array.from(node.children || []).find(child => child.classList?.contains('folder-tree-children'));
     if (!children) return;
-    node.classList.toggle('is-collapsed');
+    const collapsed = node.classList.toggle('is-collapsed');
+    const row = Array.from(node.children || []).find(child => child.classList?.contains('folder-tree-row'));
+    if (row) row.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
+}
+
+function handleTelDriveFolderNodeKeydown(trigger, event) {
+    if (!event || (event.key !== 'Enter' && event.key !== ' ')) return;
+    toggleTelDriveFolderNode(trigger, event);
 }
 
 function renderTelDriveFolderTree(snapshot) {

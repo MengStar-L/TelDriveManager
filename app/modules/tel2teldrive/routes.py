@@ -44,6 +44,7 @@ def _build_folder_tree_node(config: Any, path: str, name: str, *, is_root: bool 
     items = list_teldrive_dir(config, path)
     direct_file_count = 0
     children: list[dict[str, Any]] = []
+    files: list[dict[str, Any]] = []
 
     for item in items:
         item_type = str(item.get("type") or "").strip().lower()
@@ -54,9 +55,19 @@ def _build_folder_tree_node(config: Any, path: str, name: str, *, is_root: bool 
             child_node["id"] = str(item.get("id") or child_path)
             children.append(child_node)
         else:
+            file_name = str(item.get("name") or "未命名文件").strip() or "未命名文件"
+            file_path = _join_teldrive_path(path, file_name)
             direct_file_count += 1
+            files.append({
+                "id": str(item.get("id") or file_path),
+                "name": file_name,
+                "path": file_path,
+                "size": item.get("size"),
+                "type": item_type or "file",
+            })
 
     children.sort(key=lambda item: str(item.get("name") or "").lower())
+    files.sort(key=lambda item: str(item.get("name") or "").lower())
     total_file_count = direct_file_count + sum(int(child.get("total_file_count") or 0) for child in children)
     descendant_folder_count = len(children) + sum(int(child.get("descendant_folder_count") or 0) for child in children)
     has_content = total_file_count > 0
@@ -85,6 +96,7 @@ def _build_folder_tree_node(config: Any, path: str, name: str, *, is_root: bool 
         "has_content": has_content,
         "all_descendants_have_content": all_descendants_have_content,
         "children": children,
+        "files": files,
     }
 
 

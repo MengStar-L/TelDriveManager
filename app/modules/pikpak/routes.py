@@ -762,9 +762,10 @@ async def api_rss_download(request: Request):
     try:
         body = await request.json()
         urls = body.get("urls", [])
+        teldrive_path = body.get("teldrive_path", "/")
         if not urls:
             return JSONResponse({"error": "没有选中的链接"}, status_code=400)
-        asyncio.create_task(_process_magnets(urls))
+        asyncio.create_task(_process_magnets(urls, teldrive_path))
         return {"message": f"已提交 {len(urls)} 个链接，处理中...", "count": len(urls)}
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
