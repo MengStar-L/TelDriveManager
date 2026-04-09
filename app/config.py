@@ -70,8 +70,6 @@ DEFAULTS: dict[str, Any] = {
         "session_name": "tel2teldrive_session",
         "sync_interval": 10, "sync_enabled": True,
         "max_scan_messages": 10000, "confirm_cycles": 3,
-        "health_check_enabled": False, "health_check_interval_hours": 24,
-        "health_check_workers": 6, "health_check_retry_attempts": 2,
     },
     "telegram_db": {
         "host": "", "port": 5432, "user": "", "password": "", "name": "postgres",
@@ -184,10 +182,6 @@ def _normalize_config(merged: dict, raw: dict | None = None) -> dict:
 
     log_cfg["buffer_size"] = max(50, int(log_cfg.get("buffer_size") or 400))
     log_cfg["file"] = str(log_cfg.get("file") or "runtime.log").strip() or "runtime.log"
-
-    telegram_cfg = merged.setdefault("telegram", {})
-    telegram_cfg["health_check_workers"] = max(1, int(telegram_cfg.get("health_check_workers") or 6))
-    telegram_cfg["health_check_retry_attempts"] = max(0, int(telegram_cfg.get("health_check_retry_attempts") or 2))
 
     return merged
 

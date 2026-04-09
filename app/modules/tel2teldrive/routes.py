@@ -30,10 +30,8 @@ async def bootstrap():
     service, broker, config_store, _ = _get_deps()
     return {
         "state": broker.snapshot(),
-        "logs": broker.logs_snapshot(stream="service"),
-        "health_logs": broker.logs_snapshot(stream="health"),
+        "logs": broker.logs_snapshot(),
         "config": config_store.payload(),
-        "health": await service.get_health_snapshot(limit=20),
     }
 
 
@@ -102,36 +100,6 @@ async def submit_password(request: Request):
     except RuntimeError as exc:
         raise HTTPException(status_code=409, detail=str(exc))
     return {"ok": True}
-
-
-@router.get("/health")
-async def get_health_snapshot(limit: int = 50):
-    service, _, _, _ = _get_deps()
-    normalized_limit = max(1, min(int(limit or 50), 200))
-    return await service.get_health_snapshot(limit=normalized_limit)
-
-
-@router.post("/health/run")
-async def run_health_check(request: Request):
-    service, _, _, _ = _get_deps()
-    payload: dict[str, object] = {}
-    raw_body = await request.body()
-    if raw_body:
-        try:
-            payload = json.loads(raw_body.decode("utf-8"))
-        except json.JSONDecodeError as exc:
-            raise HTTPException(status_code=400, detail="巡检请求参数格式错误") from exc
-    try:
-        result = await service.request_health_check(
-            payload.get("probe_bytes"),
-            payload.get("scope_mode"),
-            payload.get("scope_paths"),
-        )
-    except ValueError as exc:
-        raise HTTPException(status_code=422, detail=str(exc))
-    except RuntimeError as exc:
-        raise HTTPException(status_code=409, detail=str(exc))
-    return {"ok": True, **result}
 
 
 @router.get("/stream")

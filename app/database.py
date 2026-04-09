@@ -55,26 +55,6 @@ CREATE TABLE IF NOT EXISTS parse_jobs (
 )
 """
 
-CREATE_FILE_HEALTH_CHECKS_TABLE_SQL = """
-CREATE TABLE IF NOT EXISTS file_health_checks (
-    file_id TEXT PRIMARY KEY,
-    file_name TEXT NOT NULL DEFAULT '',
-    file_path TEXT NOT NULL DEFAULT '/',
-    file_size INTEGER NOT NULL DEFAULT 0,
-    status TEXT NOT NULL DEFAULT 'unknown',
-    consecutive_failures INTEGER NOT NULL DEFAULT 0,
-    last_checked_at TEXT,
-    last_ok_at TEXT,
-    last_error TEXT,
-    last_run_id TEXT,
-    last_probe_status INTEGER,
-    last_probe_bytes INTEGER NOT NULL DEFAULT 0,
-    last_probe_duration_ms INTEGER NOT NULL DEFAULT 0,
-    last_probe_content_type TEXT,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-)
-"""
-
 # 全局连接实例
 _db_conn: Optional[aiosqlite.Connection] = None
 
@@ -108,7 +88,6 @@ async def init_db():
     await conn.execute(CREATE_TABLE_SQL)
     await conn.execute(CREATE_PROGRESS_LOGS_TABLE_SQL)
     await conn.execute(CREATE_PARSE_JOBS_TABLE_SQL)
-    await conn.execute(CREATE_FILE_HEALTH_CHECKS_TABLE_SQL)
     await conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_tasks_gid ON tasks(aria2_gid)")
     await conn.execute(
@@ -117,10 +96,6 @@ async def init_db():
         "CREATE INDEX IF NOT EXISTS idx_parse_jobs_type_created ON parse_jobs(job_type, created_at DESC)")
     await conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_parse_jobs_status_updated ON parse_jobs(status, updated_at DESC)")
-    await conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_file_health_status_checked ON file_health_checks(status, last_checked_at DESC)")
-    await conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_file_health_run_id ON file_health_checks(last_run_id)")
     await conn.commit()
 
 
@@ -375,146 +350,3 @@ async def fail_active_parse_jobs(reason: str) -> int:
     )
     await conn.commit()
     return cursor.rowcount or 0
-
-
-async def get_all_file_health_checks() -> list[dict]:
-    conn = await _get_conn()
-    async with conn.execute("SELECT * FROM file_health_checks ORDER BY file_path ASC, file_name ASC") as cursor:
-        rows = await cursor.fetchall()
-        return [dict(row) for row in rows]
-
-
-async def upsert_file_health_check(
-    *,
-    file_id: str,
-    file_name: str,
-    file_path: str,
-    file_size: int,
-    status: str,
-    consecutive_failures: int,
-    last_checked_at: str | None,
-    last_ok_at: str | None,
-    last_error: str | None,
-    last_run_id: str | None,
-    last_probe_status: int | None,
-    last_probe_bytes: int,
-    last_probe_duration_ms: int,
-    last_probe_content_type: str | None,
-) -> None:
-    conn = await _get_conn()
-    await conn.execute(
-        """
-        INSERT INTO file_health_checks (
-            file_id,
-            file_name,
-            file_path,
-            file_size,
-            status,
-            consecutive_failures,
-            last_checked_at,
-            last_ok_at,
-            last_error,
-            last_run_id,
-            last_probe_status,
-            last_probe_bytes,
-            last_probe_duration_ms,
-            last_probe_content_type,
-            updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-        ON CONFLICT(file_id) DO UPDATE SET
-            file_name = excluded.file_name,
-            file_path = excluded.file_path,
-            file_size = excluded.file_size,
-            status = excluded.status,
-            consecutive_failures = excluded.consecutive_failures,
-            last_checked_at = excluded.last_checked_at,
-            last_ok_at = excluded.last_ok_at,
-            last_error = excluded.last_error,
-            last_run_id = excluded.last_run_id,
-            last_probe_status = excluded.last_probe_status,
-            last_probe_bytes = excluded.last_probe_bytes,
-            last_probe_duration_ms = excluded.last_probe_duration_ms,
-            last_probe_content_type = excluded.last_probe_content_type,
-            updated_at = CURRENT_TIMESTAMP
-        """,
-        (
-            file_id,
-            file_name,
-            file_path,
-            max(0, int(file_size or 0)),
-            status,
-            max(0, int(consecutive_failures or 0)),
-            last_checked_at,
-            last_ok_at,
-            last_error,
-            last_run_id,
-            last_probe_status,
-            max(0, int(last_probe_bytes or 0)),
-            max(0, int(last_probe_duration_ms or 0)),
-            last_probe_content_type,
-        ),
-    )
-    await conn.commit()
-
-
-async def delete_stale_file_health_checks(last_run_id: str) -> int:
-    conn = await _get_conn()
-    cursor = await conn.execute(
-        "DELETE FROM file_health_checks WHERE last_run_id IS NULL OR last_run_id != ?",
-        (last_run_id,),
-    )
-    await conn.commit()
-    return cursor.rowcount or 0
-
-
-async def get_file_health_summary() -> dict:
-    conn = await _get_conn()
-    async with conn.execute(
-        """
-        SELECT
-            COUNT(*) AS total_files,
-            SUM(CASE WHEN status = 'ok' THEN 1 ELSE 0 END) AS ok_count,
-            SUM(CASE WHEN status = 'suspect' THEN 1 ELSE 0 END) AS suspect_count,
-            SUM(CASE WHEN status = 'invalid' THEN 1 ELSE 0 END) AS invalid_count,
-            SUM(CASE WHEN status = 'error' THEN 1 ELSE 0 END) AS error_count,
-            MAX(last_checked_at) AS last_checked_at,
-            MAX(last_ok_at) AS last_ok_at
-        FROM file_health_checks
-        """
-    ) as cursor:
-        row = await cursor.fetchone()
-    data = dict(row) if row else {}
-    return {
-        "total_files": int(data.get("total_files") or 0),
-        "ok_count": int(data.get("ok_count") or 0),
-        "suspect_count": int(data.get("suspect_count") or 0),
-        "invalid_count": int(data.get("invalid_count") or 0),
-        "error_count": int(data.get("error_count") or 0),
-        "last_checked_at": data.get("last_checked_at"),
-        "last_ok_at": data.get("last_ok_at"),
-    }
-
-
-async def get_file_health_issues(limit: int = 50) -> list[dict]:
-    conn = await _get_conn()
-    normalized_limit = max(1, int(limit or 50))
-    async with conn.execute(
-        """
-        SELECT *
-        FROM file_health_checks
-        WHERE status IN ('suspect', 'invalid', 'error')
-        ORDER BY
-            CASE status
-                WHEN 'invalid' THEN 0
-                WHEN 'suspect' THEN 1
-                ELSE 2
-            END,
-            last_checked_at DESC,
-            file_path ASC,
-            file_name ASC
-        LIMIT ?
-        """,
-        (normalized_limit,),
-    ) as cursor:
-        rows = await cursor.fetchall()
-    return [dict(row) for row in rows]

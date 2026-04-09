@@ -770,16 +770,9 @@ let lastPageSwitchName = '';
 function runPageSideEffects(name) {
     if (name === 'aria2teldrive') loadA2TDTasks();
     if (name === 'tel2teldrive') loadT2TDState();
-    if (name === 'inspection') {
-        initT2TDHealthProbeInput();
-        initT2TDHealthScopeInputs();
-        loadT2TDState();
-    }
     if (name === 'settings') loadConfig();
     if (name === 'progress') loadParseWorkspaceSnapshot();
 }
-
-
 
 
 function switchPage(name, options = {}) {
@@ -2312,15 +2305,8 @@ function collectSettingsConfig() {
             api_hash: document.getElementById('cfgTelegramApiHash').value,
             channel_id: parseInt(document.getElementById('cfgTelegramChannelId').value, 10) || 0,
             sync_interval: parseInt(document.getElementById('cfgTelegramSyncInterval').value, 10) || 10,
-            sync_enabled: document.getElementById('cfgTelegramSyncEnabled').checked,
-            health_check_enabled: document.getElementById('cfgTelegramHealthCheckEnabled').checked,
-            health_check_interval_hours: Math.max(1, parseInt(document.getElementById('cfgTelegramHealthCheckIntervalHours').value, 10) || 24),
-            health_check_workers: Math.max(1, parseInt(document.getElementById('cfgTelegramHealthCheckWorkers').value, 10) || 6),
-            health_check_retry_attempts: Math.max(0, parseInt(document.getElementById('cfgTelegramHealthCheckRetryAttempts').value, 10) || 2)
+            sync_enabled: document.getElementById('cfgTelegramSyncEnabled').checked
         },
-
-
-
         telegram_db: {
             host: document.getElementById('cfgDbHost').value,
             port: parseInt(document.getElementById('cfgDbPort').value, 10) || 5432,
@@ -2379,15 +2365,8 @@ async function loadConfig() {
         document.getElementById('cfgTelegramChannelId').value = cfg.telegram?.channel_id || 0;
         document.getElementById('cfgTelegramSyncInterval').value = cfg.telegram?.sync_interval || 10;
         document.getElementById('cfgTelegramSyncEnabled').checked = cfg.telegram?.sync_enabled !== false;
-        document.getElementById('cfgTelegramHealthCheckEnabled').checked = !!cfg.telegram?.health_check_enabled;
-        document.getElementById('cfgTelegramHealthCheckIntervalHours').value = cfg.telegram?.health_check_interval_hours || 24;
-        document.getElementById('cfgTelegramHealthCheckWorkers').value = cfg.telegram?.health_check_workers || 6;
-        document.getElementById('cfgTelegramHealthCheckRetryAttempts').value = Math.max(0, Number(cfg.telegram?.health_check_retry_attempts ?? 2));
-
 
         document.getElementById('cfgDbHost').value = cfg.telegram_db?.host || '';
-
-
         document.getElementById('cfgDbPort').value = cfg.telegram_db?.port || 5432;
         document.getElementById('cfgDbUser').value = cfg.telegram_db?.user || '';
         document.getElementById('cfgDbPassword').value = cfg.telegram_db?.password || '';
@@ -2513,423 +2492,38 @@ window.onload = async () => {
     es.onmessage = (e) => {
         try {
             const data = JSON.parse(e.data);
-            if (data.type === "state" || data.type === "qr" || data.type === "password_required") {
+            if(data.type === "state" || data.type === "qr" || data.type === "password_required") {
                 updateT2TDState(data.payload || data);
-            } else if (data.type === "log") {
-                const logPayload = data.payload || data;
-                if (logPayload.stream === 'health') appendT2TDHealthLog(logPayload);
-                else appendT2TDLog(logPayload);
+            } else if(data.type === "log") {
+                appendT2TDLog(data.payload || data);
             }
-        } catch (e) {}
+        }catch(e){}
     };
 };
 
 
 // ── Tel2TelDrive Integration ──
 let t2tdQrRefreshPending = false;
-let t2tdHealthRunPending = false;
-let t2tdHealthLastFinishedAt = '';
-let t2tdHealthSnapshot = { summary: {}, issues: [] };
-const T2TD_HEALTH_PROBE_DEFAULT_KB = 20;
-const T2TD_HEALTH_PROBE_MIN_KB = 1;
-const T2TD_HEALTH_PROBE_MAX_KB = 10240;
-const T2TD_HEALTH_PROBE_STORAGE_KEY = 't2tdHealthProbeKb';
-const T2TD_HEALTH_SCOPE_MODE_ALL = 'all';
-const T2TD_HEALTH_SCOPE_MODE_FOLDER = 'folder';
-const T2TD_HEALTH_SCOPE_MODE_FILES = 'files';
-const T2TD_HEALTH_SCOPE_MODE_STORAGE_KEY = 't2tdHealthScopeMode';
-const T2TD_HEALTH_SCOPE_PATHS_STORAGE_KEY = 't2tdHealthScopePaths';
-window.t2tdState = window.t2tdState || {};
-
-function clampT2TDHealthProbeKb(value) {
-    const numeric = Number.parseInt(value, 10);
-    if (!Number.isFinite(numeric)) return T2TD_HEALTH_PROBE_DEFAULT_KB;
-    return Math.min(T2TD_HEALTH_PROBE_MAX_KB, Math.max(T2TD_HEALTH_PROBE_MIN_KB, numeric));
-}
-
-function normalizeT2TDHealthScopeMode(value) {
-    const mode = String(value || T2TD_HEALTH_SCOPE_MODE_ALL).trim().toLowerCase();
-    if ([T2TD_HEALTH_SCOPE_MODE_ALL, T2TD_HEALTH_SCOPE_MODE_FOLDER, T2TD_HEALTH_SCOPE_MODE_FILES].includes(mode)) {
-        return mode;
-    }
-    return T2TD_HEALTH_SCOPE_MODE_ALL;
-}
-
-function parseT2TDHealthScopePaths(value) {
-    return String(value || '')
-        .split(/[\n,，;；]+/)
-        .map(item => item.trim())
-        .filter(Boolean)
-        .map(item => {
-            const normalized = item.replace(/\\/g, '/').replace(/\/+/g, '/');
-            if (!normalized) return '';
-
-            const withLeadingSlash = normalized.startsWith('/') ? normalized : `/${normalized}`;
-            return withLeadingSlash === '/' ? withLeadingSlash : withLeadingSlash.replace(/\/+$/g, '');
-        })
-        .filter(Boolean);
-}
-
-function formatT2TDHealthScopeLabel(mode, paths) {
-    const normalizedMode = normalizeT2TDHealthScopeMode(mode);
-    const normalizedPaths = Array.isArray(paths) ? paths : parseT2TDHealthScopePaths(paths);
-    if (normalizedMode === T2TD_HEALTH_SCOPE_MODE_ALL || !normalizedPaths.length) return '全部文件';
-    const kind = normalizedMode === T2TD_HEALTH_SCOPE_MODE_FOLDER ? '目录' : '文件';
-    if (normalizedPaths.length === 1) {
-        const suffix = normalizedMode === T2TD_HEALTH_SCOPE_MODE_FOLDER ? '（含子目录）' : '';
-        return `${kind} ${normalizedPaths[0]}${suffix}`;
-    }
-    const preview = normalizedPaths.slice(0, 2).join('、');
-    return `${kind} ${preview}${normalizedPaths.length > 2 ? ` 等 ${normalizedPaths.length} 个` : ` 共 ${normalizedPaths.length} 个`}`;
-}
-
-function getT2TDHealthProbeInput() {
-    return document.getElementById('t2tdHealthProbeKb');
-}
-
-function getT2TDHealthScopeModeInput() {
-    return document.getElementById('t2tdHealthScopeMode');
-}
-
-function getT2TDHealthScopePathsInput() {
-    return document.getElementById('t2tdHealthScopePaths');
-}
-
-function getT2TDHealthScopePathsLabel() {
-    return document.getElementById('t2tdHealthScopePathsLabel');
-}
-
-function normalizeT2TDHealthProbeInput() {
-    const input = getT2TDHealthProbeInput();
-    const normalized = clampT2TDHealthProbeKb(input ? input.value : T2TD_HEALTH_PROBE_DEFAULT_KB);
-    if (input) input.value = String(normalized);
-    try {
-        localStorage.setItem(T2TD_HEALTH_PROBE_STORAGE_KEY, String(normalized));
-    } catch (e) {}
-    return normalized;
-}
-
-function syncT2TDHealthScopeInputs() {
-    const modeInput = getT2TDHealthScopeModeInput();
-    const pathsInput = getT2TDHealthScopePathsInput();
-    const label = getT2TDHealthScopePathsLabel();
-    const normalizedMode = normalizeT2TDHealthScopeMode(modeInput ? modeInput.value : T2TD_HEALTH_SCOPE_MODE_ALL);
-    const rawPaths = pathsInput ? String(pathsInput.value || '').replace(/\r\n/g, '\n').trim() : '';
-    if (modeInput) modeInput.value = normalizedMode;
-    if (pathsInput) {
-        pathsInput.value = rawPaths;
-        pathsInput.placeholder = normalizedMode === T2TD_HEALTH_SCOPE_MODE_FILES ? '/movies/demo.mkv\n/series/test.mp4' : '/movies\n/series';
-        pathsInput.disabled = normalizedMode === T2TD_HEALTH_SCOPE_MODE_ALL;
-    }
-    if (label) label.textContent = normalizedMode === T2TD_HEALTH_SCOPE_MODE_FILES ? 'TelDrive 文件路径' : 'TelDrive 目录路径';
-    getT2TDHealthTargets('scope-config-hint').forEach(el => {
-        el.textContent = normalizedMode === T2TD_HEALTH_SCOPE_MODE_ALL
-            ? '当前为全部文件巡检；如需缩小范围，请切换为“指定目录”或“指定文件”。'
-            : normalizedMode === T2TD_HEALTH_SCOPE_MODE_FOLDER
-                ? '支持填写一个或多个目录路径，按回车分行；会巡检目录内及其子目录下的全部文件。'
-                : '支持填写一个或多个文件完整路径，按回车分行；只巡检列出的文件。';
-    });
-    try {
-        localStorage.setItem(T2TD_HEALTH_SCOPE_MODE_STORAGE_KEY, normalizedMode);
-        localStorage.setItem(T2TD_HEALTH_SCOPE_PATHS_STORAGE_KEY, rawPaths);
-    } catch (e) {}
-    return {
-        mode: normalizedMode,
-        rawPaths,
-        paths: parseT2TDHealthScopePaths(rawPaths),
-    };
-}
-
-function initT2TDHealthProbeInput() {
-    const input = getT2TDHealthProbeInput();
-    if (!input || input.dataset.initialized === '1') return;
-    let initialValue = T2TD_HEALTH_PROBE_DEFAULT_KB;
-    try {
-        initialValue = clampT2TDHealthProbeKb(localStorage.getItem(T2TD_HEALTH_PROBE_STORAGE_KEY));
-    } catch (e) {}
-    input.value = String(initialValue);
-    input.addEventListener('change', normalizeT2TDHealthProbeInput);
-    input.addEventListener('blur', normalizeT2TDHealthProbeInput);
-    input.dataset.initialized = '1';
-}
-
-function initT2TDHealthScopeInputs() {
-    const modeInput = getT2TDHealthScopeModeInput();
-    const pathsInput = getT2TDHealthScopePathsInput();
-    if (!modeInput || !pathsInput || modeInput.dataset.initialized === '1') return;
-    let initialMode = T2TD_HEALTH_SCOPE_MODE_ALL;
-    let initialPaths = '';
-    try {
-        initialMode = normalizeT2TDHealthScopeMode(localStorage.getItem(T2TD_HEALTH_SCOPE_MODE_STORAGE_KEY));
-        initialPaths = String(localStorage.getItem(T2TD_HEALTH_SCOPE_PATHS_STORAGE_KEY) || '');
-    } catch (e) {}
-    modeInput.value = initialMode;
-    pathsInput.value = initialPaths;
-    modeInput.addEventListener('change', syncT2TDHealthScopeInputs);
-    pathsInput.addEventListener('change', syncT2TDHealthScopeInputs);
-    pathsInput.addEventListener('blur', syncT2TDHealthScopeInputs);
-    modeInput.dataset.initialized = '1';
-    syncT2TDHealthScopeInputs();
-}
-
-function getSelectedT2TDHealthProbeBytes() {
-    return normalizeT2TDHealthProbeInput() * 1024;
-}
-
-function getSelectedT2TDHealthScope() {
-    const selection = syncT2TDHealthScopeInputs();
-    return {
-        mode: selection.mode,
-        rawPaths: selection.rawPaths,
-        paths: selection.paths,
-        label: formatT2TDHealthScopeLabel(selection.mode, selection.paths),
-    };
-}
-
-function formatT2TDHealthProbeBytes(bytes) {
-    const normalized = Math.max(T2TD_HEALTH_PROBE_MIN_KB * 1024, Number(bytes || T2TD_HEALTH_PROBE_DEFAULT_KB * 1024));
-    return formatBytes(normalized, 0);
-}
-
 
 function formatT2TDExpireAt(expiresAt) {
-
     if (!expiresAt) return '';
     const date = new Date(expiresAt);
     if (Number.isNaN(date.getTime())) return '';
     return date.toLocaleString('zh-CN', { hour12: false });
 }
 
-function formatT2TDDateTime(value) {
-    return formatT2TDExpireAt(value) || '--';
-}
-
-function getT2TDHealthTargets(key) {
-    return Array.from(document.querySelectorAll(`[data-t2td-health="${key}"]`));
-}
-
-function renderT2TDHealthIssues(issues = []) {
-    const containers = getT2TDHealthTargets('issues');
-    if (!containers.length) return;
-
-    if (!issues.length) {
-        const emptyHtml = '<div class="inspection-empty-state"><i class="ph ph-shield-check"></i><span>暂无失效或可疑文件</span></div>';
-        containers.forEach(container => {
-            container.innerHTML = emptyHtml;
-        });
-        return;
-    }
-
-    const html = issues.map(item => {
-        const statusKey = item.status === 'invalid' ? 'invalid' : item.status === 'suspect' ? 'suspect' : 'error';
-        const statusLabel = statusKey === 'invalid' ? '失效' : statusKey === 'suspect' ? '可疑' : '异常';
-        const sizeText = Number(item.file_size || 0) > 0 ? formatBytes(Number(item.file_size || 0), 0) : '--';
-        const path = escapeA2TDHtml(item.file_path || item.file_name || item.file_id || '--');
-        const message = escapeA2TDHtml(item.last_error || '未知错误');
-        const checkedAt = formatT2TDDateTime(item.last_checked_at);
-        const failures = Math.max(0, Number(item.consecutive_failures || 0));
-        return `
-            <div class="inspection-issue-card ${statusKey}">
-                <div class="inspection-issue-head">
-                    <span class="inspection-issue-badge ${statusKey}">${statusLabel}</span>
-                    <span class="inspection-issue-time">${checkedAt}</span>
-                </div>
-                <div class="inspection-issue-path">${path}</div>
-                <div class="inspection-issue-meta">
-                    <span class="inspection-issue-chip"><i class="ph ph-hard-drive"></i> ${sizeText}</span>
-                    <span class="inspection-issue-chip"><i class="ph ph-arrows-clockwise"></i> 连续失败 ${failures} 次</span>
-                </div>
-                <div class="inspection-issue-message">${message}</div>
-            </div>
-        `;
-    }).join('');
-
-    containers.forEach(container => {
-        container.innerHTML = html;
-    });
-}
-
-
-function updateT2TDHealthFromState(state = {}) {
-    initT2TDHealthProbeInput();
-    initT2TDHealthScopeInputs();
-    const summary = t2tdHealthSnapshot.summary || {};
-    const selectedProbeBytes = getSelectedT2TDHealthProbeBytes();
-    const selectedProbeText = formatT2TDHealthProbeBytes(selectedProbeBytes);
-    const selectedScope = getSelectedT2TDHealthScope();
-    const activeProbeBytes = Number(state.health_check_probe_bytes || 0) > 0 ? Number(state.health_check_probe_bytes) : selectedProbeBytes;
-    const activeProbeText = formatT2TDHealthProbeBytes(activeProbeBytes);
-    const activeScopeMode = normalizeT2TDHealthScopeMode(state.health_check_scope_mode || selectedScope.mode);
-    const activeScopePaths = Array.isArray(state.health_check_scope_paths) ? state.health_check_scope_paths : selectedScope.paths;
-    const activeScopeLabel = state.health_check_scope_label || formatT2TDHealthScopeLabel(activeScopeMode, activeScopePaths);
-    const selectedScopeLabel = selectedScope.label;
-    const total = Number(state.health_check_total_files ?? summary.total_files ?? 0);
-    const ok = Number(state.health_check_ok_count ?? summary.ok_count ?? 0);
-    const suspect = Number(state.health_check_suspect_count ?? summary.suspect_count ?? 0);
-    const invalid = Number(state.health_check_invalid_count ?? summary.invalid_count ?? 0);
-    const lastCheckedAt = state.health_check_last_checked_at || summary.last_checked_at;
-    const running = !!state.health_check_running;
-    const checkedFiles = Number(state.health_check_checked_files || 0);
-    const intervalHours = Math.max(1, Number(state.health_check_interval_hours || 24));
-    const workers = Math.max(1, Number(state.health_check_workers || window.currentConfig?.telegram?.health_check_workers || 6));
-    const retryAttempts = Math.max(0, Number(state.health_check_retry_attempts ?? window.currentConfig?.telegram?.health_check_retry_attempts ?? 2));
-    const autoEnabled = !!state.health_check_enabled;
-    const totalForProgress = Math.max(total, checkedFiles, 1);
-
-    const statusText = running
-        ? `正在巡检 ${activeScopeLabel}：${checkedFiles}/${totalForProgress} | 正常 ${ok} | 可疑 ${suspect} | 失效 ${invalid}`
-        : state.health_check_last_error
-            ? `巡检异常：${state.health_check_last_error}`
-            : lastCheckedAt
-                ? `最近一次巡检结果：正常 ${ok} / 可疑 ${suspect} / 失效 ${invalid}`
-                : '尚未执行文件巡检';
-    const autoPolicyText = autoEnabled ? `已开启 / 每 ${intervalHours} 小时 / ${workers} 线程 / 失败重试 ${retryAttempts} 次` : '未开启';
-    const currentFileText = running
-        ? (state.health_check_current_file || `正在执行 ${activeScopeLabel} 的文件头读取探测...`)
-        : `自动巡检：${autoPolicyText}`;
-    const scopeText = running
-        ? `当前巡检对象：${activeScopeLabel}；文件头读取：每个文件前 ${activeProbeText}；并发线程：${workers}；失败重试：${retryAttempts} 次`
-        : `手动巡检对象：${selectedScopeLabel}；文件头读取：每个文件前 ${selectedProbeText}；并发线程：${workers}；失败重试：${retryAttempts} 次`;
-
-    const runBtnHtml = running
-        ? '<span class="spinner" style="width:14px;height:14px;border-width:2px;display:inline-block;margin-right:6px;"></span> 巡检中'
-        : '<i class="ph ph-activity"></i> 立即巡检';
-
-    getT2TDHealthTargets('total').forEach(el => {
-        el.textContent = String(total);
-    });
-    getT2TDHealthTargets('ok').forEach(el => {
-        el.textContent = String(ok);
-    });
-    getT2TDHealthTargets('suspect').forEach(el => {
-        el.textContent = String(suspect);
-    });
-    getT2TDHealthTargets('invalid').forEach(el => {
-        el.textContent = String(invalid);
-    });
-    getT2TDHealthTargets('last-checked').forEach(el => {
-        el.textContent = formatT2TDDateTime(lastCheckedAt);
-    });
-    getT2TDHealthTargets('workers').forEach(el => {
-        el.textContent = String(workers);
-    });
-    getT2TDHealthTargets('auto-policy').forEach(el => {
-        el.textContent = autoPolicyText;
-    });
-    getT2TDHealthTargets('status').forEach(el => {
-        el.textContent = statusText;
-    });
-    getT2TDHealthTargets('current-file').forEach(el => {
-        el.textContent = currentFileText;
-    });
-    getT2TDHealthTargets('scope').forEach(el => {
-        el.textContent = scopeText;
-    });
-    getT2TDHealthTargets('run').forEach(btn => {
-        btn.disabled = t2tdHealthRunPending || running;
-        btn.innerHTML = runBtnHtml;
-    });
-    const probeInput = getT2TDHealthProbeInput();
-    const scopeModeInput = getT2TDHealthScopeModeInput();
-    const scopePathsInput = getT2TDHealthScopePathsInput();
-    if (probeInput) probeInput.disabled = t2tdHealthRunPending || running;
-    if (scopeModeInput) scopeModeInput.disabled = t2tdHealthRunPending || running;
-    if (scopePathsInput) scopePathsInput.disabled = t2tdHealthRunPending || running || selectedScope.mode === T2TD_HEALTH_SCOPE_MODE_ALL;
-
-    if (!running && state.health_check_last_finished_at && state.health_check_last_finished_at !== t2tdHealthLastFinishedAt) {
-        t2tdHealthLastFinishedAt = state.health_check_last_finished_at;
-        loadT2TDHealth();
-    }
-}
-
-
-
-function renderT2TDHealthSnapshot(snapshot = {}) {
-    t2tdHealthSnapshot = {
-        summary: snapshot.summary || {},
-        issues: Array.isArray(snapshot.issues) ? snapshot.issues : []
-    };
-    renderT2TDHealthIssues(t2tdHealthSnapshot.issues);
-    updateT2TDHealthFromState(window.t2tdState || {});
-}
-
-async function loadT2TDHealth() {
-    try {
-        const resp = await fetch('/api/t2td/health');
-        const data = await readJsonSafe(resp);
-        if (!resp.ok) throw new Error(data.detail || data.message || '读取巡检状态失败');
-        renderT2TDHealthSnapshot(data);
-    } catch (e) {}
-}
-
-function renderT2TDLogList(containerId, emptyHtml, logs = []) {
-    const container = document.getElementById(containerId);
-    if (!container) return;
-    container.innerHTML = '';
-    if (!Array.isArray(logs) || !logs.length) {
-        container.innerHTML = emptyHtml;
-        return;
-    }
-    logs.forEach(log => appendT2TDLogEntry(containerId, '', log));
-}
-
 async function loadT2TDState() {
-    initT2TDHealthProbeInput();
-    initT2TDHealthScopeInputs();
     try {
-
         const res = await fetch('/api/t2td/bootstrap');
-
-        const d = await readJsonSafe(res);
-        updateT2TDState(d.state || {});
-        renderT2TDHealthSnapshot(d.health || {});
-        renderT2TDLogList(
-            't2tdLogContainer',
-            '<div class="log-empty" id="t2tdLogEmpty"><i class="ph ph-ghost"></i> 等待系统服务启动</div>',
-            d.logs || []
-        );
-        renderT2TDLogList(
-            't2tdHealthLogContainer',
-            '<div class="log-empty" id="t2tdHealthLogEmpty"><i class="ph ph-shield-check"></i> 暂无巡检日志</div>',
-            d.health_logs || []
-        );
-    } catch (e) {}
-}
-
-async function runT2TDHealthCheck() {
-    if (t2tdHealthRunPending) return;
-    t2tdHealthRunPending = true;
-    updateT2TDHealthFromState(window.t2tdState || {});
-    try {
-        const probeBytes = getSelectedT2TDHealthProbeBytes();
-        const selectedScope = getSelectedT2TDHealthScope();
-        if (selectedScope.mode !== T2TD_HEALTH_SCOPE_MODE_ALL && !selectedScope.paths.length) {
-            throw new Error(selectedScope.mode === T2TD_HEALTH_SCOPE_MODE_FOLDER ? '请先填写至少一个 TelDrive 目录路径' : '请先填写至少一个 TelDrive 文件路径');
+        const d = await res.json();
+        updateT2TDState(d.state);
+        const container = document.getElementById('t2tdLogContainer');
+        if (container && d.logs) {
+            container.innerHTML = '';
+            d.logs.forEach(l => appendT2TDLog(l));
         }
-        const resp = await fetch('/api/t2td/health/run', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                probe_bytes: probeBytes,
-                scope_mode: selectedScope.mode,
-                scope_paths: selectedScope.rawPaths,
-            })
-        });
-        const data = await readJsonSafe(resp);
-        if (!resp.ok || data.ok === false) throw new Error(data.detail || data.message || '启动巡检失败');
-        if (typeof showA2TDToast === 'function') {
-            showA2TDToast(data.message || `已开始巡检：${selectedScope.label}（每个文件仅读取前 ${formatT2TDHealthProbeBytes(probeBytes)}）`, 'info');
-        }
-        await loadT2TDState();
-    } catch (e) {
-        alert(e.message || '启动巡检失败');
-    } finally {
-        t2tdHealthRunPending = false;
-        updateT2TDHealthFromState(window.t2tdState || {});
-    }
+    } catch(e) {}
 }
-
-
 
 async function refreshT2TDQr(manual = false) {
     if (t2tdQrRefreshPending) return;
@@ -2953,7 +2547,7 @@ async function refreshT2TDQr(manual = false) {
         }
         const resp = await fetch('/api/t2td/login/refresh', { method: 'POST' });
         if (!resp.ok) {
-            const err = await readJsonSafe(resp);
+            const err = await resp.json().catch(() => ({}));
             throw new Error(err.detail || '刷新二维码失败');
         }
     } catch (e) {
@@ -2965,7 +2559,6 @@ async function refreshT2TDQr(manual = false) {
 }
 
 function updateT2TDState(state) {
-    window.t2tdState = state || {};
     const area = document.getElementById('t2tdQrArea');
     const qrImg = document.getElementById('t2tdQrImg');
     const form = document.getElementById('t2td2faForm');
@@ -2996,7 +2589,7 @@ function updateT2TDState(state) {
                 hint.textContent = '正在获取新二维码...';
             }
         }
-    } else if (state.type === 'password_required' || state.phase === 'awaiting_password') {
+    } else if (state.type === 'password_required' || (state.phase === 'awaiting_password')) {
         t2tdQrRefreshPending = false;
         qrImg.style.display = 'none';
         qrImg.removeAttribute('src');
@@ -3007,8 +2600,8 @@ function updateT2TDState(state) {
         form.onsubmit = async (e) => {
             e.preventDefault();
             const pass = document.getElementById('t2tdPassword').value;
-            await fetch('/api/t2td/login/password', { method: 'POST', body: JSON.stringify({ password: pass }), headers: { 'Content-Type': 'application/json' } });
-        };
+            await fetch('/api/t2td/login/password', { method:'POST', body: JSON.stringify({password: pass}), headers: {'Content-Type': 'application/json'}});
+        }
     } else if (state.authorized || state.phase === 'running' || state.phase === 'authorized') {
         t2tdQrRefreshPending = false;
         qrImg.style.display = 'none';
@@ -3016,7 +2609,7 @@ function updateT2TDState(state) {
         qrImg.style.pointerEvents = 'auto';
         form.style.display = 'none';
         if (hint) hint.style.display = 'none';
-        if (text) text.innerHTML = '<span style="color:var(--success)"><b><i class="ph-fill ph-check-circle"></i> 服务运行中</b></span> - 频道监听已激活';
+        if (text) text.innerHTML = `<span style="color:var(--success)"><b><i class="ph-fill ph-check-circle"></i> 服务运行中</b></span> - 频道监听已激活`;
     } else {
         t2tdQrRefreshPending = false;
         qrImg.style.display = 'none';
@@ -3029,48 +2622,35 @@ function updateT2TDState(state) {
         }
         if (text) text.textContent = state.last_error || state.phase_label || '服务准备中...';
     }
-
-    updateT2TDHealthFromState(state || {});
 }
 
-function shouldStickT2TDLogToBottom(container, threshold = 24) {
-    if (!container) return false;
-    return (container.scrollHeight - container.clientHeight - container.scrollTop) <= threshold;
-}
 
-function appendT2TDLogEntry(containerId, emptyId, log) {
-    const container = document.getElementById(containerId);
+function appendT2TDLog(log) {
+    const container = document.getElementById('t2tdLogContainer');
     if (!container) return;
-    const shouldStick = shouldStickT2TDLogToBottom(container);
-    const empty = emptyId ? document.getElementById(emptyId) : container.querySelector('.log-empty');
+    const empty = document.getElementById('t2tdLogEmpty');
     if (empty) empty.remove();
-
+    
+    // Normalize log fields (handle both direct object and payload wrapper)
     const logData = log.payload || log;
+    
     const entry = document.createElement('div');
     entry.className = 'log-entry';
     let c = '#fff';
-    if (logData.level === 'ERROR') c = '#f87171';
-    else if (logData.level === 'WARN' || logData.level === 'WARNING') c = '#f59e0b';
-
+    if(logData.level === 'ERROR') c = '#f87171';
+    else if(logData.level === 'WARN' || logData.level === 'WARNING') c = '#f59e0b';
+    
+    // Extract time from timestamp
     let t = logData.time || logData.timestamp || '(none)';
     if (t && t.includes('T')) {
         t = t.split('T')[1].split('.')[0] || t;
-        t = t.replace('Z', '').replace(/[+-]\d+:\d+$/, '');
+        t = t.replace('Z', '').replace(/[+-]\d+:\d+$/, ''); // Strip extra timezone fragments visually
     }
 
     entry.innerHTML = `<span style="color:${c}">[${t}] [${logData.level || 'INFO'}] ${logData.message || ''}</span>`;
     container.appendChild(entry);
-    if (shouldStick) container.scrollTop = container.scrollHeight;
+    container.scrollTop = container.scrollHeight;
 }
-
-function appendT2TDLog(log) {
-    appendT2TDLogEntry('t2tdLogContainer', 't2tdLogEmpty', log);
-}
-
-function appendT2TDHealthLog(log) {
-    appendT2TDLogEntry('t2tdHealthLogContainer', 't2tdHealthLogEmpty', log);
-}
-
 // ==========================================
 
 
