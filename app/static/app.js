@@ -2496,6 +2496,9 @@ window.onload = async () => {
                 updateT2TDState(data.payload || data);
             } else if(data.type === "log") {
                 appendT2TDLog(data.payload || data);
+                if (t2tdPanelMode === 'deleted' && isT2TDAutoDeleteLog(data.payload || data)) {
+                    loadT2TDDeletedFiles(true);
+                }
             }
         }catch(e){}
     };
@@ -2504,6 +2507,12 @@ window.onload = async () => {
 
 // ── Tel2TelDrive Integration ──
 let t2tdQrRefreshPending = false;
+let t2tdPanelMode = 'logs';
+let t2tdRuntimeLogs = [];
+let t2tdDeletedFiles = [];
+let t2tdDeletedFilesLoaded = false;
+let t2tdDeletedFilesRefreshPending = false;
+const T2TD_RUNTIME_LOG_LIMIT = 400;
 
 function formatT2TDExpireAt(expiresAt) {
     if (!expiresAt) return '';
@@ -2512,15 +2521,140 @@ function formatT2TDExpireAt(expiresAt) {
     return date.toLocaleString('zh-CN', { hour12: false });
 }
 
+function setT2TDPlaceholder(message, icon = 'ph-ghost') {
+    const container = document.getElementById('t2tdLogContainer');
+    if (!container) return;
+    container.innerHTML = `<div class="log-empty" id="t2tdLogEmpty"><i class="ph ${icon}"></i> ${escapeA2TDHtml(message)}</div>`;
+}
+
+function syncT2TDPanelToggleButton() {
+    const button = document.getElementById('t2tdViewToggleBtn');
+    if (!button) return;
+    if (t2tdPanelMode === 'deleted') {
+        button.innerHTML = '<i class="ph ph-terminal-window"></i> 返回运行日志';
+        button.setAttribute('aria-pressed', 'true');
+    } else {
+        button.innerHTML = '<i class="ph ph-files"></i> 查看被删除文件';
+        button.setAttribute('aria-pressed', 'false');
+    }
+}
+
+function getT2TDDeleteReasonLabel(reason) {
+    const labels = {
+        telegram_message_deleted: 'Telegram 删除事件',
+        telegram_part_deleted: 'Telegram 分块缺失',
+        telegram_message_missing: 'Telegram 无对应消息',
+    };
+    return labels[String(reason || '').trim()] || 'Telegram 文件缺失';
+}
+
+function normalizeT2TDDeletedFile(item = {}) {
+    const messageIds = Array.isArray(item.message_ids) ? item.message_ids.filter(id => Number.isInteger(id)) : [];
+    const missingMessageIds = Array.isArray(item.missing_message_ids) ? item.missing_message_ids.filter(id => Number.isInteger(id)) : [];
+    return {
+        id: String(item.id || `${item.file_id || 'unknown'}-${item.occurred_at || item.created_at || Date.now()}`),
+        file_id: String(item.file_id || item.job_id || '').trim(),
+        file_name: String(item.file_name || '未命名文件').trim() || '未命名文件',
+        reason: String(item.reason || 'telegram_message_missing').trim() || 'telegram_message_missing',
+        message_ids: messageIds,
+        missing_message_ids: missingMessageIds,
+        file_size: Number(item.file_size || 0) || 0,
+        occurred_at: item.occurred_at || item.created_at || null,
+        created_at: item.created_at || item.occurred_at || null,
+    };
+}
+
+function renderT2TDLogs(logs = t2tdRuntimeLogs) {
+    const container = document.getElementById('t2tdLogContainer');
+    if (!container) return;
+    container.innerHTML = '';
+    if (!Array.isArray(logs) || logs.length === 0) {
+        setT2TDPlaceholder('等待系统服务启动');
+        return;
+    }
+    logs.forEach(log => appendT2TDLog(log, { skipStore: true }));
+}
+
+function renderT2TDDeletedFiles(items = t2tdDeletedFiles) {
+    const container = document.getElementById('t2tdLogContainer');
+    if (!container) return;
+    container.innerHTML = '';
+    if (!Array.isArray(items) || items.length === 0) {
+        setT2TDPlaceholder('暂无因 Telegram 缺失而自动删除的 TelDrive 文件', 'ph-trash');
+        return;
+    }
+
+    [...items].reverse().forEach(rawItem => {
+        const item = normalizeT2TDDeletedFile(rawItem);
+        const entry = document.createElement('div');
+        entry.className = 'log-entry';
+        const missingPreview = item.missing_message_ids.length > 0
+            ? item.missing_message_ids.slice(0, 5).map(id => escapeA2TDHtml(id)).join('、')
+            : '';
+        const text = `已自动删除 <span class="file-name">${escapeA2TDHtml(item.file_name)}</span>`
+            + renderProgressLogMeta([
+                `原因：${escapeA2TDHtml(getT2TDDeleteReasonLabel(item.reason))}`,
+                item.file_id ? `文件ID：<span class="log-path">${escapeA2TDHtml(item.file_id)}</span>` : '',
+                item.file_size > 0 ? `大小：${escapeA2TDHtml(formatBytes(item.file_size, 0))}` : '',
+                item.message_ids.length > 0 ? `关联消息：${escapeA2TDHtml(item.message_ids.length)}` : '',
+                item.missing_message_ids.length > 0 ? `缺失消息：${missingPreview}${item.missing_message_ids.length > 5 ? ' ...' : ''}` : ''
+            ]);
+        entry.innerHTML = `<span class="log-icon" style="color:#f87171;"><i class="ph ph-trash"></i></span><span class="log-text"><span class="error">${text}</span></span><span class="log-time">${escapeA2TDHtml(formatProgressLogTime(item.occurred_at || item.created_at))}</span>`;
+        container.appendChild(entry);
+    });
+    container.scrollTop = 0;
+}
+
+async function loadT2TDDeletedFiles(force = false) {
+    if (t2tdDeletedFilesRefreshPending) return;
+    if (t2tdDeletedFilesLoaded && !force) {
+        if (t2tdPanelMode === 'deleted') renderT2TDDeletedFiles();
+        return;
+    }
+
+    try {
+        t2tdDeletedFilesRefreshPending = true;
+        if (t2tdPanelMode === 'deleted') setT2TDPlaceholder('正在加载删除记录...', 'ph-spinner-gap');
+        const resp = await fetch('/api/t2td/deleted-files');
+        const data = await readJsonSafe(resp);
+        if (!resp.ok) throw new Error(data.detail || data.message || '读取删除记录失败');
+        t2tdDeletedFiles = Array.isArray(data.items) ? data.items.map(normalizeT2TDDeletedFile) : [];
+        t2tdDeletedFilesLoaded = true;
+        if (t2tdPanelMode === 'deleted') renderT2TDDeletedFiles();
+    } catch (e) {
+        if (t2tdPanelMode === 'deleted') setT2TDPlaceholder(e.message || '读取删除记录失败', 'ph-warning');
+    } finally {
+        t2tdDeletedFilesRefreshPending = false;
+    }
+}
+
+async function toggleT2TDPanelMode(forceRefresh = true) {
+    t2tdPanelMode = t2tdPanelMode === 'deleted' ? 'logs' : 'deleted';
+    syncT2TDPanelToggleButton();
+    if (t2tdPanelMode === 'deleted') {
+        await loadT2TDDeletedFiles(forceRefresh);
+        return;
+    }
+    renderT2TDLogs();
+}
+
+function isT2TDAutoDeleteLog(log) {
+    const payload = log?.payload || log || {};
+    const message = String(payload.message || '').trim();
+    return message.includes('TelDrive 文件自动删除');
+}
+
 async function loadT2TDState() {
+    syncT2TDPanelToggleButton();
     try {
         const res = await fetch('/api/t2td/bootstrap');
         const d = await res.json();
-        updateT2TDState(d.state);
-        const container = document.getElementById('t2tdLogContainer');
-        if (container && d.logs) {
-            container.innerHTML = '';
-            d.logs.forEach(l => appendT2TDLog(l));
+        updateT2TDState(d.state || {});
+        t2tdRuntimeLogs = Array.isArray(d.logs) ? d.logs.slice(-T2TD_RUNTIME_LOG_LIMIT) : [];
+        if (t2tdPanelMode === 'deleted') {
+            await loadT2TDDeletedFiles(true);
+        } else {
+            renderT2TDLogs();
         }
     } catch(e) {}
 }
@@ -2625,26 +2759,32 @@ function updateT2TDState(state) {
 }
 
 
-function appendT2TDLog(log) {
+function appendT2TDLog(log, options = {}) {
+    const { skipStore = false } = options;
+    if (!skipStore) {
+        t2tdRuntimeLogs.push(log);
+        if (t2tdRuntimeLogs.length > T2TD_RUNTIME_LOG_LIMIT) {
+            t2tdRuntimeLogs = t2tdRuntimeLogs.slice(-T2TD_RUNTIME_LOG_LIMIT);
+        }
+    }
+    if (t2tdPanelMode !== 'logs') return;
+
     const container = document.getElementById('t2tdLogContainer');
     if (!container) return;
     const empty = document.getElementById('t2tdLogEmpty');
     if (empty) empty.remove();
-    
-    // Normalize log fields (handle both direct object and payload wrapper)
+
     const logData = log.payload || log;
-    
     const entry = document.createElement('div');
     entry.className = 'log-entry';
     let c = '#fff';
     if(logData.level === 'ERROR') c = '#f87171';
     else if(logData.level === 'WARN' || logData.level === 'WARNING') c = '#f59e0b';
-    
-    // Extract time from timestamp
+
     let t = logData.time || logData.timestamp || '(none)';
     if (t && t.includes('T')) {
         t = t.split('T')[1].split('.')[0] || t;
-        t = t.replace('Z', '').replace(/[+-]\d+:\d+$/, ''); // Strip extra timezone fragments visually
+        t = t.replace('Z', '').replace(/[+-]\d+:\d+$/, '');
     }
 
     entry.innerHTML = `<span style="color:${c}">[${t}] [${logData.level || 'INFO'}] ${logData.message || ''}</span>`;
