@@ -262,12 +262,19 @@ async def get_progress_logs(stream: str | None = None, limit: int | None = None)
         return [item for item in (_deserialize_progress_log(dict(row)) for row in rows) if item]
 
 
-async def clear_progress_logs(stream: str | None = None) -> int:
+async def clear_progress_logs(stream: str | None = None, message_type: str | None = None) -> int:
     conn = await _get_conn()
+    params: list[Any] = []
+    where_parts: list[str] = []
     if stream:
-        cursor = await conn.execute("DELETE FROM progress_logs WHERE stream = ?", (stream,))
-    else:
-        cursor = await conn.execute("DELETE FROM progress_logs")
+        where_parts.append("stream = ?")
+        params.append(stream)
+    if message_type:
+        where_parts.append("message_type = ?")
+        params.append(message_type)
+
+    where_sql = f" WHERE {' AND '.join(where_parts)}" if where_parts else ""
+    cursor = await conn.execute(f"DELETE FROM progress_logs{where_sql}", tuple(params))
     await conn.commit()
     return cursor.rowcount or 0
 

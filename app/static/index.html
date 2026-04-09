@@ -302,6 +302,33 @@
         .log-meta-item { display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px; border-radius: 999px; background: rgba(148, 163, 184, 0.14); color: #cbd5e1; font-size: 11px; max-width: 100%; }
         .log-time { flex-shrink: 0; font-size: 11px; color: #64748b; margin-top: 2px; }
 
+        .folder-tree-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 16px; flex-wrap: wrap; }
+        .folder-tree-summary { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+        .folder-tree-chip { display: inline-flex; align-items: center; gap: 6px; padding: 6px 10px; border-radius: 999px; font-size: 12px; font-weight: 600; border: 1px solid transparent; }
+        .folder-tree-chip.neutral { background: rgba(148, 163, 184, 0.14); color: #475569; border-color: rgba(148, 163, 184, 0.2); }
+        .folder-tree-chip.error { background: rgba(239, 68, 68, 0.12); color: #b91c1c; border-color: rgba(239, 68, 68, 0.22); }
+        .folder-tree-chip.warning { background: rgba(245, 158, 11, 0.14); color: #b45309; border-color: rgba(245, 158, 11, 0.22); }
+        .folder-tree-chip.success { background: rgba(16, 185, 129, 0.14); color: #047857; border-color: rgba(16, 185, 129, 0.22); }
+        .folder-tree-panel { flex: 1; min-height: 0; overflow: auto; border: 1px solid var(--border); border-radius: var(--radius-md); background: linear-gradient(180deg, rgba(248,250,252,0.92), rgba(255,255,255,0.98)); padding: 12px 16px 18px; }
+        .folder-tree-node { --folder-depth: 0; }
+        .folder-tree-row { display: flex; align-items: center; gap: 10px; padding: 10px 12px 10px calc(12px + var(--folder-depth) * 18px); border-radius: 12px; transition: background 0.2s ease, transform 0.2s ease; }
+        .folder-tree-row:hover { background: rgba(241, 245, 249, 0.9); }
+        .folder-tree-toggle { width: 26px; height: 26px; border: none; border-radius: 999px; background: rgba(59, 130, 246, 0.1); color: var(--accent); display: inline-flex; align-items: center; justify-content: center; cursor: pointer; flex-shrink: 0; }
+        .folder-tree-toggle.is-leaf { background: transparent; color: var(--text-dim); cursor: default; }
+        .folder-tree-toggle i { transition: transform 0.2s ease; }
+        .folder-tree-node.is-collapsed > .folder-tree-row .folder-tree-toggle:not(.is-leaf) i { transform: rotate(-90deg); }
+        .folder-tree-children { display: flex; flex-direction: column; gap: 2px; margin-top: 2px; }
+        .folder-tree-node.is-collapsed > .folder-tree-children { display: none; }
+        .folder-tree-label { display: flex; align-items: center; gap: 10px; min-width: 0; flex: 1; }
+        .folder-tree-name { font-size: 14px; font-weight: 600; color: var(--text-primary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        .folder-tree-path { font-size: 12px; color: var(--text-secondary); font-family: 'Cascadia Code', monospace; }
+        .folder-tree-meta { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
+        .folder-tree-badge { display: inline-flex; align-items: center; gap: 6px; padding: 5px 10px; border-radius: 999px; font-size: 11px; font-weight: 700; }
+        .folder-tree-badge.error { background: rgba(239, 68, 68, 0.12); color: #b91c1c; }
+        .folder-tree-badge.warning { background: rgba(245, 158, 11, 0.14); color: #b45309; }
+        .folder-tree-badge.success { background: rgba(16, 185, 129, 0.14); color: #047857; }
+        .folder-tree-count { font-size: 12px; color: var(--text-secondary); }
+
 
         /* ── Tasks & Buttons ── */
         .btn { transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1); }
@@ -1130,15 +1157,43 @@
                     </div>
                 </div>
 
+                <!-- TelDrive Folder Tree -->
+                <div class="page page-fill" id="page-teldrivefolders">
+                    <div class="card page-fill-card">
+                        <div class="card-header" style="flex-wrap: wrap; gap: 12px; align-items: center;">
+                            <h3><i class="ph ph-folder-open"></i> TelDrive 文件夹检测</h3>
+                            <button class="btn btn-ghost btn-sm" id="teldriveFolderRefreshBtn" onclick="loadTelDriveFolderTree(true)"><i class="ph ph-arrows-clockwise"></i> 重新扫描</button>
+                        </div>
+                        <div class="card-body" style="padding: 18px 20px 20px; min-height: 0; display: flex; flex-direction: column;">
+                            <div class="folder-tree-toolbar">
+                                <div class="folder-tree-summary" id="teldriveFolderSummary">
+                                    <span class="folder-tree-chip neutral"><i class="ph ph-spinner-gap"></i> 等待扫描</span>
+                                </div>
+                                <div class="folder-tree-summary">
+                                    <span class="folder-tree-chip error"><i class="ph ph-folder-open"></i> 红色：空文件夹</span>
+                                    <span class="folder-tree-chip warning"><i class="ph ph-folder-open"></i> 黄色：存在空目录</span>
+                                    <span class="folder-tree-chip success"><i class="ph ph-folder-open"></i> 绿色：目录内容完整</span>
+                                </div>
+                            </div>
+                            <div class="folder-tree-panel" id="teldriveFolderTreeContainer">
+                                <div class="log-empty" id="teldriveFolderTreeEmpty"><i class="ph ph-folder-open"></i> 等待开始扫描 TelDrive 文件夹结构</div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
                 <!-- Tel2TelDrive -->
-                <div class="page" id="page-tel2teldrive">
-                    <div class="card">
+                <div class="page page-fill" id="page-tel2teldrive">
+                    <div class="card page-fill-card">
                         <div class="card-header" style="flex-wrap: wrap; gap: 12px; align-items: center;">
                             <h3><i class="ph ph-telegram-logo"></i> Telegram 监听中转服务</h3>
-                            <button class="btn btn-ghost btn-sm" id="t2tdViewToggleBtn" onclick="toggleT2TDPanelMode()"><i class="ph ph-files"></i> 查看被删除文件</button>
+                            <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap; margin-left:auto;">
+                                <button class="btn btn-ghost btn-sm" id="t2tdClearDeletedBtn" onclick="clearT2TDDeletedFilesLogs()" style="display:none;"><i class="ph ph-trash"></i> 清空删除日志</button>
+                                <button class="btn btn-ghost btn-sm" id="t2tdViewToggleBtn" onclick="toggleT2TDPanelMode()"><i class="ph ph-files"></i> 查看被删除文件</button>
+                            </div>
                         </div>
-                        <div class="card-body">
-                            <div id="t2tdQrArea" style="text-align:center; padding: 20px 0;">
+                        <div class="card-body" style="padding: 18px 20px 20px; min-height: 0; display: flex; flex-direction: column;">
+                            <div id="t2tdQrArea" style="text-align:center; padding: 20px 0; flex-shrink:0;">
                                 <p style="margin-bottom: 20px; color: var(--text-secondary);">服务尚未登录或二维码获取中...</p>
                                 <img id="t2tdQrImg" src="" onclick="refreshT2TDQr(true)" title="点击二维码刷新" style="display:none; margin:0 auto; border-radius:12px; border:2px solid var(--border); cursor:pointer;" width="250">
                                 <div id="t2tdQrHint" style="display:none; margin-top: 12px; font-size: 13px; color: var(--text-secondary);">点击二维码可主动刷新</div>
@@ -1152,7 +1207,7 @@
                                 </form>
                             </div>
                             
-                            <div class="log-container" id="t2tdLogContainer" style="height: 60vh; max-height: 70vh; margin-top:20px;">
+                            <div class="log-container log-container-expanded" id="t2tdLogContainer" style="margin-top:20px; flex:1; min-height:0; height:auto; max-height:none;">
                                 <div class="log-empty" id="t2tdLogEmpty"><i class="ph ph-ghost"></i> 等待系统服务启动</div>
                             </div>
                         </div>

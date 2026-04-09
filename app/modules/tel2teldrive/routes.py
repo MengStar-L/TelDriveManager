@@ -2,8 +2,11 @@
 
 import asyncio
 import json
-from fastapi import APIRouter, HTTPException, Request, WebSocket, WebSocketDisconnect
-from fastapi.responses import JSONResponse, StreamingResponse
+from datetime import datetime
+from typing import Any
+
+from fastapi import APIRouter, HTTPException, Request
+from fastapi.responses import StreamingResponse
 
 router = APIRouter(prefix="/api/t2td")
 
@@ -23,6 +26,94 @@ def _get_deps():
         _config_store = config_store
         _logger = logger
     return _service, _broker, _config_store, _logger
+
+
+def _join_teldrive_path(parent_path: str, name: str) -> str:
+    normalized_name = str(name or "").strip().strip("/")
+    if not normalized_name:
+        return str(parent_path or "/")
+    parent = str(parent_path or "/").strip() or "/"
+    if parent in {"", "/"}:
+        return f"/{normalized_name}"
+    return f"{parent.rstrip('/')}/{normalized_name}"
+
+
+def _build_folder_tree_node(config: Any, path: str, name: str, *, is_root: bool = False) -> dict[str, Any]:
+    from app.modules.tel2teldrive.service import list_teldrive_dir
+
+    items = list_teldrive_dir(config, path)
+    direct_file_count = 0
+    children: list[dict[str, Any]] = []
+
+    for item in items:
+        item_type = str(item.get("type") or "").strip().lower()
+        if item_type == "folder":
+            child_name = str(item.get("name") or "未命名文件夹").strip() or "未命名文件夹"
+            child_path = _join_teldrive_path(path, child_name)
+            child_node = _build_folder_tree_node(config, child_path, child_name)
+            child_node["id"] = str(item.get("id") or child_path)
+            children.append(child_node)
+        else:
+            direct_file_count += 1
+
+    children.sort(key=lambda item: str(item.get("name") or "").lower())
+    total_file_count = direct_file_count + sum(int(child.get("total_file_count") or 0) for child in children)
+    descendant_folder_count = len(children) + sum(int(child.get("descendant_folder_count") or 0) for child in children)
+    has_content = total_file_count > 0
+    all_descendants_have_content = has_content and all(bool(child.get("all_descendants_have_content")) for child in children)
+
+    if not has_content:
+        status = "empty"
+        status_label = "空文件夹"
+    elif all_descendants_have_content:
+        status = "healthy"
+        status_label = "内容完整"
+    else:
+        status = "partial"
+        status_label = "存在空目录"
+
+    return {
+        "id": path if is_root else path,
+        "name": name,
+        "path": path,
+        "status": status,
+        "status_label": status_label,
+        "is_root": is_root,
+        "direct_file_count": direct_file_count,
+        "total_file_count": total_file_count,
+        "descendant_folder_count": descendant_folder_count,
+        "has_content": has_content,
+        "all_descendants_have_content": all_descendants_have_content,
+        "children": children,
+    }
+
+
+def _summarize_folder_tree(root: dict[str, Any]) -> dict[str, int]:
+    summary = {"folder_count": 0, "empty_count": 0, "partial_count": 0, "healthy_count": 0, "file_count": 0}
+    stack = [root]
+    while stack:
+        node = stack.pop()
+        if not node.get("is_root"):
+            summary["folder_count"] += 1
+            status = str(node.get("status") or "").strip().lower()
+            if status == "empty":
+                summary["empty_count"] += 1
+            elif status == "partial":
+                summary["partial_count"] += 1
+            elif status == "healthy":
+                summary["healthy_count"] += 1
+        summary["file_count"] += int(node.get("direct_file_count") or 0)
+        stack.extend(reversed(node.get("children") or []))
+    return summary
+
+
+def _build_folder_tree_snapshot(config: Any) -> dict[str, Any]:
+    root = _build_folder_tree_node(config, "/", "根目录 /", is_root=True)
+    return {
+        "root": root,
+        "summary": _summarize_folder_tree(root),
+        "scanned_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+    }
 
 
 @router.get("/bootstrap")
@@ -111,9 +202,9 @@ async def get_deleted_files(limit: int = 200):
     config = config_store.runtime()
     max_limit = get_t2td_action_log_limit(config)
     normalized_limit = max(1, min(int(limit or 200), max_limit))
-    logs = await db.get_progress_logs(stream=T2TD_ACTION_LOG_STREAM, limit=normalized_limit)
+    logs = await db.get_progress_logs(stream=T2TD_ACTION_LOG_STREAM, limit=max_limit)
 
-    items: list[dict] = []
+    items: list[dict[str, Any]] = []
     for log in logs:
         if str(log.get("message_type") or "").strip() != "auto_delete":
             continue
@@ -134,7 +225,32 @@ async def get_deleted_files(limit: int = 200):
             }
         )
 
+    items = items[-normalized_limit:]
     return {"items": items, "count": len(items)}
+
+
+@router.delete("/deleted-files")
+async def clear_deleted_files():
+    from app import database as db
+    from app.modules.tel2teldrive.service import T2TD_ACTION_LOG_STREAM
+
+    cleared = await db.clear_progress_logs(stream=T2TD_ACTION_LOG_STREAM, message_type="auto_delete")
+    return {"success": True, "count": cleared}
+
+
+@router.get("/folder-tree")
+async def get_folder_tree():
+    _, _, config_store, _ = _get_deps()
+    config = config_store.runtime()
+
+    if not config.teldrive_url or not config.bearer_token:
+        raise HTTPException(status_code=400, detail="TelDrive 配置不完整，无法扫描文件夹")
+
+    try:
+        snapshot = await asyncio.to_thread(_build_folder_tree_snapshot, config)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"读取 TelDrive 文件夹失败：{exc}")
+    return snapshot
 
 
 @router.get("/stream")

@@ -770,6 +770,7 @@ let lastPageSwitchName = '';
 function runPageSideEffects(name) {
     if (name === 'aria2teldrive') loadA2TDTasks();
     if (name === 'tel2teldrive') loadT2TDState();
+    if (name === 'teldrivefolders') loadTelDriveFolderTree();
     if (name === 'settings') loadConfig();
     if (name === 'progress') loadParseWorkspaceSnapshot();
 }
@@ -2514,6 +2515,9 @@ let t2tdDeletedFilesLoaded = false;
 let t2tdDeletedFilesRefreshPending = false;
 const T2TD_RUNTIME_LOG_LIMIT = 400;
 
+let teldriveFolderTreeSnapshot = null;
+let teldriveFolderTreeLoading = false;
+
 function formatT2TDExpireAt(expiresAt) {
     if (!expiresAt) return '';
     const date = new Date(expiresAt);
@@ -2529,13 +2533,16 @@ function setT2TDPlaceholder(message, icon = 'ph-ghost') {
 
 function syncT2TDPanelToggleButton() {
     const button = document.getElementById('t2tdViewToggleBtn');
+    const clearButton = document.getElementById('t2tdClearDeletedBtn');
     if (!button) return;
     if (t2tdPanelMode === 'deleted') {
         button.innerHTML = '<i class="ph ph-terminal-window"></i> 返回运行日志';
         button.setAttribute('aria-pressed', 'true');
+        if (clearButton) clearButton.style.display = 'inline-flex';
     } else {
         button.innerHTML = '<i class="ph ph-files"></i> 查看被删除文件';
         button.setAttribute('aria-pressed', 'false');
+        if (clearButton) clearButton.style.display = 'none';
     }
 }
 
@@ -2603,6 +2610,34 @@ function renderT2TDDeletedFiles(items = t2tdDeletedFiles) {
         container.appendChild(entry);
     });
     container.scrollTop = 0;
+}
+
+async function clearT2TDDeletedFilesLogs() {
+    if (!confirm('确认清空当前所有删除日志吗？此操作不会删除 TelDrive 中的文件。')) return;
+    const clearButton = document.getElementById('t2tdClearDeletedBtn');
+    const originalText = clearButton ? clearButton.innerHTML : '';
+    try {
+        if (clearButton) {
+            clearButton.disabled = true;
+            clearButton.innerHTML = '<i class="ph ph-spinner-gap"></i> 清空中...';
+        }
+        const resp = await fetch('/api/t2td/deleted-files', { method: 'DELETE' });
+        const data = await readJsonSafe(resp);
+        if (!resp.ok || data.success === false) throw new Error(data.detail || data.message || '清空删除日志失败');
+        t2tdDeletedFiles = [];
+        t2tdDeletedFilesLoaded = true;
+        if (t2tdPanelMode === 'deleted') renderT2TDDeletedFiles();
+        if (typeof showA2TDToast === 'function') {
+            showA2TDToast(`已清空 ${data.count || 0} 条删除日志`, 'success');
+        }
+    } catch (e) {
+        alert(e.message || '清空删除日志失败');
+    } finally {
+        if (clearButton) {
+            clearButton.disabled = false;
+            clearButton.innerHTML = originalText || '<i class="ph ph-trash"></i> 清空删除日志';
+        }
+    }
 }
 
 async function loadT2TDDeletedFiles(force = false) {
@@ -2758,7 +2793,6 @@ function updateT2TDState(state) {
     }
 }
 
-
 function appendT2TDLog(log, options = {}) {
     const { skipStore = false } = options;
     if (!skipStore) {
@@ -2790,6 +2824,129 @@ function appendT2TDLog(log, options = {}) {
     entry.innerHTML = `<span style="color:${c}">[${t}] [${logData.level || 'INFO'}] ${logData.message || ''}</span>`;
     container.appendChild(entry);
     container.scrollTop = container.scrollHeight;
+}
+
+function setTelDriveFolderTreePlaceholder(message, icon = 'ph-folder-open') {
+    const container = document.getElementById('teldriveFolderTreeContainer');
+    if (!container) return;
+    container.innerHTML = `<div class="log-empty" id="teldriveFolderTreeEmpty"><i class="ph ${icon}"></i> ${escapeA2TDHtml(message)}</div>`;
+}
+
+function renderTelDriveFolderSummary(summary = {}, scannedAt = null) {
+    const summaryEl = document.getElementById('teldriveFolderSummary');
+    if (!summaryEl) return;
+    summaryEl.innerHTML = [
+        `<span class="folder-tree-chip neutral"><i class="ph ph-folder-notch-open"></i> 文件夹 ${escapeA2TDHtml(summary.folder_count || 0)}</span>`,
+        `<span class="folder-tree-chip neutral"><i class="ph ph-file"></i> 文件 ${escapeA2TDHtml(summary.file_count || 0)}</span>`,
+        `<span class="folder-tree-chip error"><i class="ph ph-warning-octagon"></i> 空文件夹 ${escapeA2TDHtml(summary.empty_count || 0)}</span>`,
+        `<span class="folder-tree-chip warning"><i class="ph ph-warning-circle"></i> 混合目录 ${escapeA2TDHtml(summary.partial_count || 0)}</span>`,
+        `<span class="folder-tree-chip success"><i class="ph ph-check-circle"></i> 完整目录 ${escapeA2TDHtml(summary.healthy_count || 0)}</span>`,
+        scannedAt ? `<span class="folder-tree-chip neutral"><i class="ph ph-clock"></i> ${escapeA2TDHtml(formatProgressLogTime(scannedAt))}</span>` : ''
+    ].join('');
+}
+
+function getTelDriveFolderStatusTone(status) {
+    if (status === 'empty') return 'error';
+    if (status === 'partial') return 'warning';
+    return 'success';
+}
+
+function getTelDriveFolderStatusLabel(status) {
+    if (status === 'empty') return '空文件夹';
+    if (status === 'partial') return '存在空目录';
+    return '内容完整';
+}
+
+function makeTelDriveFolderNodeId(path) {
+    try {
+        return 'teldrive-folder-' + btoa(unescape(encodeURIComponent(String(path || '/')))).replace(/=+/g, '').replace(/\+/g, '-').replace(/\//g, '_');
+    } catch (e) {
+        return 'teldrive-folder-' + String(path || '/').replace(/[^a-zA-Z0-9_-]+/g, '_');
+    }
+}
+
+function buildTelDriveFolderTreeNode(node, depth = 0) {
+    const children = Array.isArray(node?.children) ? node.children : [];
+    const hasChildren = children.length > 0;
+    const collapsed = hasChildren && depth >= 2;
+    const nodeId = makeTelDriveFolderNodeId(node.path || node.name || String(depth));
+    const tone = getTelDriveFolderStatusTone(node.status);
+    const statusLabel = getTelDriveFolderStatusLabel(node.status);
+    const iconColor = tone === 'error' ? '#ef4444' : (tone === 'warning' ? '#f59e0b' : '#10b981');
+    const childrenHtml = hasChildren ? children.map(child => buildTelDriveFolderTreeNode(child, depth + 1)).join('') : '';
+    return `<div class="folder-tree-node ${collapsed ? 'is-collapsed' : ''}" id="${escapeA2TDHtml(nodeId)}" style="--folder-depth:${escapeA2TDHtml(depth)};">
+        <div class="folder-tree-row">
+            <button class="folder-tree-toggle ${hasChildren ? '' : 'is-leaf'}" type="button" onclick="toggleTelDriveFolderNode(this)">${hasChildren ? '<i class="ph ph-caret-down"></i>' : '<i class="ph ph-dot-outline"></i>'}</button>
+            <div class="folder-tree-label">
+                <i class="ph ph-folder-open" style="color:${iconColor};"></i>
+                <div style="min-width:0;">
+                    <div class="folder-tree-name">${escapeA2TDHtml(node.name || '未命名文件夹')}</div>
+                    <div class="folder-tree-path">${escapeA2TDHtml(node.path || '/')}</div>
+                </div>
+            </div>
+            <div class="folder-tree-meta">
+                <span class="folder-tree-count">直接文件 ${escapeA2TDHtml(node.direct_file_count || 0)}</span>
+                <span class="folder-tree-count">累计文件 ${escapeA2TDHtml(node.total_file_count || 0)}</span>
+                <span class="folder-tree-count">子目录 ${escapeA2TDHtml(node.descendant_folder_count || 0)}</span>
+                <span class="folder-tree-badge ${tone}">${escapeA2TDHtml(statusLabel)}</span>
+            </div>
+        </div>
+        ${hasChildren ? `<div class="folder-tree-children">${childrenHtml}</div>` : ''}
+    </div>`;
+}
+
+function toggleTelDriveFolderNode(trigger) {
+    const node = trigger?.closest('.folder-tree-node');
+    if (!node) return;
+    const children = node.querySelector(':scope > .folder-tree-children');
+    if (!children) return;
+    node.classList.toggle('is-collapsed');
+}
+
+function renderTelDriveFolderTree(snapshot) {
+    const container = document.getElementById('teldriveFolderTreeContainer');
+    if (!container) return;
+    const root = snapshot?.root;
+    renderTelDriveFolderSummary(snapshot?.summary || {}, snapshot?.scanned_at || null);
+    if (!root) {
+        setTelDriveFolderTreePlaceholder('未获取到 TelDrive 文件夹数据', 'ph-warning');
+        return;
+    }
+    container.innerHTML = buildTelDriveFolderTreeNode(root, 0);
+}
+
+async function loadTelDriveFolderTree(force = false) {
+    if (teldriveFolderTreeLoading) return;
+    if (teldriveFolderTreeSnapshot && !force) {
+        renderTelDriveFolderTree(teldriveFolderTreeSnapshot);
+        return;
+    }
+
+    const refreshBtn = document.getElementById('teldriveFolderRefreshBtn');
+    const originalText = refreshBtn ? refreshBtn.innerHTML : '';
+    try {
+        teldriveFolderTreeLoading = true;
+        if (refreshBtn) {
+            refreshBtn.disabled = true;
+            refreshBtn.innerHTML = '<i class="ph ph-spinner-gap"></i> 扫描中...';
+        }
+        renderTelDriveFolderSummary({}, null);
+        setTelDriveFolderTreePlaceholder('正在扫描 TelDrive 文件夹结构，请稍候...', 'ph-spinner-gap');
+        const resp = await fetch('/api/t2td/folder-tree');
+        const data = await readJsonSafe(resp);
+        if (!resp.ok) throw new Error(data.detail || data.message || '读取 TelDrive 文件夹失败');
+        teldriveFolderTreeSnapshot = data;
+        renderTelDriveFolderTree(data);
+    } catch (e) {
+        renderTelDriveFolderSummary({}, null);
+        setTelDriveFolderTreePlaceholder(e.message || '读取 TelDrive 文件夹失败', 'ph-warning');
+    } finally {
+        teldriveFolderTreeLoading = false;
+        if (refreshBtn) {
+            refreshBtn.disabled = false;
+            refreshBtn.innerHTML = originalText || '<i class="ph ph-arrows-clockwise"></i> 重新扫描';
+        }
+    }
 }
 // ==========================================
 
