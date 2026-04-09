@@ -2519,6 +2519,7 @@ let teldriveFolderTreeSnapshot = null;
 let teldriveFolderTreeLoading = false;
 const TELDRIVE_FOLDER_TOGGLE_MS = 280;
 const teldriveFolderAnimationTimers = new WeakMap();
+let teldriveFolderResizeObserver = null;
 
 function formatT2TDExpireAt(expiresAt) {
     if (!expiresAt) return '';
@@ -2896,17 +2897,39 @@ function getTelDriveFolderNodeChildren(node) {
     return Array.from(node?.children || []).find(child => child.classList?.contains('folder-tree-children')) || null;
 }
 
+function setTelDriveFolderChildrenExpandedStyle(children, expanded) {
+    children.style.maxHeight = expanded ? `${children.scrollHeight}px` : '0px';
+    children.style.opacity = expanded ? '1' : '0';
+    children.style.transform = expanded ? 'translateY(0)' : 'translateY(-6px)';
+}
+
 function refreshTelDriveFolderAncestorHeights(startNode) {
     let current = startNode;
     while (current?.classList?.contains('folder-tree-node')) {
         const children = getTelDriveFolderNodeChildren(current);
         if (children && !current.classList.contains('is-collapsed')) {
-            children.style.maxHeight = `${children.scrollHeight}px`;
-            children.style.opacity = '1';
-            children.style.transform = 'translateY(0)';
+            setTelDriveFolderChildrenExpandedStyle(children, true);
         }
         current = current.parentElement?.closest('.folder-tree-node') || null;
     }
+}
+
+function ensureTelDriveFolderResizeObserver() {
+    if (typeof ResizeObserver === 'undefined') return null;
+    if (teldriveFolderResizeObserver) {
+        teldriveFolderResizeObserver.disconnect();
+    }
+    teldriveFolderResizeObserver = new ResizeObserver(entries => {
+        entries.forEach(entry => {
+            const children = entry.target;
+            const node = children?.parentElement;
+            if (!node?.classList?.contains('folder-tree-node')) return;
+            if (node.classList.contains('is-collapsed')) return;
+            setTelDriveFolderChildrenExpandedStyle(children, true);
+            refreshTelDriveFolderAncestorHeights(node.parentElement?.closest('.folder-tree-node') || null);
+        });
+    });
+    return teldriveFolderResizeObserver;
 }
 
 function syncTelDriveFolderNodeState(node, animate = false) {
@@ -2924,40 +2947,28 @@ function syncTelDriveFolderNodeState(node, animate = false) {
     }
 
     if (!animate) {
-        children.style.maxHeight = collapsed ? '0px' : `${children.scrollHeight}px`;
-        children.style.opacity = collapsed ? '0' : '1';
-        children.style.transform = collapsed ? 'translateY(-6px)' : 'translateY(0)';
+        setTelDriveFolderChildrenExpandedStyle(children, !collapsed);
         refreshTelDriveFolderAncestorHeights(node.parentElement?.closest('.folder-tree-node') || null);
         return;
     }
 
     if (collapsed) {
-        children.style.maxHeight = `${children.scrollHeight}px`;
-        children.style.opacity = '1';
-        children.style.transform = 'translateY(0)';
+        setTelDriveFolderChildrenExpandedStyle(children, true);
         requestAnimationFrame(() => {
-            children.style.maxHeight = '0px';
-            children.style.opacity = '0';
-            children.style.transform = 'translateY(-6px)';
+            setTelDriveFolderChildrenExpandedStyle(children, false);
             refreshTelDriveFolderAncestorHeights(node.parentElement?.closest('.folder-tree-node') || null);
         });
     } else {
-        children.style.maxHeight = '0px';
-        children.style.opacity = '0';
-        children.style.transform = 'translateY(-6px)';
+        setTelDriveFolderChildrenExpandedStyle(children, false);
         requestAnimationFrame(() => {
-            children.style.maxHeight = `${children.scrollHeight}px`;
-            children.style.opacity = '1';
-            children.style.transform = 'translateY(0)';
+            setTelDriveFolderChildrenExpandedStyle(children, true);
             refreshTelDriveFolderAncestorHeights(node);
         });
     }
 
     const timer = window.setTimeout(() => {
         if (!node.classList.contains('is-collapsed')) {
-            children.style.maxHeight = `${children.scrollHeight}px`;
-            children.style.opacity = '1';
-            children.style.transform = 'translateY(0)';
+            setTelDriveFolderChildrenExpandedStyle(children, true);
         }
         refreshTelDriveFolderAncestorHeights(node.parentElement?.closest('.folder-tree-node') || null);
         teldriveFolderAnimationTimers.delete(children);
@@ -2966,7 +2977,12 @@ function syncTelDriveFolderNodeState(node, animate = false) {
 }
 
 function initializeTelDriveFolderTreeState(container) {
-    container?.querySelectorAll('.folder-tree-node').forEach(node => syncTelDriveFolderNodeState(node, false));
+    const observer = ensureTelDriveFolderResizeObserver();
+    container?.querySelectorAll('.folder-tree-node').forEach(node => {
+        syncTelDriveFolderNodeState(node, false);
+        const children = getTelDriveFolderNodeChildren(node);
+        if (observer && children) observer.observe(children);
+    });
 }
 
 function buildTelDriveFolderTreeNode(node, depth = 0) {
