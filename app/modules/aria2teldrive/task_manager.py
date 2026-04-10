@@ -361,7 +361,13 @@ class TaskManager:
         runtime_fields = self._runtime_task_state.get(str(merged.get("task_id") or ""))
         if runtime_fields:
             merged.update(runtime_fields)
+
+        if str(merged.get("status") or "") in ("completed", "cancelled"):
+            for key in ("upload_note", "upload_note_level", "upload_chunk_done", "upload_chunk_total"):
+                merged.pop(key, None)
+
         return merged
+
 
     def _count_file_chunks(self, file_size: int) -> int:
         if file_size <= 0:

@@ -1334,6 +1334,8 @@ function upsertA2TDTask(task, options = {}) {
         nextTask.eta_text = '';
         nextTask.connections = 0;
         nextTask.max_connections = 0;
+        delete nextTask.upload_note;
+        delete nextTask.upload_note_level;
     }
 
     const progressed = getA2TDNumber(nextTask.download_progress) > existingDownload || getA2TDNumber(nextTask.upload_progress) > existingUpload;
