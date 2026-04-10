@@ -135,7 +135,7 @@ async def pause_all_tasks():
     tasks = await task_manager.get_all_tasks()
     count = 0
     for t in tasks:
-        if t["status"] in ("downloading", "uploading"):
+        if t["status"] in ("downloading", "uploading", "pending"):
             result = await task_manager.pause_task(t["task_id"])
             if result["success"]:
                 count += 1

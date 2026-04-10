@@ -995,7 +995,7 @@ function handleWSMessage(msg) {
         return;
     }
     if (msg.type === "task_update") {
-        upsertA2TDTask(msg.data);
+        upsertA2TDTask(msg.data, { authoritative: true });
         return;
     }
     if (msg.type === "task_deleted") {
@@ -1241,6 +1241,20 @@ function setA2TDTaskFilter(filter) {
     renderA2TDTaskStore();
 }
 
+const A2TD_SERVER_VOLATILE_FIELDS = [
+    'upload_note',
+    'upload_note_level',
+    'upload_chunk_done',
+    'upload_chunk_total'
+];
+
+function clearA2TDAuthoritativeVolatileFields(targetTask, sourceTask = {}) {
+    if (!targetTask || !sourceTask || typeof sourceTask !== 'object') return;
+    A2TD_SERVER_VOLATILE_FIELDS.forEach(field => {
+        if (!(field in sourceTask)) delete targetTask[field];
+    });
+}
+
 function renderA2TDTaskStore() {
     queueA2TDTaskRender();
 }
@@ -1257,7 +1271,7 @@ function setA2TDTasks(tasks) {
             if (isA2TDTaskRemoved(taskId) || task.status === 'cancelled') return;
             const existing = previousStore.get(taskId) || {};
             const eventTs = parseA2TDTimestamp(task.updated_at || task.created_at) || getA2TDNumber(existing.last_event_at) || Date.now();
-            a2tdTaskStore.set(taskId, {
+            const nextTask = {
                 ...existing,
                 ...task,
                 task_id: taskId,
@@ -1265,14 +1279,16 @@ function setA2TDTasks(tasks) {
                 last_progress_change_at: getA2TDNumber(existing.last_progress_change_at) || eventTs,
                 sort_anchor_at: getA2TDTaskSortAnchor(existing, getA2TDTaskSortAnchor(task, eventTs)),
                 sort_serial: ensureA2TDTaskSortSerial(existing.sort_serial),
-            });
+            };
+            clearA2TDAuthoritativeVolatileFields(nextTask, task);
+            a2tdTaskStore.set(taskId, nextTask);
         });
     }
     renderA2TDTaskStore();
 }
 
 
-function upsertA2TDTask(task) {
+function upsertA2TDTask(task, options = {}) {
     if (!task) return;
     const taskId = normalizeA2TDTaskId(task.task_id, task.filename);
     if (task.status === 'cancelled') {
@@ -1291,6 +1307,9 @@ function upsertA2TDTask(task) {
         sort_anchor_at: getA2TDTaskSortAnchor(existing, getA2TDTaskSortAnchor(task, nowTs)),
         sort_serial: ensureA2TDTaskSortSerial(existing.sort_serial),
     };
+    if (options.authoritative) {
+        clearA2TDAuthoritativeVolatileFields(nextTask, task);
+    }
     const existingStatus = existing.status || '';
     const nextStatus = nextTask.status || '';
     const existingDownload = getA2TDNumber(existing.download_progress);
@@ -1954,7 +1973,10 @@ function getA2TDTaskActions(task) {
         `;
     }
     if (task.status === 'pending') {
-        return getA2TDActionButton(task.task_id, 'cancel', '取消', 'ph-x', 'danger');
+        return `
+            ${getA2TDActionButton(task.task_id, 'pause', '暂停', 'ph-pause', 'warning')}
+            ${getA2TDActionButton(task.task_id, 'cancel', '取消', 'ph-x', 'danger')}
+        `;
     }
     return getA2TDActionButton(task.task_id, 'delete', '删除记录', 'ph-trash', 'neutral');
 }

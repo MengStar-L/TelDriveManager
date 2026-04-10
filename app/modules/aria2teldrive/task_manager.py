@@ -1334,8 +1334,8 @@ class TaskManager:
             return {"success": False, "message": "任务不存在"}
 
         status = task.get("status")
-        if status not in ("downloading", "uploading"):
-            return {"success": False, "message": "只能暂停下载中或上传中的任务"}
+        if status not in ("downloading", "uploading", "pending"):
+            return {"success": False, "message": "只能暂停下载中、等待中或上传中的任务"}
 
         try:
             if status == "uploading":
