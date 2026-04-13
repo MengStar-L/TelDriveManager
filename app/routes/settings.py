@@ -46,6 +46,13 @@ async def update_settings(request_body: dict):
     await task_manager.reload_config()
     await pikpak_routes.reset_clients()
     await db.prune_progress_logs(current.get("log", {}).get("buffer_size", 400), stream="pikpak")
+    # 通知 tel2teldrive 服务重新加载配置
+    try:
+        from app.modules.tel2teldrive.service import config_store as t2td_config_store, service as t2td_service
+        t2td_config_store.reload()
+        await t2td_service.request_reload()
+    except Exception:
+        pass  # 模块未初始化时静默忽略
     return {"success": True, "message": "设置已保存"}
 
 
@@ -280,9 +287,12 @@ async def global_health_check():
             from app.modules.tel2teldrive.service import broker
 
             tg_state = broker.snapshot()
+            tg_phase = tg_state.get("phase", "")
+            # 这些阶段都属于正常运行范围，不应报错
+            healthy_phases = ("running", "initializing", "connecting", "reconnecting", "awaiting_qr", "awaiting_password")
             statuses["telegram"] = telegram_base_ready and bool(
                 tg_state.get("authorized")
-                or tg_state.get("phase") in ("awaiting_qr", "awaiting_password")
+                or tg_phase in healthy_phases
             )
         except Exception:
             statuses["telegram"] = telegram_base_ready

@@ -1193,7 +1193,8 @@ def sync_mapping_from_db(config: RuntimeConfig, mapping: dict[str, list[int]], f
     return updated
 
 
-async def get_existing_message_ids(client: TelegramClient, channel_id: int, message_ids: list[int]) -> set[int]:
+async def get_existing_message_ids(client: TelegramClient, channel_id: int, message_ids: list[int]) -> set[int] | None:
+    """查询 Telegram 消息是否存在。查询失败时返回 None（保守策略），调用方应跳过删除判断。"""
     existing_ids: set[int] = set()
     normalized_ids = normalize_message_ids(message_ids)
     if not normalized_ids:
@@ -1205,7 +1206,8 @@ async def get_existing_message_ids(client: TelegramClient, channel_id: int, mess
             messages = await client.get_messages(channel_id, ids=batch)
         except Exception as exc:
             logger.warning(f"批量查询 Telegram 消息状态失败: {exc}")
-            return existing_ids
+            # 查询异常时返回 None，表示无法确认消息状态，调用方应跳过删除
+            return None
         for message in messages or []:
             if message is None or message.__class__.__name__ == "MessageEmpty":
                 continue
@@ -1313,7 +1315,17 @@ async def build_initial_mapping(client: TelegramClient, config: RuntimeConfig):
         logger.warning(f"仍有 {missing_count} 个 TelDrive 文件未找到对应 Telegram 消息")
 
 
+# 安全阈值常量：当缺失比例超过此值且缺失数量超过 MISSING_SAFE_ABS_THRESHOLD 时，判定为查询异常
+MISSING_SAFE_RATIO = 0.5
+MISSING_SAFE_ABS_THRESHOLD = 10
+
+
 async def sync_deletions(client: TelegramClient, config: RuntimeConfig):
+    # 安全校验：channel_id 无效时不启动删除同步
+    if not config.telegram_channel_id:
+        logger.warning(f"Telegram 频道 ID 为空或为 0，删除同步已禁用（当前值: {config.telegram_channel_id!r}）")
+        return
+
     logger.info(f"删除同步已启动，轮询间隔 {config.sync_interval} 秒")
     prev_files = get_teldrive_files(config)
     prev_ids = set(prev_files.keys())
@@ -1327,18 +1339,32 @@ async def sync_deletions(client: TelegramClient, config: RuntimeConfig):
         tracked_message_ids = merge_message_ids(*mapping.values())
         if tracked_message_ids:
             existing_message_ids = await get_existing_message_ids(client, config.telegram_channel_id, tracked_message_ids)
-            missing_message_ids = [msg_id for msg_id in tracked_message_ids if msg_id not in existing_message_ids]
-            if missing_message_ids:
-                deleted_count = await delete_teldrive_files_for_missing_messages(
-                    config,
-                    missing_message_ids,
-                    td_files=curr_files,
-                    reason="telegram_part_deleted",
-                )
-                if deleted_count:
-                    logger.warning(f"检测到 Telegram 文件分块缺失，已自动删除 {deleted_count} 个 TelDrive 文件")
-                    curr_files = get_teldrive_files(config)
-                    mapping = load_mapping()
+            # 查询失败（返回 None）时跳过本轮删除判断，避免误删
+            if existing_message_ids is None:
+                logger.warning("Telegram 消息状态查询失败，本轮跳过删除同步")
+            else:
+                missing_message_ids = [msg_id for msg_id in tracked_message_ids if msg_id not in existing_message_ids]
+                if missing_message_ids:
+                    total = len(tracked_message_ids)
+                    missing_count = len(missing_message_ids)
+                    ratio = missing_count / total if total else 0
+                    # 安全阈值：缺失比例过高时极可能是查询异常，拒绝执行删除
+                    if ratio > MISSING_SAFE_RATIO and missing_count > MISSING_SAFE_ABS_THRESHOLD:
+                        logger.error(
+                            f"⚠️ 安全保护触发！缺失消息 {missing_count}/{total} ({ratio:.0%}) 超过安全阈值，"
+                            f"疑似频道 ID 错误或网络异常，已阻止本轮所有删除操作"
+                        )
+                    else:
+                        deleted_count = await delete_teldrive_files_for_missing_messages(
+                            config,
+                            missing_message_ids,
+                            td_files=curr_files,
+                            reason="telegram_part_deleted",
+                        )
+                        if deleted_count:
+                            logger.warning(f"检测到 Telegram 文件分块缺失，已自动删除 {deleted_count} 个 TelDrive 文件")
+                            curr_files = get_teldrive_files(config)
+                            mapping = load_mapping()
 
         curr_ids = set(curr_files.keys())
         curr_names = {info["name"] for info in curr_files.values() if isinstance(info, dict) and info.get("name")}
@@ -1521,7 +1547,10 @@ class Tel2TelDriveService:
                 self.register_handlers(self.client, config)
 
                 if config.sync_enabled:
-                    self.sync_task = asyncio.create_task(sync_deletions(self.client, config))
+                    if not config.telegram_channel_id:
+                        logger.warning(f"Telegram 频道 ID 无效 ({config.telegram_channel_id!r})，删除同步已跳过")
+                    else:
+                        self.sync_task = asyncio.create_task(sync_deletions(self.client, config))
                 else:
                     logger.info("删除同步已关闭 (sync_enabled = false)")
 
