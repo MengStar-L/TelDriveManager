@@ -82,6 +82,8 @@ class TaskManager:
             "configured_max_concurrent": self._get_user_max_concurrent_downloads(),
             "applied_max_concurrent": self._get_user_max_concurrent_downloads(),
         }
+        # 串行模式：被暂停的 aria2 GID 集合
+        self._serial_paused_gids: set = set()
 
 
 
