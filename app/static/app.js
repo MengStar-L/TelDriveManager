@@ -561,21 +561,23 @@ async function checkSetupRequired() {
         if (!needsSetup) {
             wiz.classList.remove('active', 'show');
             clearWizardAria2Poll();
-            return;
+            return false;
         }
 
         const pendingSteps = getWizardPendingSteps(data, window.healthDetails);
         if (!pendingSteps.length) {
             wiz.classList.remove('active', 'show');
             clearWizardAria2Poll();
-            return;
+            return false;
         }
 
         setWizardActiveSteps(pendingSteps);
         wiz.classList.add('show', 'active');
         setWizardStep(pendingSteps[0]);
+        return needsSetup;
     } catch (e) {
         console.error('Failed to check setup', e);
+        return false;
     }
 }
 
@@ -809,6 +811,8 @@ function switchPage(name, options = {}) {
         runPageSideEffects(name);
         return;
     }
+
+    localStorage.setItem('tdmLastPage', name);
 
     const pageContent = document.querySelector('.page-content');
     const animated = !!options.animated;
@@ -2489,7 +2493,7 @@ async function doAutoSave(triggerInput) {
             body: JSON.stringify(cfg)
         });
         if (resp.ok) {
-            mergeCurrentConfig(cfg);
+            window.currentConfig = { ...(window.currentConfig || {}), ...cfg };
             showFieldCheck(triggerInput);
         }
 
@@ -2535,7 +2539,15 @@ window.onload = async () => {
         return;
     }
 
-    checkSetupRequired();
+    const needsSetup = await checkSetupRequired();
+    if (needsSetup) {
+        // setup active, let it handle the screen
+    } else {
+        const lastPage = localStorage.getItem('tdmLastPage');
+        if (lastPage) {
+            switchPage(lastPage, { animated: false });
+        }
+    }
     connectWS();
     checkServicesStatus();
     setInterval(checkServicesStatus, 30000);
