@@ -2296,11 +2296,26 @@ async function clearCompletedTasks() {
 
 
 // ── Settings ──
-function toggleMonitorSerialMode(checked) {
-    const mainToggle = document.getElementById('cfgUploadSerialTransferMode');
-    if (mainToggle) {
-        mainToggle.checked = checked;
-        doAutoSave(mainToggle);
+async function toggleMonitorSerialMode(checked) {
+    // 只发送 serial_transfer_mode 的增量更新，不要用 collectSettingsConfig() 全量保存
+    // 因为在下载监控页面时设置表单元素尚未填充，全量保存会用空值覆盖所有配置
+    const patch = { upload: { serial_transfer_mode: !!checked } };
+    try {
+        const resp = await fetch('/api/settings', {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(patch)
+        });
+        if (resp.ok) {
+            if (window.currentConfig) {
+                window.currentConfig.upload = { ...(window.currentConfig.upload || {}), serial_transfer_mode: !!checked };
+            }
+            // 同步设置页面的开关（如果已加载）
+            const mainToggle = document.getElementById('cfgUploadSerialTransferMode');
+            if (mainToggle) mainToggle.checked = checked;
+        }
+    } catch (e) {
+        console.error('串行模式保存失败:', e);
     }
 }
 
