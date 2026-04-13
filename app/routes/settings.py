@@ -290,10 +290,14 @@ async def global_health_check():
             tg_phase = tg_state.get("phase", "")
             # 这些阶段都属于正常运行范围，不应报错
             healthy_phases = ("running", "initializing", "connecting", "reconnecting", "awaiting_qr", "awaiting_password")
-            statuses["telegram"] = telegram_base_ready and bool(
-                tg_state.get("authorized")
-                or tg_phase in healthy_phases
-            )
+            if not tg_phase:
+                # 服务尚未启动，只依据配置判断
+                statuses["telegram"] = telegram_base_ready
+            else:
+                statuses["telegram"] = telegram_base_ready and bool(
+                    tg_state.get("authorized")
+                    or tg_phase in healthy_phases
+                )
         except Exception:
             statuses["telegram"] = telegram_base_ready
 

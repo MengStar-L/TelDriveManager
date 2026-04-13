@@ -241,7 +241,8 @@ def needs_setup() -> bool:
 
     aria2_cfg = cfg.get("aria2", {})
     aria2_binary = str(aria2_cfg.get("binary_path", "")).strip()
-    has_aria2 = bool(aria2_cfg.get("installed")) and bool(aria2_binary) and Path(aria2_binary).exists()
+    # 只检查配置是否填写完整，不检查二进制文件是否存在（那是运行时问题）
+    has_aria2 = bool(aria2_cfg.get("installed")) and bool(aria2_binary)
 
     teldrive_cfg = cfg.get("teldrive", {})
     has_teldrive = (
