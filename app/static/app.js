@@ -781,7 +781,10 @@ let lastPageSwitchAt = 0;
 let lastPageSwitchName = '';
 
 function runPageSideEffects(name) {
-    if (name === 'aria2teldrive') loadA2TDTasks();
+    if (name === 'aria2teldrive') {
+        loadA2TDTasks();
+        syncMonitorSerialToggle();
+    }
     if (name === 'tel2teldrive') loadT2TDState();
     if (name === 'teldrivefolders') loadTelDriveFolderTree();
     if (name === 'settings') loadConfig();
@@ -2438,6 +2441,26 @@ async function loadConfig() {
         await refreshAria2RuntimeStatus();
     } catch (e) {
         console.error('加载配置失败:', e);
+    }
+}
+
+async function syncMonitorSerialToggle() {
+    try {
+        if (!window.currentConfig) {
+            const resp = await fetch('/api/settings');
+            if (resp.ok) {
+                window.currentConfig = await readJsonSafe(resp);
+            }
+        }
+        
+        if (window.currentConfig && window.currentConfig.upload) {
+            const monitorToggle = document.getElementById('monitorSerialTransferMode');
+            if (monitorToggle) {
+                monitorToggle.checked = !!window.currentConfig.upload.serial_transfer_mode;
+            }
+        }
+    } catch (e) {
+        console.error('Failed to sync monitor serial toggle:', e);
     }
 }
 
