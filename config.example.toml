@@ -55,6 +55,7 @@ target_path = "/"
 [upload]
 max_retries = 3
 auto_delete = true
+serial_transfer_mode = false       # 开启后下载/上传总占用强制为 1，需等上一个上传完成并释放磁盘后才继续下一个下载
 
 # ─── Telegram 消息同步 ───
 [telegram]

@@ -63,7 +63,7 @@ DEFAULTS: dict[str, Any] = {
         "random_chunk_name": True, "target_path": "/",
     },
     "upload": {
-        "max_retries": 3, "auto_delete": True,
+        "max_retries": 3, "auto_delete": True, "serial_transfer_mode": False,
     },
     "telegram": {
         "api_id": 0, "api_hash": "", "channel_id": 0,
@@ -143,6 +143,7 @@ def _normalize_config(merged: dict, raw: dict | None = None) -> dict:
     raw = raw or {}
     pikpak_cfg = merged.setdefault("pikpak", {})
     aria2_cfg = merged.setdefault("aria2", {})
+    upload_cfg = merged.setdefault("upload", {})
     log_cfg = merged.setdefault("log", {})
 
     raw_aria2 = raw.get("aria2") if isinstance(raw.get("aria2"), dict) else {}
@@ -179,6 +180,10 @@ def _normalize_config(merged: dict, raw: dict | None = None) -> dict:
 
     for deprecated_key in ("download_engine", "max_concurrent_downloads", "connections_per_task"):
         pikpak_cfg.pop(deprecated_key, None)
+
+    upload_cfg["max_retries"] = max(1, int(upload_cfg.get("max_retries") or 3))
+    upload_cfg["auto_delete"] = bool(upload_cfg.get("auto_delete", True))
+    upload_cfg["serial_transfer_mode"] = bool(upload_cfg.get("serial_transfer_mode", False))
 
     log_cfg["buffer_size"] = max(50, int(log_cfg.get("buffer_size") or 400))
     log_cfg["file"] = str(log_cfg.get("file") or "runtime.log").strip() or "runtime.log"

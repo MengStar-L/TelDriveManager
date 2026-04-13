@@ -272,6 +272,7 @@ function fillWizardInputs(data = {}) {
         document.getElementById('wAria2MinSplitSize').value = data.aria2?.min_split_size_mb || 5;
         document.getElementById('wAria2Secret').value = data.aria2?.rpc_secret || '';
         document.getElementById('wAria2AllowRemoteAccess').checked = !!data.aria2?.allow_remote_access;
+        document.getElementById('wUploadSerialTransferMode').checked = !!data.upload?.serial_transfer_mode;
     } catch (e) {
         console.warn('填充向导配置失败', e);
     }
@@ -304,6 +305,15 @@ function getWizardAria2Config() {
 }
 
 
+
+function getWizardUploadConfig() {
+    const existing = window.currentConfig?.upload || {};
+    return {
+        auto_delete: existing.auto_delete !== false,
+        max_retries: Math.max(1, parseInt(existing.max_retries, 10) || 3),
+        serial_transfer_mode: !!document.getElementById('wUploadSerialTransferMode')?.checked,
+    };
+}
 
 function setStatusBadge(el, status, text) {
     if (!el) return;
@@ -620,6 +630,7 @@ async function wizardNext(current, next, btn = null) {
             await syncCurrentConfigFromServer();
         } else if (current === 3) {
             dataToSave.aria2 = getWizardAria2Config();
+            dataToSave.upload = getWizardUploadConfig();
         } else if (current === 4) {
             const tUrl = document.getElementById('wTdUrl').value.trim();
             const tTok = document.getElementById('wTdToken').value.trim();
@@ -700,7 +711,7 @@ async function wizardFinish(btn = null) {
         if (!d.success) throw new Error(d.message || '数据库连接失败');
 
         btn.innerHTML = '<span class="spinner" style="width:14px;height:14px;border-width:2px;display:inline-block;margin-right:8px;"></span> 部署中...';
-        await persistCurrentConfig({ telegram_db: dbPayload, aria2: getWizardAria2Config() });
+        await persistCurrentConfig({ telegram_db: dbPayload, aria2: getWizardAria2Config(), upload: getWizardUploadConfig() });
         closeSetupWizard();
     } catch (e) {
         btn.disabled = false;
@@ -2278,6 +2289,14 @@ async function clearCompletedTasks() {
 
 
 // ── Settings ──
+function toggleMonitorSerialMode(checked) {
+    const mainToggle = document.getElementById('cfgUploadSerialTransferMode');
+    if (mainToggle) {
+        mainToggle.checked = checked;
+        doAutoSave(mainToggle);
+    }
+}
+
 function togglePikpakLoginMode() {
     const mode = normalizePikpakLoginMode(document.getElementById('cfgPikpakLoginMode')?.value || 'password');
     const passwordFields = document.getElementById('cfgPikpakPasswordFields');
@@ -2332,6 +2351,7 @@ function collectSettingsConfig() {
         },
         upload: {
             auto_delete: document.getElementById('cfgUploadAutoDelete').checked,
+            serial_transfer_mode: !!document.getElementById('cfgUploadSerialTransferMode')?.checked,
             max_retries: 3
         },
         telegram: {
@@ -2393,6 +2413,9 @@ async function loadConfig() {
         document.getElementById('cfgTeldriveChannel').value = cfg.teldrive?.channel_id || 0;
         document.getElementById('cfgTeldriveConcurrency').value = cfg.teldrive?.upload_concurrency || 4;
         document.getElementById('cfgUploadAutoDelete').checked = !!cfg.upload?.auto_delete;
+        document.getElementById('cfgUploadSerialTransferMode').checked = !!cfg.upload?.serial_transfer_mode;
+        const monitorToggle = document.getElementById('monitorSerialTransferMode');
+        if (monitorToggle) monitorToggle.checked = !!cfg.upload?.serial_transfer_mode;
 
         document.getElementById('cfgTelegramApiId').value = cfg.telegram?.api_id || '';
         document.getElementById('cfgTelegramApiHash').value = cfg.telegram?.api_hash || '';

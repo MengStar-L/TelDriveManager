@@ -98,7 +98,7 @@ class TaskManager:
             access_token=cfg["teldrive"]["access_token"],
             channel_id=cfg["teldrive"]["channel_id"],
             chunk_size=cfg["teldrive"]["chunk_size"],
-            upload_concurrency=cfg["teldrive"]["upload_concurrency"],
+            upload_concurrency=self._get_effective_upload_concurrency(),
             random_chunk_name=cfg["teldrive"].get("random_chunk_name", True),
             max_retries=cfg.get("upload", {}).get("max_retries", 3)
         )
@@ -152,8 +152,16 @@ class TaskManager:
         logger.info(f"[路径映射-文件名] {local_path} -> {mapped}")
         return mapped
 
+    def _is_serial_transfer_mode_enabled(self) -> bool:
+        return bool(self.config.get("upload", {}).get("serial_transfer_mode", False))
+
     def _get_user_max_concurrent_downloads(self) -> int:
-        return max(1, int(self.config.get("aria2", {}).get("max_concurrent") or 3))
+        configured = max(1, int(self.config.get("aria2", {}).get("max_concurrent") or 3))
+        return 1 if self._is_serial_transfer_mode_enabled() else configured
+
+    def _get_effective_upload_concurrency(self) -> int:
+        configured = max(1, int(self.config.get("teldrive", {}).get("upload_concurrency") or 4))
+        return 1 if self._is_serial_transfer_mode_enabled() else configured
 
     def _get_disk_protection_threshold_gb(self) -> int:
         return max(1, int(self.config.get("aria2", {}).get("disk_protection_threshold_gb") or 5))
@@ -164,6 +172,111 @@ class TaskManager:
     def _get_disk_protection_resume_bytes(self) -> int:
         return (self._get_disk_protection_threshold_gb() + 1) * 1024 ** 3
 
+    def _has_active_upload_work(self) -> bool:
+        return bool(self._upload_tasks or self._uploading_gids or self._active_uploads > 0)
+
+    def _is_disk_ready_for_serial_resume(self) -> bool:
+        if self._disk_protection_active:
+            return False
+        disk_info = self._disk_usage_info or {}
+        if "free" not in disk_info:
+            return False
+        free_bytes = max(0, int(disk_info.get("free") or 0))
+        return free_bytes >= self._get_disk_protection_resume_bytes()
+
+    async def _has_serial_resume_blockers(self) -> bool:
+        if self._has_active_upload_work():
+            return True
+
+        all_tasks = await db.get_all_tasks()
+        for task in all_tasks:
+            if not self._is_upload_stage_task(task):
+                continue
+            status = str(task.get("status") or "")
+            if status == "uploading":
+                return True
+            if status not in ("failed", "paused"):
+                continue
+
+            local_path = self._get_upload_path(task.get("local_path", ""))
+            if local_path and os.path.exists(local_path):
+                return True
+
+        return False
+
+    async def _sync_serial_transfer_gate(self, active: list, waiting: list):
+        if not self.aria2:
+            return
+
+        queued_items = [item for item in (waiting or []) if item.get("gid")]
+        active_items = [item for item in (active or []) if item.get("gid")]
+
+        if not self._is_serial_transfer_mode_enabled():
+            if not self._serial_paused_gids:
+                return
+            paused_gids = set(self._serial_paused_gids)
+            self._serial_paused_gids.clear()
+            for item in queued_items:
+                gid = item.get("gid", "")
+                if gid in paused_gids and item.get("status") == "paused":
+                    try:
+                        await self.aria2.unpause(gid)
+                    except Exception as e:
+                        logger.debug(f"恢复串行模式自动暂停任务失败: {gid}, {e}")
+            return
+
+        should_block_downloads = await self._has_serial_resume_blockers()
+        if should_block_downloads:
+            for item in active_items + queued_items:
+                gid = item.get("gid", "")
+                if not gid or item.get("status") not in ("active", "waiting"):
+                    continue
+                try:
+                    await self.aria2.pause(gid)
+                    self._serial_paused_gids.add(gid)
+                except Exception as e:
+                    logger.debug(f"串行模式暂停下载任务失败: {gid}, {e}")
+            return
+
+        if len(active_items) > 1:
+            for item in active_items[1:]:
+                gid = item.get("gid", "")
+                if not gid:
+                    continue
+                try:
+                    await self.aria2.pause(gid)
+                    self._serial_paused_gids.add(gid)
+                except Exception as e:
+                    logger.debug(f"串行模式收敛下载并发失败: {gid}, {e}")
+            return
+
+        disk_ready = self._is_disk_ready_for_serial_resume()
+        if not disk_ready:
+            if active_items:
+                return
+            for item in queued_items:
+                gid = item.get("gid", "")
+                if not gid or item.get("status") != "waiting":
+                    continue
+                try:
+                    await self.aria2.pause(gid)
+                    self._serial_paused_gids.add(gid)
+                except Exception as e:
+                    logger.debug(f"串行模式等待磁盘恢复时暂停任务失败: {gid}, {e}")
+            return
+
+        if active_items:
+            return
+
+        for item in queued_items:
+            gid = item.get("gid", "")
+            if gid and item.get("status") == "paused" and gid in self._serial_paused_gids:
+                try:
+                    await self.aria2.unpause(gid)
+                    self._serial_paused_gids.discard(gid)
+                except Exception as e:
+                    logger.debug(f"串行模式恢复下一个下载失败: {gid}, {e}")
+                break
 
     def _get_effective_max_concurrent_downloads(self) -> int:
         if self._disk_protection_active:
@@ -622,6 +735,11 @@ class TaskManager:
         except Exception as e:
             logger.debug(f"同步磁盘保护状态失败: {e}")
 
+        try:
+            await self._sync_serial_transfer_gate(active, waiting)
+        except Exception as e:
+            logger.debug(f"同步串行下载上传状态失败: {e}")
+
         all_aria2_tasks = active + waiting + stopped
         tracked_download_speed = 0
 
@@ -838,7 +956,7 @@ class TaskManager:
     async def _wait_upload_slot(self):
         """等待可用的上传槽位（动态读取配置的并发数）"""
         while True:
-            max_uploads = self.config["teldrive"].get("upload_concurrency", 4)
+            max_uploads = self._get_effective_upload_concurrency()
             if self._active_uploads < max_uploads:
                 self._active_uploads += 1
                 return
@@ -1359,8 +1477,10 @@ class TaskManager:
                 return {"success": False, "message": "缺少 aria2 GID，无法暂停"}
 
             await self.aria2.pause(task["aria2_gid"])
+            self._serial_paused_gids.discard(task["aria2_gid"])
             await db.update_task(task_id, status="paused", download_speed="")
             await self._broadcast_task_update(task_id)
+
             return {"success": True, "message": "已暂停"}
         except Exception as e:
             return {"success": False, "message": str(e)}
@@ -1398,6 +1518,7 @@ class TaskManager:
             if not task.get("aria2_gid"):
                 return {"success": False, "message": "缺少 aria2 GID，无法恢复"}
 
+            self._serial_paused_gids.discard(task["aria2_gid"])
             await self.aria2.unpause(task["aria2_gid"])
             await db.update_task(task_id, status="downloading")
             await self._broadcast_task_update(task_id)
@@ -1433,8 +1554,10 @@ class TaskManager:
                 self._uploading_gids.discard(old_gid)
                 self._known_gids.discard(old_gid)
                 self._terminal_gids.discard(old_gid)
+                self._serial_paused_gids.discard(old_gid)
 
             local = self._get_upload_path(task.get("local_path", ""))
+
             if local and os.path.exists(local):
                 if os.path.isdir(local):
                     shutil.rmtree(local, ignore_errors=True)
@@ -1477,6 +1600,7 @@ class TaskManager:
             self._uploading_gids.discard(old_gid)
             self._known_gids.discard(old_gid)
             self._terminal_gids.discard(old_gid)
+            self._serial_paused_gids.discard(old_gid)
 
         # 清除重试计数
         self._upload_retry_counts.pop(task_id, None)
@@ -1622,6 +1746,7 @@ class TaskManager:
         gid = task.get("aria2_gid")
         if gid:
             self._known_gids.discard(gid)
+            self._serial_paused_gids.discard(gid)
             # 从 aria2 移除下载记录
             try:
                 await self.aria2.remove(gid)

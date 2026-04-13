@@ -1144,6 +1144,13 @@
                                     <button class="a2td-filter-btn" data-a2td-filter="paused" onclick="setA2TDTaskFilter('paused')">已暂停</button>
                                     <button class="a2td-filter-btn" data-a2td-filter="pending" onclick="setA2TDTaskFilter('pending')">等待中</button>
                                 </div>
+                                <label class="toggle-row" data-tooltip="当有任务上传时自动暂停下载，限制总并发为 1" style="margin-left: 8px; padding: 6px 12px; border-radius: 999px; background: rgba(59, 130, 246, 0.08); color: var(--accent); border: 1px solid rgba(59,130,246,0.15); font-size:13px; font-weight:600;">
+                                    <i class="ph-fill ph-queue"></i> 串行模式
+                                    <div class="toggle-switch">
+                                        <input type="checkbox" id="monitorSerialTransferMode" onchange="toggleMonitorSerialMode(this.checked)">
+                                        <span class="toggle-slider"></span>
+                                    </div>
+                                </label>
                             </div>
                             <div class="page-actions" style="display:flex; flex-wrap: wrap; gap:8px;">
                                 <button class="btn btn-ghost btn-sm btn-action btn-action-success" data-bulk-action="resume-all" onclick="a2tdBulkAction('resume-all')"><i class="ph ph-play"></i> 恢复全部</button>
@@ -1411,6 +1418,11 @@
                                         TelDrive 验证完成清洗本地缓存
                                         <div class="toggle-switch"><input type="checkbox" id="cfgUploadAutoDelete" checked><span class="toggle-slider"></span></div>
                                     </label>
+                                    <label class="toggle-row" style="justify-content:space-between; margin-top:14px;">
+                                        串行下载上传安全模式（总数 = 1）
+                                        <div class="toggle-switch"><input type="checkbox" id="cfgUploadSerialTransferMode"><span class="toggle-slider"></span></div>
+                                    </label>
+                                    <div class="wizard-note" style="margin-top:10px;">开启后会强制下载并发和上传并发的总占用不超过 1。只有上一个任务上传完成、磁盘空间恢复后，才会继续下一个下载任务。</div>
                                 </div>
                             </div>
                         </div>
@@ -1615,6 +1627,11 @@
                         允许外部设备访问 aria2 RPC
                         <div class="toggle-switch"><input type="checkbox" id="wAria2AllowRemoteAccess"><span class="toggle-slider"></span></div>
                     </label>
+                    <label class="toggle-row" style="justify-content:space-between">
+                        串行下载上传安全模式（总数 = 1）
+                        <div class="toggle-switch"><input type="checkbox" id="wUploadSerialTransferMode"><span class="toggle-slider"></span></div>
+                    </label>
+                    <div class="wizard-note">开启后会强制下载和上传串行执行，只有上一个任务上传完成并释放磁盘空间后，才会继续下一个下载。</div>
                     <div class="wizard-note">开启后 aria2 会监听全部网卡地址。外部客户端请使用当前设备 IP + RPC 端口连接，建议务必设置上面的 RPC 密码。</div>
                 </div>
                 <div class="wizard-footer">
