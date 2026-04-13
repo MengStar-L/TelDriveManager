@@ -25,7 +25,7 @@ def _sanitize_payload(payload: dict | None) -> dict:
 
 
 def _has_channel_id(value) -> bool:
-    return value not in (None, "", 0, "0")
+    return str(value).strip() not in ("", "None")
 
 
 @router.get("")

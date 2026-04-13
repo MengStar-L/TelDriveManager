@@ -247,14 +247,14 @@ def needs_setup() -> bool:
     has_teldrive = (
         bool(str(teldrive_cfg.get("api_host") or "").strip())
         and bool(str(teldrive_cfg.get("access_token") or "").strip())
-        and bool(teldrive_cfg.get("channel_id"))
+        and str(teldrive_cfg.get("channel_id", "")).strip() != ""
     )
 
     telegram_cfg = cfg.get("telegram", {})
     has_telegram = (
         bool(telegram_cfg.get("api_id"))
         and bool(str(telegram_cfg.get("api_hash") or "").strip())
-        and bool(telegram_cfg.get("channel_id"))
+        and str(telegram_cfg.get("channel_id", "")).strip() != ""
     )
 
     telegram_db_cfg = cfg.get("telegram_db", {})

@@ -122,11 +122,11 @@ function getWizardPendingSteps(data = {}, healthDetails = {}) {
 
     const teldriveReady = typeof healthDetails?.teldrive === 'boolean'
         ? healthDetails.teldrive
-        : !!(data.teldrive?.api_host && data.teldrive?.access_token && Number(data.teldrive?.channel_id || 0));
+        : !!(data.teldrive?.api_host && data.teldrive?.access_token && String(data.teldrive?.channel_id ?? '').trim() !== '');
 
     const telegramReady = typeof healthDetails?.telegram === 'boolean'
         ? healthDetails.telegram
-        : !!(data.telegram?.api_id && data.telegram?.api_hash && Number(data.telegram?.channel_id || 0));
+        : !!(data.telegram?.api_id && data.telegram?.api_hash && String(data.telegram?.channel_id ?? '').trim() !== '');
 
     const databaseReady = typeof healthDetails?.database === 'boolean'
         ? healthDetails.database
