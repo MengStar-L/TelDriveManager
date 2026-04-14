@@ -59,6 +59,9 @@ T2TD_ACTION_LOG_LIMIT_MULTIPLIER = 5
 T2TD_ACTION_LOG_MIN_LIMIT = 500
 INTERNAL_DELETE_GRACE_SECONDS = 120.0
 MESSAGE_FETCH_BATCH_SIZE = 100
+INITIAL_MAPPING_SCAN_TIMEOUT = 90
+INITIAL_MAPPING_PROGRESS_EVERY = 100
+
 
 DEFAULT_CONFIG: dict[str, dict[str, Any]] = {
     "telegram": {
@@ -509,7 +512,33 @@ def state_config_payload(config: RuntimeConfig) -> dict[str, Any]:
     }
 
 
+def should_reload_service(old_config: RuntimeConfig, new_config: RuntimeConfig) -> bool:
+    if old_config.is_ready != new_config.is_ready:
+        return True
+
+    reload_fields = (
+        "telegram_api_id",
+        "telegram_api_hash",
+        "telegram_channel_id",
+        "session_name",
+        "teldrive_url",
+        "bearer_token",
+        "teldrive_channel_id",
+        "sync_interval",
+        "sync_enabled",
+        "max_scan_messages",
+        "confirm_cycles",
+        "db_host",
+        "db_port",
+        "db_user",
+        "db_password",
+        "db_name",
+    )
+    return any(getattr(old_config, field) != getattr(new_config, field) for field in reload_fields)
+
+
 class DashboardBroker:
+
     def __init__(self, log_limit: int, config: RuntimeConfig):
         now = iso_now()
         self._logs: deque[dict[str, Any]] = deque(maxlen=log_limit)
@@ -695,7 +724,26 @@ def save_mapping(mapping: dict[str, Any]):
     )
 
 
+def merge_and_save_mapping_snapshot(
+    td_files: dict[str, dict[str, Any]],
+    mapping_snapshot: dict[str, Any],
+) -> dict[str, list[int]]:
+    latest_mapping = load_mapping()
+    for file_id in list(latest_mapping):
+        if file_id not in td_files:
+            latest_mapping.pop(file_id, None)
+
+    for file_id, msg_ids in normalize_mapping(mapping_snapshot).items():
+        if file_id not in td_files:
+            continue
+        latest_mapping[file_id] = merge_message_ids(latest_mapping.get(file_id), msg_ids)
+
+    save_mapping(latest_mapping)
+    return latest_mapping
+
+
 def get_t2td_action_log_limit(config: RuntimeConfig) -> int:
+
     return max(T2TD_ACTION_LOG_MIN_LIMIT, int(config.log_buffer_size or 1) * T2TD_ACTION_LOG_LIMIT_MULTIPLIER)
 
 
@@ -1143,6 +1191,9 @@ async def find_file_message_ids(
     if not target_names:
         return {}
 
+    logger.info(
+        f"开始扫描 Telegram 历史消息: 目标文件 {len(target_names)} 个，最多扫描 {config.max_scan_messages} 条消息"
+    )
     found: dict[str, list[int]] = {name: [] for name in target_names}
     scanned = 0
     async for msg in client.iter_messages(config.telegram_channel_id, limit=config.max_scan_messages):
@@ -1167,11 +1218,12 @@ async def find_file_message_ids(
             continue
 
         found[matched_name] = merge_message_ids(found.get(matched_name), [msg.id])
-        if scanned % 500 == 0:
+        if scanned % INITIAL_MAPPING_PROGRESS_EVERY == 0:
             matched_count = sum(1 for ids in found.values() if ids)
             logger.info(f"文件映射扫描中: 已扫描 {scanned} 条消息，已命中 {matched_count}/{len(target_names)} 个文件")
 
     return {name: ids for name, ids in found.items() if ids}
+
 
 
 def sync_mapping_from_db(config: RuntimeConfig, mapping: dict[str, list[int]], file_ids: list[str] | None = None) -> int:
@@ -1280,8 +1332,9 @@ async def build_initial_mapping(client: TelegramClient, config: RuntimeConfig):
     if config.db_enabled:
         updated = sync_mapping_from_db(config, mapping)
         if updated:
-            save_mapping(mapping)
+            saved_mapping = merge_and_save_mapping_snapshot(td_files, mapping)
             logger.info(f"已从数据库刷新文件映射: {updated} 条")
+            logger.info(f"当前文件映射共 {len(saved_mapping)} 条")
             return
         logger.warning("数据库未返回可用映射，回退到频道扫描")
 
@@ -1291,11 +1344,24 @@ async def build_initial_mapping(client: TelegramClient, config: RuntimeConfig):
         if isinstance(info, dict) and info.get("name") and not is_md5_name(str(info.get("name")))
     ]
     if not target_names:
-        save_mapping(mapping)
+        saved_mapping = merge_and_save_mapping_snapshot(td_files, mapping)
         logger.info("当前没有需要构建映射的 TelDrive 文件")
+        logger.info(f"当前文件映射共 {len(saved_mapping)} 条")
         return
 
-    found_message_ids = await find_file_message_ids(client, config, target_names)
+    try:
+        found_message_ids = await asyncio.wait_for(
+            find_file_message_ids(client, config, target_names),
+            timeout=INITIAL_MAPPING_SCAN_TIMEOUT,
+        )
+    except asyncio.TimeoutError:
+        saved_mapping = merge_and_save_mapping_snapshot(td_files, mapping)
+        logger.error(
+            f"历史消息扫描超过 {INITIAL_MAPPING_SCAN_TIMEOUT} 秒，已停止本轮初始映射构建，实时监听不受影响"
+        )
+        logger.info(f"当前文件映射共 {len(saved_mapping)} 条")
+        return
+
     matched_count = 0
     missing_count = 0
     for file_id, info in td_files.items():
@@ -1309,10 +1375,11 @@ async def build_initial_mapping(client: TelegramClient, config: RuntimeConfig):
         else:
             missing_count += 1
 
-    save_mapping(mapping)
-    logger.info(f"映射构建完成: 匹配到 {matched_count} 个文件，未找到 {missing_count} 个，总计 {len(mapping)} 条")
+    saved_mapping = merge_and_save_mapping_snapshot(td_files, mapping)
+    logger.info(f"映射构建完成: 匹配到 {matched_count} 个文件，未找到 {missing_count} 个，总计 {len(saved_mapping)} 条")
     if missing_count:
         logger.warning(f"仍有 {missing_count} 个 TelDrive 文件未找到对应 Telegram 消息")
+
 
 
 # 安全阈值常量：当缺失比例超过此值且缺失数量超过 MISSING_SAFE_ABS_THRESHOLD 时，判定为查询异常
@@ -1480,10 +1547,12 @@ class Tel2TelDriveService:
     def __init__(self):
         self.client: TelegramClient | None = None
         self.sync_task: asyncio.Task[Any] | None = None
+        self.initial_mapping_task: asyncio.Task[Any] | None = None
         self.stop_event = asyncio.Event()
         self.reload_event = asyncio.Event()
         self.refresh_qr_event = asyncio.Event()
         self.password_future: asyncio.Future[str] | None = None
+
 
     async def run_forever(self):
         logger.info("=" * 56)
@@ -1543,10 +1612,12 @@ class Tel2TelDriveService:
                     last_error=None,
                     **state_config_payload(config),
                 )
-                await build_initial_mapping(self.client, config)
                 self.register_handlers(self.client, config)
+                logger.info("实时监听已启动，初始文件映射将在后台构建")
+                self.initial_mapping_task = asyncio.create_task(self._run_initial_mapping(self.client, config))
 
                 if config.sync_enabled:
+
                     if not config.telegram_channel_id:
                         logger.warning(f"Telegram 频道 ID 无效 ({config.telegram_channel_id!r})，删除同步已跳过")
                     else:
@@ -1621,7 +1692,13 @@ class Tel2TelDriveService:
         self.refresh_qr_event.set()
         if self.password_future and not self.password_future.done():
             self.password_future.cancel()
-        # 取消同步任务
+        # 取消后台任务
+        if self.initial_mapping_task and not self.initial_mapping_task.done():
+            self.initial_mapping_task.cancel()
+            try:
+                await self.initial_mapping_task
+            except (asyncio.CancelledError, Exception):
+                pass
         if self.sync_task and not self.sync_task.done():
             self.sync_task.cancel()
             try:
@@ -1634,6 +1711,7 @@ class Tel2TelDriveService:
                 await self.client.disconnect()
             except Exception:
                 pass
+
 
     async def request_reload(self):
         self.reload_event.set()
@@ -1668,7 +1746,16 @@ class Tel2TelDriveService:
         self.password_future.set_result(password)
         logger.info("已收到管理员提交的两步验证密码")
 
+    async def _run_initial_mapping(self, client: TelegramClient, config: RuntimeConfig):
+        try:
+            await build_initial_mapping(client, config)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.error(f"后台构建初始文件映射失败: {exc}")
+
     async def _wait_for_signal(self, timeout: float | None = None) -> str | None:
+
         stop_task = asyncio.create_task(self.stop_event.wait())
         reload_task = asyncio.create_task(self.reload_event.wait())
         try:
@@ -1700,6 +1787,12 @@ class Tel2TelDriveService:
         return None
 
     async def _cleanup_client(self):
+        if self.initial_mapping_task:
+            self.initial_mapping_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await self.initial_mapping_task
+            self.initial_mapping_task = None
+
         if self.sync_task:
             self.sync_task.cancel()
             with suppress(asyncio.CancelledError):
@@ -1711,6 +1804,7 @@ class Tel2TelDriveService:
                 if self.client.is_connected():
                     await self.client.disconnect()
             self.client = None
+
 
     def register_handlers(self, client: TelegramClient, config: RuntimeConfig):
         @client.on(events.NewMessage(chats=config.telegram_channel_id))

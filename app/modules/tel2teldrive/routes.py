@@ -148,22 +148,28 @@ async def get_config():
 @router.post("/config")
 async def save_config(request: Request):
     service, broker, config_store, logger = _get_deps()
-    from app.modules.tel2teldrive.service import state_config_payload
+    from app.modules.tel2teldrive.service import should_reload_service, state_config_payload
+    previous_runtime = config_store.runtime()
     try:
         payload = await request.json()
-        config_store.save(payload)
-        runtime = config_store.runtime()
+        runtime = config_store.save(payload)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"配置保存失败：{exc}")
 
+    logger.set_log_path(runtime.log_file_path)
     await broker.update_state(**state_config_payload(runtime))
-    await service.request_reload()
-    logger.info("网页配置已保存")
+    needs_reload = should_reload_service(previous_runtime, runtime)
+    if needs_reload:
+        await service.request_reload()
+        logger.info("网页配置已保存，关键配置发生变化，正在重新加载服务")
+    else:
+        logger.info("网页配置已保存，本次变更无需重新加载服务")
 
     return {
         "ok": True,
+        "reloaded": needs_reload,
         "config": config_store.payload(),
         "state": broker.snapshot(),
     }
