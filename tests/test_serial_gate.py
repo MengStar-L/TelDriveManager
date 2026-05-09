@@ -114,6 +114,18 @@ class SerialGateTests(unittest.IsolatedAsyncioTestCase):
             "pending",
         )
 
+    async def test_disk_recovered_releases_gate_held_paused_item(self):
+        manager = self.make_manager()
+        manager._serial_gate_paused_gids.add("held-1")
+
+        await manager._sync_serial_transfer_gate(
+            active=[],
+            waiting=[{"gid": "held-1", "status": "paused"}],
+        )
+
+        self.assertEqual(manager.aria2.unpaused, ["held-1"])
+        self.assertNotIn("held-1", manager._serial_gate_paused_gids)
+
     async def test_disabled_serial_mode_releases_only_system_gate_items(self):
         manager = self.make_manager()
         manager.config["upload"]["serial_transfer_mode"] = False
@@ -286,7 +298,45 @@ class SerialGateTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(released)
         self.assertEqual(manager.aria2.added, [])
 
-    async def test_normalize_pending_gid_removes_aria2_and_local_residue(self):
+    async def test_dispatch_stays_pending_when_live_pending_gid_holds_slot(self):
+        manager = self.make_manager()
+        manager.aria2.status_by_gid["held-gid"] = {
+            "gid": "held-gid",
+            "status": "paused",
+            "files": [],
+        }
+
+        original_get_next = task_manager_module.db.get_next_pending_queued_task
+        original_get_all = task_manager_module.db.get_all_tasks
+        try:
+            async def fake_get_next():
+                return {
+                    "task_id": "queued-2",
+                    "status": "pending",
+                    "url": "https://example.test/two.bin",
+                    "filename": "two.bin",
+                    "aria2_gid": None,
+                    "aria2_options_json": "{}",
+                }
+
+            async def fake_get_all():
+                return [
+                    {"task_id": "held-task", "status": "pending", "aria2_gid": "held-gid"},
+                    {"task_id": "queued-2", "status": "pending", "aria2_gid": None},
+                ]
+
+            task_manager_module.db.get_next_pending_queued_task = fake_get_next
+            task_manager_module.db.get_all_tasks = fake_get_all
+
+            released = await manager._dispatch_next_serial_download()
+        finally:
+            task_manager_module.db.get_next_pending_queued_task = original_get_next
+            task_manager_module.db.get_all_tasks = original_get_all
+
+        self.assertFalse(released)
+        self.assertEqual(manager.aria2.added, [])
+
+    async def test_normalize_pending_stale_gid_removes_aria2_and_local_residue(self):
         with tempfile.TemporaryDirectory() as tmp:
             residue = Path(tmp) / "queued.bin"
             residue.write_bytes(b"partial")
@@ -304,7 +354,7 @@ class SerialGateTests(unittest.IsolatedAsyncioTestCase):
             }
             manager.aria2.status_by_gid["old-gid"] = {
                 "gid": "old-gid",
-                "status": "paused",
+                "status": "removed",
                 "dir": tmp,
                 "files": [{"path": str(residue), "uris": []}],
             }
@@ -341,6 +391,56 @@ class SerialGateTests(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(aria2_control.exists())
             self.assertIsNone(updates["aria2_gid"])
             self.assertEqual(updates["status"], "pending")
+
+    async def test_normalize_keeps_live_pending_gid_and_residue(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            residue = Path(tmp) / "queued.bin"
+            residue.write_bytes(b"partial")
+            aria2_control = Path(f"{residue}.aria2")
+            aria2_control.write_bytes(b"control")
+            manager = self.make_manager(download_dir=tmp)
+            task = {
+                "task_id": "queued-live",
+                "status": "pending",
+                "url": "https://example.test/queued.bin",
+                "filename": "queued.bin",
+                "aria2_gid": "live-gid",
+                "local_path": str(residue),
+                "aria2_options_json": json.dumps({"dir": tmp, "out": "queued.bin"}),
+            }
+            manager.aria2.status_by_gid["live-gid"] = {
+                "gid": "live-gid",
+                "status": "paused",
+                "dir": tmp,
+                "files": [{"path": str(residue), "uris": []}],
+            }
+
+            original_get_all = task_manager_module.db.get_all_tasks
+            original_update_task = task_manager_module.db.update_task
+            try:
+                async def fake_get_all():
+                    return [task]
+
+                async def fake_update_task(task_id, **kwargs):
+                    raise AssertionError(f"should not update live pending task: {task_id} {kwargs}")
+
+                async def fake_broadcast(*args, **kwargs):
+                    return None
+
+                task_manager_module.db.get_all_tasks = fake_get_all
+                task_manager_module.db.update_task = fake_update_task
+                manager._broadcast_task_update = fake_broadcast
+
+                removed = await manager._normalize_serial_pending_aria2_tasks()
+            finally:
+                task_manager_module.db.get_all_tasks = original_get_all
+                task_manager_module.db.update_task = original_update_task
+
+            self.assertEqual(removed, set())
+            self.assertEqual(manager.aria2.removed, [])
+            self.assertTrue(residue.exists())
+            self.assertTrue(aria2_control.exists())
+            self.assertIn("live-gid", manager._serial_gate_paused_gids)
 
     async def test_resume_no_gid_manual_pause_returns_to_pending_queue(self):
         manager = self.make_manager()

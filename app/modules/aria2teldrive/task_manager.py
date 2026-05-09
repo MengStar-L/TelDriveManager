@@ -351,6 +351,45 @@ class TaskManager:
                 return True
         return False
 
+    @staticmethod
+    def _is_live_serial_aria2_status(status: str) -> bool:
+        return str(status or "") in ("active", "waiting", "paused")
+
+    async def _has_live_serial_download_slot(
+        self,
+        active: Optional[list] = None,
+        waiting: Optional[list] = None,
+        stopped: Optional[list] = None,
+    ) -> bool:
+        if not self._is_serial_transfer_mode_enabled() or not self.aria2:
+            return False
+
+        item_by_gid = {
+            item.get("gid"): item
+            for item in (active or []) + (waiting or []) + (stopped or [])
+            if item.get("gid")
+        }
+        aria2 = self._require_aria2()
+
+        for task in await db.get_all_tasks():
+            gid = str(task.get("aria2_gid") or "")
+            status = str(task.get("status") or "")
+            if not gid or status not in ("downloading", "pending"):
+                continue
+
+            item = item_by_gid.get(gid)
+            if item is None:
+                try:
+                    item = await aria2.tell_status(gid)
+                except Exception:
+                    item = {}
+
+            parsed = self._parse_aria2_item(item) if item else {}
+            if self._is_live_serial_aria2_status(parsed.get("status")):
+                return True
+
+        return False
+
     async def enqueue_serial_task(self, url: str, filename: Optional[str] = None,
                                   teldrive_path: str = "/", aria2_options: Optional[dict] = None,
                                   task_id: Optional[str] = None) -> dict:
@@ -411,6 +450,10 @@ class TaskManager:
                     item = {}
 
             parsed = self._parse_aria2_item(item) if item else {}
+            if self._is_live_serial_aria2_status(parsed.get("status")):
+                if parsed.get("status") == "paused":
+                    self._serial_gate_paused_gids.add(gid)
+                continue
             if parsed.get("status") == "complete":
                 continue
 
@@ -467,6 +510,8 @@ class TaskManager:
             if any(item.get("gid") for item in (active or []) + (waiting or [])):
                 return False
             if await self._has_db_download_in_flight():
+                return False
+            if await self._has_live_serial_download_slot(active, waiting, stopped):
                 return False
             if await self._has_serial_resume_blockers(stopped):
                 return False
@@ -628,6 +673,14 @@ class TaskManager:
                 if gid == allowed_gid or item.get("status") not in ("active", "waiting"):
                     continue
                 await self._pause_for_serial_gate(item)
+            return
+
+        gated_paused = [
+            item for item in queued_items
+            if item.get("status") == "paused" and self._is_serial_gate_held(item.get("gid", ""))
+        ]
+        if gated_paused:
+            await self._unpause_from_serial_gate(gated_paused[0].get("gid", ""))
             return
 
         ungated_waiting = [
