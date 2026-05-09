@@ -25,6 +25,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     error TEXT,
     teldrive_path TEXT DEFAULT '/',
     aria2_gid TEXT,
+    aria2_options_json TEXT DEFAULT '{}',
     local_path TEXT,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
@@ -86,6 +87,7 @@ async def init_db():
     """初始化数据库"""
     conn = await _get_conn()
     await conn.execute(CREATE_TABLE_SQL)
+    await _ensure_column(conn, "tasks", "aria2_options_json", "TEXT DEFAULT '{}'")
     await conn.execute(CREATE_PROGRESS_LOGS_TABLE_SQL)
     await conn.execute(CREATE_PARSE_JOBS_TABLE_SQL)
     await conn.execute(
@@ -99,6 +101,14 @@ async def init_db():
     await conn.commit()
 
 
+async def _ensure_column(conn: aiosqlite.Connection, table: str, column: str, definition: str):
+    async with conn.execute(f"PRAGMA table_info({table})") as cursor:
+        rows = await cursor.fetchall()
+    existing = {str(row["name"]) for row in rows}
+    if column not in existing:
+        await conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+
+
 async def close_db():
     """关闭数据库连接"""
     global _db_conn
@@ -108,13 +118,13 @@ async def close_db():
 
 
 async def add_task(task_id: str, url: str, filename: Optional[str] = None,
-                   teldrive_path: str = "/") -> dict:
+                   teldrive_path: str = "/", aria2_options_json: Optional[str] = None) -> dict:
     """添加新任务"""
     conn = await _get_conn()
     await conn.execute(
-        """INSERT OR IGNORE INTO tasks (task_id, url, filename, teldrive_path)
-           VALUES (?, ?, ?, ?)""",
-        (task_id, url, filename, teldrive_path)
+        """INSERT OR IGNORE INTO tasks (task_id, url, filename, teldrive_path, aria2_options_json)
+           VALUES (?, ?, ?, ?, ?)""",
+        (task_id, url, filename, teldrive_path, aria2_options_json or "{}")
     )
     await conn.commit()
     task = await get_task(task_id)
@@ -143,6 +153,22 @@ async def get_all_tasks() -> list:
     ) as cursor:
         rows = await cursor.fetchall()
         return [dict(row) for row in rows]
+
+
+async def get_next_pending_queued_task() -> Optional[dict]:
+    """Return the oldest app-queued download that has not been submitted to aria2."""
+    conn = await _get_conn()
+    async with conn.execute(
+        """
+        SELECT * FROM tasks
+        WHERE status = 'pending'
+          AND (aria2_gid IS NULL OR aria2_gid = '')
+        ORDER BY created_at ASC, rowid ASC
+        LIMIT 1
+        """
+    ) as cursor:
+        row = await cursor.fetchone()
+        return dict(row) if row else None
 
 
 async def update_task(task_id: str, **kwargs) -> None:

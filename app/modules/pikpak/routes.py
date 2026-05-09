@@ -100,13 +100,15 @@ def _join_teldrive_path(base_path: str, sub_path: str = "") -> str:
     return _normalize_teldrive_path(f"{base}/{child}")
 
 
-async def _register_aria2_task(gid: str, url: str, filename: str, teldrive_path: str):
+async def _register_aria2_task(gid: str, url: str, filename: str, teldrive_path: str,
+                               aria2_options: Optional[dict] = None):
     await task_manager.register_external_task(
         gid,
         url,
         filename,
         teldrive_path=_normalize_teldrive_path(teldrive_path),
         status="pending",
+        aria2_options=aria2_options,
     )
 
 
@@ -909,14 +911,43 @@ async def _aria2_push_only(files: List[dict], index: int, delete_pikpak_ids: Lis
         })
         download_dir = aria2_cfg.get("download_dir", "")
         serial_mode = bool(cfg.get("upload", {}).get("serial_transfer_mode", False))
-        gids = await aria2.add_uris_batch(tasks_to_add, base_dir=download_dir, pause=serial_mode)
         success_count = 0
-        for sequence, (gid, file_info, task_ctx) in enumerate(zip(gids, files, task_contexts), 1):
-            if not gid:
-                continue
-            await _register_aria2_task(gid, task_ctx["url"], task_ctx["name"], task_ctx["teldrive_path"])
-            success_count += 1
-            await _broadcast_link_pushed(index, file_info, sequence, len(files), push_target)
+        if serial_mode:
+            for sequence, (task_spec, file_info, task_ctx) in enumerate(zip(tasks_to_add, files, task_contexts), 1):
+                opts = {}
+                if task_spec.get("name"):
+                    opts["out"] = task_spec["name"]
+                if download_dir:
+                    if task_spec.get("subdir"):
+                        opts["dir"] = os.path.join(download_dir, task_spec["subdir"]).replace("\\", "/")
+                    else:
+                        opts["dir"] = download_dir
+                await task_manager.enqueue_serial_task(
+                    task_ctx["url"], task_ctx["name"],
+                    teldrive_path=task_ctx["teldrive_path"],
+                    aria2_options=opts,
+                )
+                success_count += 1
+                await _broadcast_link_pushed(index, file_info, sequence, len(files), push_target)
+        else:
+            gids = await aria2.add_uris_batch(tasks_to_add, base_dir=download_dir)
+            for sequence, (gid, file_info, task_ctx, task_spec) in enumerate(zip(gids, files, task_contexts, tasks_to_add), 1):
+                if not gid:
+                    continue
+                opts = {}
+                if task_spec.get("name"):
+                    opts["out"] = task_spec["name"]
+                if download_dir:
+                    if task_spec.get("subdir"):
+                        opts["dir"] = os.path.join(download_dir, task_spec["subdir"]).replace("\\", "/")
+                    else:
+                        opts["dir"] = download_dir
+                await _register_aria2_task(
+                    gid, task_ctx["url"], task_ctx["name"], task_ctx["teldrive_path"],
+                    aria2_options=opts,
+                )
+                success_count += 1
+                await _broadcast_link_pushed(index, file_info, sequence, len(files), push_target)
         await _broadcast({"type": "push_done", "index": index,
                           "success_count": success_count, "total_count": len(files),
                           "target": push_target})
@@ -1200,15 +1231,30 @@ async def _process_share_download(share_id: str, file_ids: List[str], pass_code_
                 if output_name:
                     opts["out"] = output_name
                     display_info["name"] = output_name
+                task_teldrive_path = base_teldrive_path
+                if keep_structure:
+                    task_teldrive_path = _join_teldrive_path(base_teldrive_path, subdir)
+
                 if cfg.get("upload", {}).get("serial_transfer_mode", False):
-                    opts["pause"] = "true"
+                    await task_manager.enqueue_serial_task(
+                        url_info["url"],
+                        display_info.get("name") or url_info.get("name") or "",
+                        teldrive_path=task_teldrive_path,
+                        aria2_options=opts,
+                    )
+                    success_count += 1
+                    await _broadcast_link_pushed(1, display_info, sequence, len(all_urls), push_target)
+                    continue
 
                 gid = await _aria2.add_uri(url_info["url"], opts)
                 if gid:
-                    task_teldrive_path = base_teldrive_path
-                    if keep_structure:
-                        task_teldrive_path = _join_teldrive_path(base_teldrive_path, subdir)
-                    await _register_aria2_task(gid, url_info["url"], display_info.get("name") or url_info.get("name") or "", task_teldrive_path)
+                    await _register_aria2_task(
+                        gid,
+                        url_info["url"],
+                        display_info.get("name") or url_info.get("name") or "",
+                        task_teldrive_path,
+                        aria2_options=opts,
+                    )
                     success_count += 1
                     await _broadcast_link_pushed(1, display_info, sequence, len(all_urls), push_target)
             except Exception as e:
