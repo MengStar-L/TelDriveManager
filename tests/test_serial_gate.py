@@ -1,7 +1,9 @@
+import asyncio
 import json
 import tempfile
 import unittest
 from pathlib import Path
+from typing import Any, cast
 
 from app.modules.aria2teldrive import task_manager as task_manager_module
 
@@ -78,12 +80,12 @@ class SerialGateTests(unittest.IsolatedAsyncioTestCase):
             },
         }
         manager._disk_usage_info = {"free": 3 * 1024 ** 3}
-        manager.aria2 = FakeAria2()
+        manager.aria2 = cast(Any, FakeAria2())
 
         async def no_blockers(stopped=None):
             return False
 
-        manager._has_serial_resume_blockers = no_blockers
+        manager._has_serial_resume_blockers = cast(Any, no_blockers)
         return manager
 
     async def test_active_download_holds_all_waiting_items(self):
@@ -145,16 +147,16 @@ class SerialGateTests(unittest.IsolatedAsyncioTestCase):
             async def fake_broadcast(*args, **kwargs):
                 return None
 
-            task_manager_module.db.get_next_pending_queued_task = fake_get_next
-            task_manager_module.db.update_task = fake_update_task
-            task_manager_module.db.get_all_tasks = fake_get_all
-            manager._broadcast_task_update = fake_broadcast
+            cast(Any, task_manager_module.db).get_next_pending_queued_task = fake_get_next
+            cast(Any, task_manager_module.db).update_task = fake_update_task
+            cast(Any, task_manager_module.db).get_all_tasks = fake_get_all
+            manager._broadcast_task_update = cast(Any, fake_broadcast)
 
             released = await manager._dispatch_next_serial_download()
         finally:
-            task_manager_module.db.get_next_pending_queued_task = original_get_next
-            task_manager_module.db.update_task = original_update_task
-            task_manager_module.db.get_all_tasks = original_get_all
+            cast(Any, task_manager_module.db).get_next_pending_queued_task = original_get_next
+            cast(Any, task_manager_module.db).update_task = original_update_task
+            cast(Any, task_manager_module.db).get_all_tasks = original_get_all
 
         self.assertTrue(released)
         self.assertEqual(len(manager.aria2.added), 1)
@@ -248,16 +250,16 @@ class SerialGateTests(unittest.IsolatedAsyncioTestCase):
             async def fake_broadcast(*args, **kwargs):
                 return None
 
-            task_manager_module.db.add_task = fake_add_task
-            task_manager_module.db.update_task = fake_update_task
-            task_manager_module.db.get_task = fake_get_task
-            manager._broadcast_task_update = fake_broadcast
+            cast(Any, task_manager_module.db).add_task = fake_add_task
+            cast(Any, task_manager_module.db).update_task = fake_update_task
+            cast(Any, task_manager_module.db).get_task = fake_get_task
+            manager._broadcast_task_update = cast(Any, fake_broadcast)
 
             task = await manager.add_task("https://example.test/file.bin", "file.bin")
         finally:
-            task_manager_module.db.add_task = original_add_task
-            task_manager_module.db.update_task = original_update_task
-            task_manager_module.db.get_task = original_get_task
+            cast(Any, task_manager_module.db).add_task = original_add_task
+            cast(Any, task_manager_module.db).update_task = original_update_task
+            cast(Any, task_manager_module.db).get_task = original_get_task
 
         self.assertEqual(manager.aria2.added, [])
         self.assertEqual(task["status"], "pending")
@@ -294,16 +296,16 @@ class SerialGateTests(unittest.IsolatedAsyncioTestCase):
             async def fake_broadcast(*args, **kwargs):
                 return None
 
-            task_manager_module.db.get_next_pending_queued_task = fake_get_next
-            task_manager_module.db.update_task = fake_update_task
-            task_manager_module.db.get_all_tasks = fake_get_all
-            manager._broadcast_task_update = fake_broadcast
+            cast(Any, task_manager_module.db).get_next_pending_queued_task = fake_get_next
+            cast(Any, task_manager_module.db).update_task = fake_update_task
+            cast(Any, task_manager_module.db).get_all_tasks = fake_get_all
+            manager._broadcast_task_update = cast(Any, fake_broadcast)
 
             released = await manager._dispatch_next_serial_download()
         finally:
-            task_manager_module.db.get_next_pending_queued_task = original_get_next
-            task_manager_module.db.update_task = original_update_task
-            task_manager_module.db.get_all_tasks = original_get_all
+            cast(Any, task_manager_module.db).get_next_pending_queued_task = original_get_next
+            cast(Any, task_manager_module.db).update_task = original_update_task
+            cast(Any, task_manager_module.db).get_all_tasks = original_get_all
 
         self.assertTrue(released)
         self.assertEqual(len(manager.aria2.added), 1)
@@ -317,7 +319,7 @@ class SerialGateTests(unittest.IsolatedAsyncioTestCase):
         async def has_blocker(stopped=None):
             return True
 
-        manager._has_serial_resume_blockers = has_blocker
+        manager._has_serial_resume_blockers = cast(Any, has_blocker)
 
         original_get_next = task_manager_module.db.get_next_pending_queued_task
         original_get_all = task_manager_module.db.get_all_tasks
@@ -335,12 +337,12 @@ class SerialGateTests(unittest.IsolatedAsyncioTestCase):
             async def fake_get_all():
                 return []
 
-            task_manager_module.db.get_next_pending_queued_task = fake_get_next
-            task_manager_module.db.get_all_tasks = fake_get_all
+            cast(Any, task_manager_module.db).get_next_pending_queued_task = fake_get_next
+            cast(Any, task_manager_module.db).get_all_tasks = fake_get_all
             released = await manager._dispatch_next_serial_download()
         finally:
-            task_manager_module.db.get_next_pending_queued_task = original_get_next
-            task_manager_module.db.get_all_tasks = original_get_all
+            cast(Any, task_manager_module.db).get_next_pending_queued_task = original_get_next
+            cast(Any, task_manager_module.db).get_all_tasks = original_get_all
 
         self.assertFalse(released)
         self.assertEqual(manager.aria2.added, [])
@@ -364,13 +366,13 @@ class SerialGateTests(unittest.IsolatedAsyncioTestCase):
             async def fake_get_all():
                 return [{"task_id": "downloading-1", "status": "downloading", "aria2_gid": "gid-current"}]
 
-            task_manager_module.db.get_next_pending_queued_task = fake_get_next
-            task_manager_module.db.get_all_tasks = fake_get_all
+            cast(Any, task_manager_module.db).get_next_pending_queued_task = fake_get_next
+            cast(Any, task_manager_module.db).get_all_tasks = fake_get_all
 
             released = await manager._dispatch_next_serial_download()
         finally:
-            task_manager_module.db.get_next_pending_queued_task = original_get_next
-            task_manager_module.db.get_all_tasks = original_get_all
+            cast(Any, task_manager_module.db).get_next_pending_queued_task = original_get_next
+            cast(Any, task_manager_module.db).get_all_tasks = original_get_all
 
         self.assertFalse(released)
         self.assertEqual(manager.aria2.added, [])
@@ -402,13 +404,13 @@ class SerialGateTests(unittest.IsolatedAsyncioTestCase):
                     {"task_id": "queued-2", "status": "pending", "aria2_gid": None},
                 ]
 
-            task_manager_module.db.get_next_pending_queued_task = fake_get_next
-            task_manager_module.db.get_all_tasks = fake_get_all
+            cast(Any, task_manager_module.db).get_next_pending_queued_task = fake_get_next
+            cast(Any, task_manager_module.db).get_all_tasks = fake_get_all
 
             released = await manager._dispatch_next_serial_download()
         finally:
-            task_manager_module.db.get_next_pending_queued_task = original_get_next
-            task_manager_module.db.get_all_tasks = original_get_all
+            cast(Any, task_manager_module.db).get_next_pending_queued_task = original_get_next
+            cast(Any, task_manager_module.db).get_all_tasks = original_get_all
 
         self.assertFalse(released)
         self.assertEqual(manager.aria2.added, [])
@@ -452,15 +454,15 @@ class SerialGateTests(unittest.IsolatedAsyncioTestCase):
                 async def fake_check_disk():
                     manager._disk_usage_info = {"free": 3 * 1024 ** 3}
 
-                task_manager_module.db.get_all_tasks = fake_get_all
-                task_manager_module.db.update_task = fake_update_task
-                manager._broadcast_task_update = fake_broadcast
-                manager._check_disk_usage = fake_check_disk
+                cast(Any, task_manager_module.db).get_all_tasks = fake_get_all
+                cast(Any, task_manager_module.db).update_task = fake_update_task
+                manager._broadcast_task_update = cast(Any, fake_broadcast)
+                manager._check_disk_usage = cast(Any, fake_check_disk)
 
                 removed = await manager._normalize_serial_pending_aria2_tasks()
             finally:
-                task_manager_module.db.get_all_tasks = original_get_all
-                task_manager_module.db.update_task = original_update_task
+                cast(Any, task_manager_module.db).get_all_tasks = original_get_all
+                cast(Any, task_manager_module.db).update_task = original_update_task
 
             self.assertEqual(removed, {"old-gid"})
             self.assertEqual(manager.aria2.removed, ["old-gid"])
@@ -504,14 +506,14 @@ class SerialGateTests(unittest.IsolatedAsyncioTestCase):
                 async def fake_broadcast(*args, **kwargs):
                     return None
 
-                task_manager_module.db.get_all_tasks = fake_get_all
-                task_manager_module.db.update_task = fake_update_task
-                manager._broadcast_task_update = fake_broadcast
+                cast(Any, task_manager_module.db).get_all_tasks = fake_get_all
+                cast(Any, task_manager_module.db).update_task = fake_update_task
+                manager._broadcast_task_update = cast(Any, fake_broadcast)
 
                 removed = await manager._normalize_serial_pending_aria2_tasks()
             finally:
-                task_manager_module.db.get_all_tasks = original_get_all
-                task_manager_module.db.update_task = original_update_task
+                cast(Any, task_manager_module.db).get_all_tasks = original_get_all
+                cast(Any, task_manager_module.db).update_task = original_update_task
 
             self.assertEqual(removed, set())
             self.assertEqual(manager.aria2.removed, [])
@@ -542,24 +544,303 @@ class SerialGateTests(unittest.IsolatedAsyncioTestCase):
             async def fake_broadcast(*args, **kwargs):
                 return None
 
-            task_manager_module.db.get_task = fake_get_task
-            task_manager_module.db.update_task = fake_update_task
-            manager._broadcast_task_update = fake_broadcast
+            cast(Any, task_manager_module.db).get_task = fake_get_task
+            cast(Any, task_manager_module.db).update_task = fake_update_task
+            manager._broadcast_task_update = cast(Any, fake_broadcast)
 
             async def fake_dispatch(*args, **kwargs):
                 return False
 
-            manager._dispatch_next_serial_download = fake_dispatch
+            manager._dispatch_next_serial_download = cast(Any, fake_dispatch)
 
             result = await manager.resume_task("task-1")
         finally:
-            task_manager_module.db.get_task = original_get_task
-            task_manager_module.db.update_task = original_update_task
+            cast(Any, task_manager_module.db).get_task = original_get_task
+            cast(Any, task_manager_module.db).update_task = original_update_task
 
         self.assertTrue(result["success"])
         self.assertEqual(updates["status"], "pending")
         self.assertEqual(manager.aria2.unpaused, [])
         self.assertEqual(manager.aria2.added, [])
+
+    async def test_auto_retry_counts_consecutive_failures_without_progress(self):
+        manager = self.make_manager()
+        manager.config["upload"]["max_retries"] = 3
+        manager._upload_retry_counts["task-1"] = 1
+        manager._upload_retry_checkpoints["task-1"] = 10
+        manager._upload_confirmed_checkpoints["task-1"] = 10
+        manager._set_runtime_task_fields("task-1", upload_chunk_done=10, upload_chunk_total=26)
+        created_tasks = []
+        updates = []
+
+        original_get_all = task_manager_module.db.get_all_tasks
+        original_update_task = task_manager_module.db.update_task
+        try:
+            async def fake_get_all():
+                return [{
+                    "task_id": "task-1",
+                    "status": "failed",
+                    "download_progress": 100.0,
+                    "upload_progress": 0.0,
+                    "local_path": "resume.bin",
+                    "error": "timeout",
+                }]
+
+            async def fake_update_task(task_id, **kwargs):
+                updates.append(kwargs)
+                return None
+
+            async def fake_broadcast(*args, **kwargs):
+                return None
+
+            async def fake_retry_upload(task_id):
+                created_tasks.append(task_id)
+                return None
+
+            cast(Any, task_manager_module.db).get_all_tasks = fake_get_all
+            cast(Any, task_manager_module.db).update_task = fake_update_task
+            manager._broadcast_task_update = cast(Any, fake_broadcast)
+            manager._retry_upload = cast(Any, fake_retry_upload)
+            manager._get_upload_path = cast(Any, lambda path: path)
+            manager._count_path_chunks = cast(Any, lambda path: 26)
+
+            original_exists = task_manager_module.os.path.exists
+            task_manager_module.os.path.exists = lambda path: True
+            try:
+                await manager._auto_retry_failed_uploads()
+                await asyncio.sleep(0)
+            finally:
+                task_manager_module.os.path.exists = original_exists
+        finally:
+            cast(Any, task_manager_module.db).get_all_tasks = original_get_all
+            cast(Any, task_manager_module.db).update_task = original_update_task
+
+        self.assertEqual(manager._upload_retry_counts["task-1"], 2)
+        self.assertEqual(manager._upload_retry_checkpoints["task-1"], 10)
+        self.assertIn("task-1", created_tasks)
+        self.assertAlmostEqual(updates[-1]["upload_progress"], 38.5)
+        self.assertEqual(
+            manager._runtime_task_state["task-1"]["upload_chunk_done"],
+            10,
+        )
+
+    async def test_auto_retry_resets_budget_after_chunk_progress(self):
+        manager = self.make_manager()
+        manager.config["upload"]["max_retries"] = 3
+        manager._upload_retry_counts["task-2"] = 3
+        manager._upload_retry_checkpoints["task-2"] = 10
+        manager._upload_confirmed_checkpoints["task-2"] = 10
+        manager._set_runtime_task_fields("task-2", upload_chunk_done=14, upload_chunk_total=26)
+        created_tasks = []
+        updates = []
+
+        original_get_all = task_manager_module.db.get_all_tasks
+        original_update_task = task_manager_module.db.update_task
+        try:
+            async def fake_get_all():
+                return [{
+                    "task_id": "task-2",
+                    "status": "failed",
+                    "download_progress": 100.0,
+                    "upload_progress": 0.0,
+                    "local_path": "resume.bin",
+                    "error": "timeout",
+                }]
+
+            async def fake_update_task(task_id, **kwargs):
+                updates.append(kwargs)
+                return None
+
+            async def fake_broadcast(*args, **kwargs):
+                return None
+
+            async def fake_retry_upload(task_id):
+                created_tasks.append(task_id)
+                return None
+
+            cast(Any, task_manager_module.db).get_all_tasks = fake_get_all
+            cast(Any, task_manager_module.db).update_task = fake_update_task
+            manager._broadcast_task_update = cast(Any, fake_broadcast)
+            manager._retry_upload = cast(Any, fake_retry_upload)
+            manager._get_upload_path = cast(Any, lambda path: path)
+            manager._count_path_chunks = cast(Any, lambda path: 26)
+
+            original_exists = task_manager_module.os.path.exists
+            task_manager_module.os.path.exists = lambda path: True
+            try:
+                await manager._auto_retry_failed_uploads()
+                await asyncio.sleep(0)
+            finally:
+                task_manager_module.os.path.exists = original_exists
+        finally:
+            cast(Any, task_manager_module.db).get_all_tasks = original_get_all
+            cast(Any, task_manager_module.db).update_task = original_update_task
+
+        self.assertEqual(manager._upload_retry_counts["task-2"], 1)
+        self.assertEqual(manager._upload_retry_checkpoints["task-2"], 14)
+        self.assertEqual(manager._upload_confirmed_checkpoints["task-2"], 14)
+        self.assertIn("task-2", created_tasks)
+        self.assertAlmostEqual(updates[-1]["upload_progress"], 53.8)
+        self.assertEqual(
+            manager._runtime_task_state["task-2"]["upload_chunk_done"],
+            14,
+        )
+
+    async def test_resume_uploading_preserves_confirmed_chunk_baseline(self):
+        manager = self.make_manager()
+        manager._upload_retry_counts["task-4"] = 2
+        manager._upload_retry_checkpoints["task-4"] = 8
+        manager._upload_confirmed_checkpoints["task-4"] = 14
+        updates = {}
+        created_tasks = []
+
+        original_get_task = task_manager_module.db.get_task
+        original_update_task = task_manager_module.db.update_task
+        try:
+            async def fake_get_task(task_id):
+                return {
+                    "task_id": task_id,
+                    "status": "paused",
+                    "download_progress": 100.0,
+                    "upload_progress": 0.0,
+                    "local_path": "resume.bin",
+                }
+
+            async def fake_update_task(task_id, **kwargs):
+                updates.update(kwargs)
+
+            async def fake_broadcast(*args, **kwargs):
+                return None
+
+            async def fake_retry_upload(task_id):
+                created_tasks.append(task_id)
+                return None
+
+            cast(Any, task_manager_module.db).get_task = fake_get_task
+            cast(Any, task_manager_module.db).update_task = fake_update_task
+            manager._broadcast_task_update = cast(Any, fake_broadcast)
+            manager._retry_upload = cast(Any, fake_retry_upload)
+            manager._get_upload_path = cast(Any, lambda path: path)
+            manager._count_path_chunks = cast(Any, lambda path: 26)
+
+            original_exists = task_manager_module.os.path.exists
+            task_manager_module.os.path.exists = lambda path: True
+            try:
+                result = await manager.resume_task("task-4")
+                await asyncio.sleep(0)
+            finally:
+                task_manager_module.os.path.exists = original_exists
+        finally:
+            cast(Any, task_manager_module.db).get_task = original_get_task
+            cast(Any, task_manager_module.db).update_task = original_update_task
+
+        self.assertTrue(result["success"])
+        self.assertAlmostEqual(updates["upload_progress"], 53.8)
+        self.assertEqual(
+            manager._runtime_task_state["task-4"]["upload_chunk_done"],
+            14,
+        )
+        self.assertNotIn("task-4", manager._upload_retry_counts)
+        self.assertNotIn("task-4", manager._upload_retry_checkpoints)
+        self.assertEqual(manager._upload_confirmed_checkpoints["task-4"], 14)
+        self.assertIn("task-4", created_tasks)
+
+    async def test_retry_uploading_preserves_confirmed_chunk_baseline(self):
+        manager = self.make_manager()
+        manager._upload_retry_counts["task-5"] = 2
+        manager._upload_retry_checkpoints["task-5"] = 8
+        manager._upload_confirmed_checkpoints["task-5"] = 14
+        updates = {}
+        created_tasks = []
+
+        original_get_task = task_manager_module.db.get_task
+        original_update_task = task_manager_module.db.update_task
+        try:
+            async def fake_get_task(task_id):
+                return {
+                    "task_id": task_id,
+                    "status": "failed",
+                    "download_progress": 100.0,
+                    "upload_progress": 0.0,
+                    "aria2_gid": "gid-5",
+                    "local_path": "resume.bin",
+                }
+
+            async def fake_update_task(task_id, **kwargs):
+                updates.update(kwargs)
+
+            async def fake_broadcast(*args, **kwargs):
+                return None
+
+            async def fake_retry_upload(task_id):
+                created_tasks.append(task_id)
+                return None
+
+            cast(Any, task_manager_module.db).get_task = fake_get_task
+            cast(Any, task_manager_module.db).update_task = fake_update_task
+            manager._broadcast_task_update = cast(Any, fake_broadcast)
+            manager._retry_upload = cast(Any, fake_retry_upload)
+            manager._get_upload_path = cast(Any, lambda path: path)
+            manager._count_path_chunks = cast(Any, lambda path: 26)
+
+            original_exists = task_manager_module.os.path.exists
+            task_manager_module.os.path.exists = lambda path: True
+            try:
+                result = await manager.retry_task("task-5")
+                await asyncio.sleep(0)
+            finally:
+                task_manager_module.os.path.exists = original_exists
+        finally:
+            cast(Any, task_manager_module.db).get_task = original_get_task
+            cast(Any, task_manager_module.db).update_task = original_update_task
+
+        self.assertTrue(result["success"])
+        self.assertAlmostEqual(updates["upload_progress"], 53.8)
+        self.assertEqual(
+            manager._runtime_task_state["task-5"]["upload_chunk_done"],
+            14,
+        )
+        self.assertNotIn("task-5", manager._upload_retry_counts)
+        self.assertNotIn("task-5", manager._upload_retry_checkpoints)
+        self.assertEqual(manager._upload_confirmed_checkpoints["task-5"], 14)
+        self.assertIn("task-5", created_tasks)
+
+    async def test_pause_uploading_clears_retry_state(self):
+        manager = self.make_manager()
+        manager._upload_retry_counts["task-3"] = 2
+        manager._upload_retry_checkpoints["task-3"] = 8
+        manager._upload_confirmed_checkpoints["task-3"] = 8
+
+        original_get_task = task_manager_module.db.get_task
+        original_update_task = task_manager_module.db.update_task
+        try:
+            async def fake_get_task(task_id):
+                return {
+                    "task_id": task_id,
+                    "status": "uploading",
+                    "aria2_gid": "gid-3",
+                    "local_path": "resume.bin",
+                }
+
+            async def fake_update_task(task_id, **kwargs):
+                return None
+
+            async def fake_broadcast(*args, **kwargs):
+                return None
+
+            task_manager_module.db.get_task = fake_get_task
+            task_manager_module.db.update_task = fake_update_task
+            manager._broadcast_task_update = cast(Any, fake_broadcast)
+
+            result = await manager.pause_task("task-3")
+        finally:
+            task_manager_module.db.get_task = original_get_task
+            task_manager_module.db.update_task = original_update_task
+
+        self.assertTrue(result["success"])
+        self.assertNotIn("task-3", manager._upload_retry_counts)
+        self.assertNotIn("task-3", manager._upload_retry_checkpoints)
+        self.assertEqual(manager._upload_confirmed_checkpoints["task-3"], 8)
 
 
 if __name__ == "__main__":

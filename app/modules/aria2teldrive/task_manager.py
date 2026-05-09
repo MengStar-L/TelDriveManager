@@ -64,6 +64,8 @@ class TaskManager:
         # 上传重试计数：task_id -> 已重试次数
 
         self._upload_retry_counts: dict = {}
+        self._upload_retry_checkpoints: dict = {}
+        self._upload_confirmed_checkpoints: dict = {}
         # 自动重试计时器
         self._last_retry_time: float = 0.0
         # 上传速度跟踪：per-task 已上传字节 → monitor loop 汇总算总速度
@@ -976,6 +978,50 @@ class TaskManager:
         self._task_uploaded_bytes.pop(task_id, None)
 
     @staticmethod
+    def _coerce_upload_checkpoint_value(value) -> float:
+        try:
+            return max(0.0, float(value or 0))
+        except Exception:
+            return 0.0
+
+    def _get_upload_progress_checkpoint(self, task: Optional[dict]) -> float:
+        task = self._merge_runtime_task_fields(task)
+        if not task:
+            return 0.0
+        chunk_done = self._coerce_upload_checkpoint_value(task.get("upload_chunk_done"))
+        if chunk_done > 0:
+            return chunk_done
+        return self._coerce_upload_checkpoint_value(task.get("upload_progress"))
+
+    def _record_upload_progress_checkpoint(self, task_id: str, task: Optional[dict] = None) -> float:
+        checkpoint = self._get_upload_progress_checkpoint(task)
+        if checkpoint > 0:
+            previous = self._coerce_upload_checkpoint_value(
+                self._upload_confirmed_checkpoints.get(task_id)
+            )
+            self._upload_confirmed_checkpoints[task_id] = max(previous, checkpoint)
+        return self._coerce_upload_checkpoint_value(
+            self._upload_confirmed_checkpoints.get(task_id)
+        )
+
+    def _reset_upload_retry_state(self, task_id: str):
+        self._upload_retry_counts.pop(task_id, None)
+        self._upload_retry_checkpoints.pop(task_id, None)
+        self._upload_confirmed_checkpoints.pop(task_id, None)
+
+    def _clear_upload_retry_budget(self, task_id: str):
+        self._upload_retry_counts.pop(task_id, None)
+        self._upload_retry_checkpoints.pop(task_id, None)
+
+    def _get_upload_display_baseline(self, task_id: str, total_chunks: int = 0) -> float:
+        baseline = self._coerce_upload_checkpoint_value(
+            self._upload_confirmed_checkpoints.get(task_id)
+        )
+        if total_chunks > 0:
+            return min(baseline, float(total_chunks))
+        return baseline
+
+    @staticmethod
     def _is_upload_stage_task(task: dict) -> bool:
         return (
             float(task.get("download_progress") or 0) >= 100
@@ -1513,15 +1559,18 @@ class TaskManager:
 
 
             total_chunks = self._count_path_chunks(local_path)
+            baseline_chunks = self._get_upload_display_baseline(task_id, total_chunks)
             self._set_runtime_task_fields(
                 task_id,
-                upload_chunk_done=0,
+                upload_chunk_done=baseline_chunks,
                 upload_chunk_total=total_chunks,
                 upload_note=None,
                 upload_note_level=None,
             )
+            upload_progress = round(baseline_chunks / total_chunks * 100, 1) if total_chunks > 0 else 0.0
             await db.update_task(task_id, status="uploading",
-                                 download_progress=100.0, download_speed="", upload_speed="", error=None)
+                                 download_progress=100.0, upload_progress=upload_progress,
+                                 download_speed="", upload_speed="", error=None)
             await self._broadcast_task_update(task_id)
 
 
@@ -1640,7 +1689,10 @@ class TaskManager:
         max_retries = self.config.get("upload", {}).get("max_retries", 3)
         try:
             all_tasks = await db.get_all_tasks()
-            for task in all_tasks:
+            for raw_task in all_tasks:
+                task = self._merge_runtime_task_fields(raw_task)
+                if not task:
+                    continue
                 if task["status"] != "failed":
                     continue
                 if not self._is_upload_stage_task(task):
@@ -1662,6 +1714,17 @@ class TaskManager:
                 if not local_path or not os.path.exists(local_path):
                     continue
 
+                current_checkpoint = max(
+                    self._record_upload_progress_checkpoint(task_id, task),
+                    self._get_upload_progress_checkpoint(task),
+                )
+                last_retry_checkpoint = self._coerce_upload_checkpoint_value(
+                    self._upload_retry_checkpoints.get(task_id)
+                )
+                if current_checkpoint > last_retry_checkpoint:
+                    self._upload_retry_counts[task_id] = 0
+                    self._upload_retry_checkpoints[task_id] = current_checkpoint
+
                 retries = self._upload_retry_counts.get(task_id, 0)
                 if retries >= max_retries:
                     # 重试耗尽，跳过（文件清理由 _cleanup_completed_files 处理）
@@ -1670,16 +1733,19 @@ class TaskManager:
                 # 发起重试
                 next_retry = retries + 1
                 self._upload_retry_counts[task_id] = next_retry
+                self._upload_retry_checkpoints[task_id] = current_checkpoint
                 total_chunks = self._count_path_chunks(local_path)
+                baseline_chunks = self._get_upload_display_baseline(task_id, total_chunks)
+                baseline_progress = round(baseline_chunks / total_chunks * 100, 1) if total_chunks > 0 else 0.0
                 retry_message = f"上传失败，正在自动重试（{next_retry}/{max_retries}），等待上传槽位..."
                 self._set_runtime_task_fields(
                     task_id,
-                    upload_chunk_done=0,
+                    upload_chunk_done=baseline_chunks,
                     upload_chunk_total=total_chunks,
                     upload_note=retry_message,
                     upload_note_level="warning",
                 )
-                await db.update_task(task_id, status="uploading", upload_progress=0.0, upload_speed="", error=None)
+                await db.update_task(task_id, status="uploading", upload_progress=baseline_progress, upload_speed="", error=None)
                 await self._broadcast_task_update(task_id)
                 logger.info(f"自动重试上传任务 {task_id} ({next_retry}/{max_retries})")
                 t = asyncio.create_task(self._retry_upload(task_id))
@@ -1719,7 +1785,8 @@ class TaskManager:
         total_size = sum(s for _, _, s in all_files)
         total_chunks = sum(self._count_file_chunks(s) for _, _, s in all_files)
         uploaded_total = [0]  # 已上传的总字节数
-        confirmed_chunks_total = [0]
+        baseline_chunks = self._get_upload_display_baseline(task_id, total_chunks)
+        confirmed_chunks_total = [baseline_chunks]
         _last_broadcast = [0.0]
         _last_progress = [0.0]
 
@@ -1727,7 +1794,7 @@ class TaskManager:
         self._task_uploaded_bytes[task_id] = 0
         self._set_runtime_task_fields(
             task_id,
-            upload_chunk_done=0,
+            upload_chunk_done=baseline_chunks,
             upload_chunk_total=total_chunks,
         )
 
@@ -1764,6 +1831,10 @@ class TaskManager:
                             upload_note=None,
                             upload_note_level=None,
                         )
+                        self._record_upload_progress_checkpoint(
+                            task_id,
+                            {"task_id": task_id, "upload_chunk_done": current_chunks},
+                        )
 
                         if total_chunks > 0:
                             progress = round(current_chunks / total_chunks * 100, 1)
@@ -1798,7 +1869,7 @@ class TaskManager:
                     raise Exception(f"上传失败: {rel_path} - {result.get('error', '未知错误')}")
 
                 uploaded_total[0] += file_size
-                confirmed_chunks_total[0] += file_total_chunks
+                confirmed_chunks_total[0] = min(total_chunks, confirmed_chunks_total[0] + file_total_chunks)
                 self._set_runtime_task_fields(
                     task_id,
                     upload_chunk_done=confirmed_chunks_total[0],
@@ -1815,6 +1886,7 @@ class TaskManager:
                 upload_note=None,
                 upload_note_level=None,
             )
+            self._reset_upload_retry_state(task_id)
             await db.update_task(task_id, status="completed", upload_progress=100.0, upload_speed="")
             await self._broadcast_task_update(task_id)
             logger.info(f"任务 {task_id} 文件夹上传完成: {dir_path}，共 {len(all_files)} 个文件")
@@ -1836,24 +1908,32 @@ class TaskManager:
         # 动态超时：保底 10 分钟 + 每 GB 额外 10 分钟
         file_size_on_disk = os.path.getsize(local_path) if os.path.isfile(local_path) else 0
         total_chunks = self._count_file_chunks(file_size_on_disk)
+        baseline_chunks = self._get_upload_display_baseline(task_id, total_chunks)
         self._set_runtime_task_fields(
             task_id,
-            upload_chunk_done=0,
+            upload_chunk_done=baseline_chunks,
             upload_chunk_total=total_chunks,
         )
 
         async def progress_callback(uploaded: int, total: int, confirmed_parts: int, total_parts: int):
             self._task_uploaded_bytes[task_id] = uploaded
+            current_confirmed_parts = min(total_chunks, baseline_chunks + confirmed_parts)
             self._set_runtime_task_fields(
                 task_id,
-                upload_chunk_done=confirmed_parts,
-                upload_chunk_total=total_parts,
+                upload_chunk_done=current_confirmed_parts,
+                upload_chunk_total=total_chunks or total_parts,
                 upload_note=None,
                 upload_note_level=None,
             )
+            self._record_upload_progress_checkpoint(
+                task_id,
+                {"task_id": task_id, "upload_chunk_done": current_confirmed_parts},
+            )
 
-            if total_parts > 0:
-                progress = round(confirmed_parts / total_parts * 100, 1)
+            if total_chunks > 0:
+                progress = round(current_confirmed_parts / total_chunks * 100, 1)
+            elif total_parts > 0:
+                progress = round(current_confirmed_parts / total_parts * 100, 1)
             elif total > 0:
                 progress = round(uploaded / total * 100, 1)
             else:
@@ -1889,6 +1969,7 @@ class TaskManager:
                     upload_note=None,
                     upload_note_level=None,
                 )
+                self._clear_upload_retry_budget(task_id)
                 await db.update_task(task_id, status="completed",
                                      upload_progress=100.0, upload_speed="")
                 await self._broadcast_task_update(task_id)
@@ -1982,6 +2063,7 @@ class TaskManager:
                 self._cancel_existing_upload(task_id)
                 self.clear_upload_progress(task_id)
                 self._set_runtime_task_fields(task_id, upload_note=None, upload_note_level=None)
+                self._clear_upload_retry_budget(task_id)
                 old_gid = task.get("aria2_gid", "")
                 if old_gid:
                     self._uploading_gids.discard(old_gid)
@@ -2049,16 +2131,18 @@ class TaskManager:
                 if not local_path or not os.path.exists(local_path):
                     return {"success": False, "message": "本地文件不存在，无法继续上传"}
 
-                self._upload_retry_counts.pop(task_id, None)
                 total_chunks = self._count_path_chunks(local_path)
+                baseline_chunks = self._get_upload_display_baseline(task_id, total_chunks)
+                baseline_progress = round(baseline_chunks / total_chunks * 100, 1) if total_chunks > 0 else 0.0
+                self._clear_upload_retry_budget(task_id)
                 self._set_runtime_task_fields(
                     task_id,
-                    upload_chunk_done=0,
+                    upload_chunk_done=baseline_chunks,
                     upload_chunk_total=total_chunks,
                     upload_note="正在继续上传，等待上传槽位...",
                     upload_note_level="warning",
                 )
-                await db.update_task(task_id, status="uploading", upload_progress=0.0, upload_speed="", error=None)
+                await db.update_task(task_id, status="uploading", upload_progress=baseline_progress, upload_speed="", error=None)
                 await self._broadcast_task_update(task_id)
                 self._upload_tasks[task_id] = asyncio.create_task(self._retry_upload(task_id))
                 return {"success": True, "message": "已恢复上传"}
@@ -2127,7 +2211,7 @@ class TaskManager:
             self._cancel_existing_upload(task_id)
             self.clear_upload_progress(task_id)
             self._clear_runtime_task_fields(task_id)
-            self._upload_retry_counts.pop(task_id, None)
+            self._reset_upload_retry_state(task_id)
 
             old_gid = task.get("aria2_gid", "")
             if old_gid:
@@ -2185,20 +2269,22 @@ class TaskManager:
             self._serial_gate_releasing_gids.discard(old_gid)
 
         # 清除重试计数
-        self._upload_retry_counts.pop(task_id, None)
+        self._clear_upload_retry_budget(task_id)
 
         # 如果本地文件/文件夹已存在，直接重试上传
         local_path = self._get_upload_path(task.get("local_path", ""))
         if local_path and os.path.exists(local_path):
             total_chunks = self._count_path_chunks(local_path)
+            baseline_chunks = self._get_upload_display_baseline(task_id, total_chunks)
+            baseline_progress = round(baseline_chunks / total_chunks * 100, 1) if total_chunks > 0 else 0.0
             self._set_runtime_task_fields(
                 task_id,
-                upload_chunk_done=0,
+                upload_chunk_done=baseline_chunks,
                 upload_chunk_total=total_chunks,
                 upload_note="正在重新上传，等待上传槽位...",
                 upload_note_level="warning",
             )
-            await db.update_task(task_id, status="uploading", upload_progress=0.0, upload_speed="", error=None)
+            await db.update_task(task_id, status="uploading", upload_progress=baseline_progress, upload_speed="", error=None)
             await self._broadcast_task_update(task_id)
             t = asyncio.create_task(self._retry_upload(task_id))
             self._upload_tasks[task_id] = t
@@ -2285,6 +2371,8 @@ class TaskManager:
             max_retries = self.config.get("upload", {}).get("max_retries", 3)
             retry_attempt = self._upload_retry_counts.get(task_id, 0)
             total_chunks = self._count_path_chunks(local_path)
+            baseline_chunks = self._get_upload_display_baseline(task_id, total_chunks)
+            baseline_progress = round(baseline_chunks / total_chunks * 100, 1) if total_chunks > 0 else 0.0
             retry_note = (
                 f"正在自动重试上传（{retry_attempt}/{max_retries}）..."
                 if retry_attempt > 0 else
@@ -2294,13 +2382,13 @@ class TaskManager:
             # 重置上传状态
             self._set_runtime_task_fields(
                 task_id,
-                upload_chunk_done=0,
+                upload_chunk_done=baseline_chunks,
                 upload_chunk_total=total_chunks,
                 upload_note=retry_note,
                 upload_note_level="warning",
             )
             await db.update_task(task_id, status="uploading",
-                                 upload_progress=0.0, upload_speed="", error=None)
+                                 upload_progress=baseline_progress, upload_speed="", error=None)
             await self._broadcast_task_update(task_id)
 
 
