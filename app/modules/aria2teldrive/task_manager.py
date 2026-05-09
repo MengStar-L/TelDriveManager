@@ -188,10 +188,15 @@ class TaskManager:
     def _get_disk_protection_resume_bytes(self) -> int:
         return (self._get_disk_protection_threshold_gb() + 1) * 1024 ** 3
 
+    def _is_disk_protection_enabled(self) -> bool:
+        return not self._is_serial_transfer_mode_enabled()
+
     def _has_active_upload_work(self) -> bool:
         return bool(self._upload_tasks or self._uploading_gids or self._active_uploads > 0)
 
     def _is_disk_ready_for_serial_resume(self) -> bool:
+        if self._is_serial_transfer_mode_enabled():
+            return True
         if self._disk_protection_active:
             return False
         disk_info = self._disk_usage_info or {}
@@ -652,8 +657,7 @@ class TaskManager:
             return
 
         should_block_downloads = await self._has_serial_resume_blockers(stopped)
-        disk_ready = self._is_disk_ready_for_serial_resume()
-        if should_block_downloads or not disk_ready:
+        if should_block_downloads:
             for item in active_items + queued_items:
                 if item.get("status") in ("active", "waiting"):
                     await self._pause_for_serial_gate(item)
@@ -703,6 +707,8 @@ class TaskManager:
         await self._sync_serial_transfer_gate_impl(active_items, queued_items, stopped)
 
     def _get_effective_max_concurrent_downloads(self) -> int:
+        if self._is_serial_transfer_mode_enabled():
+            return self._get_user_max_concurrent_downloads()
         if self._disk_protection_active:
             return max(1, int(self._disk_protection_applied_max_downloads or 1))
         return self._get_user_max_concurrent_downloads()
@@ -728,6 +734,33 @@ class TaskManager:
     async def _sync_disk_space_download_protection(self, active_download_count: int):
         aria2 = self.aria2
         if not aria2:
+            return
+
+        if not self._is_disk_protection_enabled():
+            configured_max = self._get_user_max_concurrent_downloads()
+            should_apply = (
+                self._disk_protection_active
+                or self._disk_protection_applied_max_downloads != configured_max
+            )
+            if should_apply:
+                try:
+                    await aria2.change_global_option({
+                        "max-concurrent-downloads": str(configured_max),
+                    })
+                except Exception as e:
+                    logger.warning(f"同步串行模式 aria2 并发配置失败: {e}")
+                    return
+
+            self._disk_protection_active = False
+            self._disk_protection_applied_max_downloads = configured_max
+            self._disk_protection_info = {
+                "active": False,
+                "message": "",
+                "threshold_bytes": self._get_disk_protection_threshold_bytes(),
+                "resume_threshold_bytes": self._get_disk_protection_resume_bytes(),
+                "configured_max_concurrent": configured_max,
+                "applied_max_concurrent": configured_max,
+            }
             return
 
         disk_info = self._disk_usage_info or {}

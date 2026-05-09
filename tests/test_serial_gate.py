@@ -13,6 +13,7 @@ class FakeAria2:
         self.unpaused = []
         self.added = []
         self.removed = []
+        self.global_option_changes = []
         self.active = []
         self.waiting = []
         self.stopped = []
@@ -41,6 +42,10 @@ class FakeAria2:
     async def add_uri(self, url, options=None):
         self.added.append((url, dict(options or {})))
         return f"gid-{len(self.added)}"
+
+    async def change_global_option(self, options):
+        self.global_option_changes.append(dict(options or {}))
+        return "OK"
 
     async def tell_active(self):
         return list(self.active)
@@ -99,7 +104,7 @@ class SerialGateTests(unittest.IsolatedAsyncioTestCase):
             "pending",
         )
 
-    async def test_disk_not_ready_holds_even_active_item(self):
+    async def test_disk_not_ready_does_not_pause_active_item_in_serial_mode(self):
         manager = self.make_manager()
         manager._disk_usage_info = {"free": 0}
 
@@ -108,10 +113,67 @@ class SerialGateTests(unittest.IsolatedAsyncioTestCase):
             waiting=[],
         )
 
-        self.assertEqual(manager.aria2.force_paused, ["next-active"])
+        self.assertEqual(manager.aria2.force_paused, [])
+        self.assertEqual(manager._visible_aria2_status("active", "next-active"), "downloading")
+
+    async def test_dispatch_ignores_low_disk_space_in_serial_mode(self):
+        manager = self.make_manager()
+        manager._disk_usage_info = {"free": 0}
+        queued_task = {
+            "task_id": "queued-1",
+            "status": "pending",
+            "url": "https://example.test/one.bin",
+            "filename": "one.bin",
+            "aria2_gid": None,
+            "aria2_options_json": json.dumps({"dir": ".", "out": "one.bin"}),
+        }
+        updates = {}
+
+        original_get_next = task_manager_module.db.get_next_pending_queued_task
+        original_update_task = task_manager_module.db.update_task
+        original_get_all = task_manager_module.db.get_all_tasks
+        try:
+            async def fake_get_next():
+                return queued_task if not updates else None
+
+            async def fake_update_task(task_id, **kwargs):
+                updates.update(kwargs)
+
+            async def fake_get_all():
+                return []
+
+            async def fake_broadcast(*args, **kwargs):
+                return None
+
+            task_manager_module.db.get_next_pending_queued_task = fake_get_next
+            task_manager_module.db.update_task = fake_update_task
+            task_manager_module.db.get_all_tasks = fake_get_all
+            manager._broadcast_task_update = fake_broadcast
+
+            released = await manager._dispatch_next_serial_download()
+        finally:
+            task_manager_module.db.get_next_pending_queued_task = original_get_next
+            task_manager_module.db.update_task = original_update_task
+            task_manager_module.db.get_all_tasks = original_get_all
+
+        self.assertTrue(released)
+        self.assertEqual(len(manager.aria2.added), 1)
+        self.assertEqual(updates["status"], "downloading")
+
+    async def test_serial_mode_disables_disk_protection_status_and_limit(self):
+        manager = self.make_manager()
+        manager._disk_usage_info = {"free": 0}
+        manager._disk_protection_active = True
+        manager._disk_protection_applied_max_downloads = 3
+
+        await manager._sync_disk_space_download_protection(active_download_count=2)
+
+        self.assertFalse(manager._disk_protection_active)
+        self.assertEqual(manager._disk_protection_info["active"], False)
+        self.assertEqual(manager._disk_protection_info["message"], "")
         self.assertEqual(
-            manager._visible_aria2_status("active", "next-active"),
-            "pending",
+            manager.aria2.global_option_changes[-1]["max-concurrent-downloads"],
+            "1",
         )
 
     async def test_disk_recovered_releases_gate_held_paused_item(self):
@@ -142,6 +204,21 @@ class SerialGateTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(manager.aria2.unpaused, ["system-held"])
         self.assertNotIn("system-held", manager._serial_gate_paused_gids)
         self.assertNotIn("manual-paused", manager.aria2.unpaused)
+
+    async def test_non_serial_mode_keeps_disk_protection_behavior(self):
+        manager = self.make_manager()
+        manager.config["upload"]["serial_transfer_mode"] = False
+        manager._disk_usage_info = {"free": 0}
+
+        await manager._sync_disk_space_download_protection(active_download_count=2)
+
+        self.assertTrue(manager._disk_protection_active)
+        self.assertEqual(manager._disk_protection_info["active"], True)
+        self.assertTrue(manager._disk_protection_info["message"])
+        self.assertEqual(
+            manager.aria2.global_option_changes[-1]["max-concurrent-downloads"],
+            "2",
+        )
 
     async def test_add_task_queues_without_touching_aria2_in_serial_mode(self):
         manager = self.make_manager()
