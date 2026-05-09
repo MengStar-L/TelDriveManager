@@ -83,7 +83,8 @@ class TaskManager:
             "applied_max_concurrent": self._get_user_max_concurrent_downloads(),
         }
         # 串行模式：被暂停的 aria2 GID 集合
-        self._serial_paused_gids: set = set()
+        self._serial_gate_paused_gids: Set[str] = set()
+        self._serial_gate_releasing_gids: Set[str] = set()
 
 
 
@@ -104,6 +105,16 @@ class TaskManager:
             random_chunk_name=cfg["teldrive"].get("random_chunk_name", True),
             max_retries=cfg.get("upload", {}).get("max_retries", 3)
         )
+
+    def _require_aria2(self) -> Aria2Client:
+        if self.aria2 is None:
+            raise RuntimeError("aria2 client is not initialized")
+        return self.aria2
+
+    def _require_teldrive(self) -> TelDriveClient:
+        if self.teldrive is None:
+            raise RuntimeError("TelDrive client is not initialized")
+        return self.teldrive
 
     async def _close_clients(self):
         old_aria2 = self.aria2
@@ -186,99 +197,171 @@ class TaskManager:
         free_bytes = max(0, int(disk_info.get("free") or 0))
         return free_bytes >= self._get_disk_protection_resume_bytes()
 
-    async def _has_serial_resume_blockers(self) -> bool:
+    def _is_serial_gate_held(self, gid: str) -> bool:
+        return bool(gid and gid in self._serial_gate_paused_gids)
+
+    def _visible_aria2_status(self, aria2_status: str, gid: str) -> str:
+        if gid in self._serial_gate_releasing_gids and aria2_status == "paused":
+            return "pending"
+        if aria2_status != "paused":
+            self._serial_gate_releasing_gids.discard(gid)
+
+        if (
+            self._is_serial_transfer_mode_enabled()
+            and self._is_serial_gate_held(gid)
+            and aria2_status in ("active", "waiting", "paused")
+        ):
+            return "pending"
+
+        status_map = {
+            "active": "downloading",
+            "waiting": "pending",
+            "paused": "paused",
+            "complete": "uploading",
+            "error": "failed",
+            "removed": "cancelled",
+        }
+        return status_map.get(aria2_status, "pending")
+
+    async def _has_serial_resume_blockers(self, stopped: Optional[list] = None) -> bool:
         if self._has_active_upload_work():
             return True
 
+        for item in stopped or []:
+            gid = item.get("gid", "")
+            if not gid or gid in self._terminal_gids:
+                continue
+            parsed = Aria2Client.parse_status(item)
+            if parsed.get("status") != "complete":
+                continue
+            task = await db.get_task_by_gid(gid)
+            if not task:
+                task = await db.get_task(gid)
+            if not task:
+                return True
+            if task.get("status") == "uploading":
+                return True
+            if task.get("status") not in ("completed", "cancelled", "failed"):
+                return True
+
         all_tasks = await db.get_all_tasks()
+        auto_delete = self.config.get("upload", {}).get("auto_delete", True)
         for task in all_tasks:
             if not self._is_upload_stage_task(task):
                 continue
             status = str(task.get("status") or "")
             if status == "uploading":
                 return True
+            local_path = self._get_upload_path(task.get("local_path", ""))
+            if status == "completed":
+                if auto_delete and local_path and os.path.exists(local_path):
+                    return True
+                continue
             if status not in ("failed", "paused"):
                 continue
 
-            local_path = self._get_upload_path(task.get("local_path", ""))
             if local_path and os.path.exists(local_path):
                 return True
 
         return False
 
-    async def _sync_serial_transfer_gate(self, active: list, waiting: list):
+    async def _pause_for_serial_gate(self, item: dict) -> bool:
+        gid = item.get("gid", "")
+        aria2 = self.aria2
+        if not gid or not aria2:
+            return False
+
+        status = item.get("status")
+        if status == "paused":
+            self._serial_gate_paused_gids.add(gid)
+            return True
+        if status not in ("active", "waiting"):
+            return False
+
+        try:
+            await aria2.force_pause(gid)
+        except Exception:
+            try:
+                await aria2.pause(gid)
+            except Exception as e:
+                logger.debug(f"serial gate pause failed: {gid}, {e}")
+                return False
+
+        self._serial_gate_paused_gids.add(gid)
+        return True
+
+    async def _unpause_from_serial_gate(self, gid: str) -> bool:
+        aria2 = self.aria2
+        if not gid or not aria2:
+            return False
+        try:
+            await aria2.unpause(gid)
+        except Exception as e:
+            logger.debug(f"serial gate unpause failed: {gid}, {e}")
+            return False
+        self._serial_gate_paused_gids.discard(gid)
+        self._serial_gate_releasing_gids.add(gid)
+        return True
+
+    async def _sync_serial_transfer_gate_impl(
+        self, active_items: list, queued_items: list, stopped: Optional[list] = None
+    ):
+        if not self._is_serial_transfer_mode_enabled():
+            if not self._serial_gate_paused_gids:
+                return
+            paused_gids = set(self._serial_gate_paused_gids)
+            for item in queued_items:
+                gid = item.get("gid", "")
+                if gid in paused_gids and item.get("status") == "paused":
+                    await self._unpause_from_serial_gate(gid)
+            return
+
+        should_block_downloads = await self._has_serial_resume_blockers(stopped)
+        disk_ready = self._is_disk_ready_for_serial_resume()
+        if should_block_downloads or not disk_ready:
+            for item in active_items + queued_items:
+                if item.get("status") in ("active", "waiting"):
+                    await self._pause_for_serial_gate(item)
+            return
+
+        gated_active = [item for item in active_items if self._is_serial_gate_held(item.get("gid", ""))]
+        if gated_active:
+            for item in gated_active:
+                await self._pause_for_serial_gate(item)
+            return
+
+        ungated_active = [item for item in active_items if not self._is_serial_gate_held(item.get("gid", ""))]
+        if ungated_active:
+            allowed_gid = ungated_active[0].get("gid", "")
+            for item in active_items + queued_items:
+                gid = item.get("gid", "")
+                if gid == allowed_gid or item.get("status") not in ("active", "waiting"):
+                    continue
+                await self._pause_for_serial_gate(item)
+            return
+
+        ungated_waiting = [
+            item for item in queued_items
+            if item.get("status") == "waiting" and not self._is_serial_gate_held(item.get("gid", ""))
+        ]
+        if ungated_waiting:
+            for item in ungated_waiting[1:]:
+                await self._pause_for_serial_gate(item)
+            return
+
+        for item in queued_items:
+            gid = item.get("gid", "")
+            if gid and item.get("status") == "paused" and self._is_serial_gate_held(gid):
+                await self._unpause_from_serial_gate(gid)
+                break
+
+    async def _sync_serial_transfer_gate(self, active: list, waiting: list, stopped: Optional[list] = None):
         if not self.aria2:
             return
 
         queued_items = [item for item in (waiting or []) if item.get("gid")]
         active_items = [item for item in (active or []) if item.get("gid")]
-
-        if not self._is_serial_transfer_mode_enabled():
-            if not self._serial_paused_gids:
-                return
-            paused_gids = set(self._serial_paused_gids)
-            self._serial_paused_gids.clear()
-            for item in queued_items:
-                gid = item.get("gid", "")
-                if gid in paused_gids and item.get("status") == "paused":
-                    try:
-                        await self.aria2.unpause(gid)
-                    except Exception as e:
-                        logger.debug(f"恢复串行模式自动暂停任务失败: {gid}, {e}")
-            return
-
-        should_block_downloads = await self._has_serial_resume_blockers()
-        if should_block_downloads:
-            for item in active_items + queued_items:
-                gid = item.get("gid", "")
-                if not gid or item.get("status") not in ("active", "waiting"):
-                    continue
-                try:
-                    await self.aria2.pause(gid)
-                    self._serial_paused_gids.add(gid)
-                except Exception as e:
-                    logger.debug(f"串行模式暂停下载任务失败: {gid}, {e}")
-            return
-
-        if len(active_items) > 1:
-            for item in active_items[1:]:
-                gid = item.get("gid", "")
-                if not gid:
-                    continue
-                try:
-                    await self.aria2.pause(gid)
-                    self._serial_paused_gids.add(gid)
-                except Exception as e:
-                    logger.debug(f"串行模式收敛下载并发失败: {gid}, {e}")
-            return
-
-        disk_ready = self._is_disk_ready_for_serial_resume()
-        if not disk_ready:
-            if active_items:
-                return
-            for item in queued_items:
-                gid = item.get("gid", "")
-                if not gid or item.get("status") != "waiting":
-                    continue
-                try:
-                    await self.aria2.pause(gid)
-                    self._serial_paused_gids.add(gid)
-                except Exception as e:
-                    logger.debug(f"串行模式等待磁盘恢复时暂停任务失败: {gid}, {e}")
-            return
-
-        if active_items:
-            return
-
-        for item in queued_items:
-            gid = item.get("gid", "")
-            if gid and item.get("status") == "paused" and gid in self._serial_paused_gids:
-                try:
-                    await self.aria2.unpause(gid)
-                    self._serial_paused_gids.discard(gid)
-                except Exception as e:
-                    logger.debug(f"串行模式恢复下一个下载失败: {gid}, {e}")
-                break
+        await self._sync_serial_transfer_gate_impl(active_items, queued_items, stopped)
 
     def _get_effective_max_concurrent_downloads(self) -> int:
         if self._disk_protection_active:
@@ -290,6 +373,7 @@ class TaskManager:
         try:
             cfg = self.config
             aria2_cfg = cfg["aria2"]
+            aria2 = self._require_aria2()
             options = {
                 "max-concurrent-downloads": str(self._get_effective_max_concurrent_downloads()),
                 "split": str(aria2_cfg.get("split", 8)),
@@ -298,12 +382,13 @@ class TaskManager:
                 "max-overall-download-limit": "0",
                 "dir": aria2_cfg.get("download_dir", "./downloads"),
             }
-            await self.aria2.change_global_option(options)
+            await aria2.change_global_option(options)
         except Exception:
             pass
 
     async def _sync_disk_space_download_protection(self, active_download_count: int):
-        if not self.aria2:
+        aria2 = self.aria2
+        if not aria2:
             return
 
         disk_info = self._disk_usage_info or {}
@@ -325,7 +410,7 @@ class TaskManager:
 
         if should_apply:
             try:
-                await self.aria2.change_global_option({
+                await aria2.change_global_option({
                     "max-concurrent-downloads": str(target_max),
                 })
             except Exception as e:
@@ -368,6 +453,8 @@ class TaskManager:
         for t in all_tasks:
             if t.get("aria2_gid"):
                 self._known_gids.add(t["aria2_gid"])
+                if self._is_serial_transfer_mode_enabled() and t.get("status") == "pending":
+                    self._serial_gate_paused_gids.add(t["aria2_gid"])
 
         # 恢复僵死的 uploading 任务（应用重启后 uploading 状态不会自动恢复）
         for t in all_tasks:
@@ -412,8 +499,9 @@ class TaskManager:
             self._upload_tasks.clear()
 
         # 关闭 aria2 HTTP 会话
-        if self.aria2:
-            await self.aria2.close()
+        aria2 = self.aria2
+        if aria2:
+            await aria2.close()
         logger.info("任务管理器已停止")
 
 
@@ -722,10 +810,11 @@ class TaskManager:
         """从 aria2 获取所有任务，同步到本地数据库"""
         try:
             # 获取 aria2 全部任务
-            active = await self.aria2.tell_active() or []
-            waiting = await self.aria2.tell_waiting(0, 1000) or []
+            aria2 = self._require_aria2()
+            active = await aria2.tell_active() or []
+            waiting = await aria2.tell_waiting(0, 1000) or []
             # 分页拉取所有 stopped 任务，避免超过 100 条后遗漏
-            stopped = await self.aria2.tell_stopped_all() or []
+            stopped = await aria2.tell_stopped_all() or []
         except Exception as e:
             # aria2 连接失败时静默跳过（仅每 30 秒打一次日志）
             self._last_download_speed = 0
@@ -738,7 +827,7 @@ class TaskManager:
             logger.debug(f"同步磁盘保护状态失败: {e}")
 
         try:
-            await self._sync_serial_transfer_gate(active, waiting)
+            await self._sync_serial_transfer_gate(active, waiting, stopped)
         except Exception as e:
             logger.debug(f"同步串行下载上传状态失败: {e}")
 
@@ -795,15 +884,7 @@ class TaskManager:
                         if uris:
                             url = uris[0].get("uri", "")
 
-                    status_map = {
-                        "active": "downloading",
-                        "waiting": "pending",
-                        "paused": "paused",
-                        "complete": "uploading",
-                        "error": "failed",
-                        "removed": "cancelled"
-                    }
-                    initial_status = status_map.get(aria2_status, "pending")
+                    initial_status = self._visible_aria2_status(aria2_status, gid)
 
                     await db.add_task(
                         task_id=task_id,
@@ -816,7 +897,7 @@ class TaskManager:
                         status=initial_status,
                         aria2_gid=gid,
                         download_progress=100.0 if aria2_status == "complete" else parsed["progress"],
-                        download_speed="" if aria2_status == "complete" else parsed["speed_str"],
+                        download_speed=parsed["speed_str"] if initial_status == "downloading" else "",
                         file_size=parsed["file_size"],
                         local_path=parsed["file_path"]
                     )
@@ -855,6 +936,12 @@ class TaskManager:
 
             task_id = task["task_id"]
             current_status = task["status"]
+            if (
+                self._is_serial_transfer_mode_enabled()
+                and aria2_status == "paused"
+                and current_status == "pending"
+            ):
+                self._serial_gate_paused_gids.add(gid)
 
             # 已完成上传、已取消、已失败的任务不再更新
             if current_status in ("completed", "cancelled", "failed"):
@@ -875,24 +962,27 @@ class TaskManager:
             if parsed["file_path"]:
                 update_data["local_path"] = parsed["file_path"]
 
-            if aria2_status == "active":
+            visible_status = self._visible_aria2_status(aria2_status, gid)
+            if visible_status == "downloading":
                 update_data["status"] = "downloading"
                 tracked_download_speed += int(parsed["download_speed"] or 0)
-            elif aria2_status == "waiting":
+            elif visible_status == "pending":
 
                 update_data["status"] = "pending"
-            elif aria2_status == "paused":
+                update_data["download_speed"] = ""
+            elif visible_status == "paused":
                 update_data["status"] = "paused"
-            elif aria2_status == "complete":
+                update_data["download_speed"] = ""
+            elif visible_status == "uploading":
                 update_data["status"] = "uploading"
                 update_data["download_progress"] = 100.0
                 update_data["download_speed"] = ""
-            elif aria2_status == "error":
+            elif visible_status == "failed":
                 error_code = item.get("errorCode", "")
                 error_msg = item.get("errorMessage", "下载失败")
                 update_data["status"] = "failed"
                 update_data["error"] = f"aria2 错误 [{error_code}]: {error_msg}"
-            elif aria2_status == "removed":
+            elif visible_status == "cancelled":
                 update_data["status"] = "cancelled"
 
             await db.update_task(task_id, **update_data)
@@ -1056,6 +1146,7 @@ class TaskManager:
 
             # 上传成功后清理本地文件
             await self._auto_delete_local(task_id, local_path)
+            await self._check_disk_usage()
 
         except asyncio.CancelledError:
             logger.info(f"任务 {task_id} 上传被取消（用户重试或取消）")
@@ -1071,16 +1162,17 @@ class TaskManager:
             self._uploading_gids.discard(gid)
             self._upload_tasks.pop(task_id, None)
 
-    async def _auto_delete_local(self, task_id: str, local_path: str):
+    async def _auto_delete_local(self, task_id: str, local_path: str) -> bool:
         """上传成功后自动删除本地文件（如果配置了 auto_delete）"""
         try:
             task = await db.get_task(task_id)
             if not task or task["status"] != "completed":
-                return
+                return False
             if not self.config.get("upload", {}).get("auto_delete", True):
-                return
+                return True
             if not local_path or not os.path.exists(local_path):
-                return
+                await self._check_disk_usage()
+                return True
             # 带重试的删除（Windows 可能因句柄延迟释放而失败）
             for attempt in range(3):
                 try:
@@ -1090,7 +1182,8 @@ class TaskManager:
                     else:
                         os.remove(local_path)
                         logger.info(f"已删除本地文件: {local_path}")
-                    return  # 删除成功，直接返回
+                    await self._check_disk_usage()
+                    return True
                 except PermissionError:
                     if attempt < 2:
                         logger.warning(f"删除文件被拒绝(句柄占用)，{attempt+1}/3 次重试: {local_path}")
@@ -1099,6 +1192,8 @@ class TaskManager:
                         raise
         except Exception as e:
             logger.warning(f"删除本地文件失败: {local_path}, {e}")
+
+        return False
 
     async def _cleanup_completed_files(self):
         """定期清理已完成任务的本地残留文件（兜底机制）"""
@@ -1204,6 +1299,7 @@ class TaskManager:
     async def _upload_directory(self, task_id: str, dir_path: str, teldrive_path: str = "/"):
         """递归上传文件夹到 TelDrive，保留目录结构"""
         import time
+        teldrive = self._require_teldrive()
 
         # 收集所有文件及其大小
         # 直接使用 teldrive_path 作为基础路径，不额外嵌套文件夹名
@@ -1292,7 +1388,7 @@ class TaskManager:
 
                 try:
                     result = await asyncio.wait_for(
-                        self.teldrive.upload_file_chunked(
+                        teldrive.upload_file_chunked(
                             full_path, file_teldrive_path, cb
                         ),
                         timeout=self._calc_upload_timeout(file_size)
@@ -1332,6 +1428,7 @@ class TaskManager:
     async def _upload(self, task_id: str, local_path: str, teldrive_path: str = "/"):
         """上传单个文件到 TelDrive"""
         import time
+        teldrive = self._require_teldrive()
         _last_broadcast = [0.0]   # 上次广播时间
         _last_progress = [0.0]    # 上次广播的进度值
 
@@ -1378,7 +1475,7 @@ class TaskManager:
         try:
             try:
                 result = await asyncio.wait_for(
-                    self.teldrive.upload_file_chunked(
+                    teldrive.upload_file_chunked(
                         local_path, teldrive_path, progress_callback
                     ),
                     timeout=upload_timeout
@@ -1406,7 +1503,7 @@ class TaskManager:
 
 
 
-    async def _broadcast_task_update(self, task_id: str, task_data: dict = None):
+    async def _broadcast_task_update(self, task_id: str, task_data: Optional[dict] = None):
         """广播任务状态更新（优先使用传入的 task_data 避免查库）"""
         task = self._merge_runtime_task_fields(task_data or await db.get_task(task_id))
         if task:
@@ -1420,7 +1517,7 @@ class TaskManager:
     # 手动添加任务（通过面板）
     # ===========================================
 
-    async def register_external_task(self, gid: str, url: str, filename: str = None,
+    async def register_external_task(self, gid: str, url: str, filename: Optional[str] = None,
                                      teldrive_path: str = "/", status: str = "pending") -> Optional[dict]:
         """为外部提交到 aria2 的任务注册 TelDrive 目标目录。"""
         gid = str(gid or "").strip()
@@ -1431,22 +1528,33 @@ class TaskManager:
         await db.add_task(gid, url, filename, normalized_path)
         await db.update_task(gid, status=status, aria2_gid=gid, teldrive_path=normalized_path)
         self._known_gids.add(gid)
+        if self._is_serial_transfer_mode_enabled() and status == "pending":
+            self._serial_gate_paused_gids.add(gid)
         await self._broadcast_task_update(gid)
         return await db.get_task(gid)
 
-    async def add_task(self, url: str, filename: str = None,
+    async def add_task(self, url: str, filename: Optional[str] = None,
                        teldrive_path: str = "/") -> dict:
         """通过面板手动添加下载+上传任务"""
         download_dir = self.config["aria2"].get("download_dir", "./downloads")
         options = {"dir": download_dir}
         if filename:
             options["out"] = filename
+        initial_status = "pending" if self._is_serial_transfer_mode_enabled() else "downloading"
+        if self._is_serial_transfer_mode_enabled():
+            options["pause"] = "true"
 
-        gid = await self.aria2.add_uri(url, options)
+        aria2 = self._require_aria2()
+        gid = await aria2.add_uri(url, options)
         task = await self.register_external_task(
-            gid, url, filename, teldrive_path=teldrive_path, status="downloading"
+            gid, url, filename, teldrive_path=teldrive_path, status=initial_status
         )
-        return task or await db.get_task(gid)
+        if task:
+            return task
+        stored_task = await db.get_task(gid)
+        if not stored_task:
+            raise RuntimeError("task was added to aria2 but was not registered locally")
+        return stored_task
 
 
     # ===========================================
@@ -1471,6 +1579,8 @@ class TaskManager:
                 old_gid = task.get("aria2_gid", "")
                 if old_gid:
                     self._uploading_gids.discard(old_gid)
+                    self._serial_gate_paused_gids.discard(old_gid)
+                    self._serial_gate_releasing_gids.discard(old_gid)
                 await db.update_task(task_id, status="paused", download_speed="", upload_speed="", error=None)
                 await self._broadcast_task_update(task_id)
                 return {"success": True, "message": "已暂停上传"}
@@ -1478,8 +1588,12 @@ class TaskManager:
             if not task.get("aria2_gid"):
                 return {"success": False, "message": "缺少 aria2 GID，无法暂停"}
 
-            await self.aria2.pause(task["aria2_gid"])
-            self._serial_paused_gids.discard(task["aria2_gid"])
+            aria2 = self._require_aria2()
+            gid = task["aria2_gid"]
+            if not self._is_serial_gate_held(gid):
+                await aria2.pause(gid)
+            self._serial_gate_paused_gids.discard(gid)
+            self._serial_gate_releasing_gids.discard(gid)
             await db.update_task(task_id, status="paused", download_speed="")
             await self._broadcast_task_update(task_id)
 
@@ -1520,9 +1634,17 @@ class TaskManager:
             if not task.get("aria2_gid"):
                 return {"success": False, "message": "缺少 aria2 GID，无法恢复"}
 
-            self._serial_paused_gids.discard(task["aria2_gid"])
-            await self.aria2.unpause(task["aria2_gid"])
-            await db.update_task(task_id, status="downloading")
+            gid = task["aria2_gid"]
+            if self._is_serial_transfer_mode_enabled():
+                self._serial_gate_paused_gids.add(gid)
+                self._serial_gate_releasing_gids.discard(gid)
+                await db.update_task(task_id, status="pending", download_speed="")
+            else:
+                aria2 = self._require_aria2()
+                self._serial_gate_paused_gids.discard(gid)
+                self._serial_gate_releasing_gids.discard(gid)
+                await aria2.unpause(gid)
+                await db.update_task(task_id, status="downloading")
             await self._broadcast_task_update(task_id)
             return {"success": True, "message": "已恢复"}
         except Exception as e:
@@ -1542,7 +1664,8 @@ class TaskManager:
         try:
             if task.get("aria2_gid"):
                 try:
-                    await self.aria2.force_remove(task["aria2_gid"])
+                    aria2 = self._require_aria2()
+                    await aria2.force_remove(task["aria2_gid"])
                 except Exception:
                     pass
 
@@ -1556,7 +1679,8 @@ class TaskManager:
                 self._uploading_gids.discard(old_gid)
                 self._known_gids.discard(old_gid)
                 self._terminal_gids.discard(old_gid)
-                self._serial_paused_gids.discard(old_gid)
+                self._serial_gate_paused_gids.discard(old_gid)
+                self._serial_gate_releasing_gids.discard(old_gid)
 
             local = self._get_upload_path(task.get("local_path", ""))
 
@@ -1602,7 +1726,8 @@ class TaskManager:
             self._uploading_gids.discard(old_gid)
             self._known_gids.discard(old_gid)
             self._terminal_gids.discard(old_gid)
-            self._serial_paused_gids.discard(old_gid)
+            self._serial_gate_paused_gids.discard(old_gid)
+            self._serial_gate_releasing_gids.discard(old_gid)
 
         # 清除重试计数
         self._upload_retry_counts.pop(task_id, None)
@@ -1626,12 +1751,13 @@ class TaskManager:
 
 
         # 否则需要重新下载
+        aria2 = self._require_aria2()
         url = task.get("url", "")
 
         # 如果数据库中没有 URL，尝试从 aria2 查询原始 URI
         if not url and old_gid:
             try:
-                status = await self.aria2.tell_status(old_gid)
+                status = await aria2.tell_status(old_gid)
                 files = status.get("files", [])
                 if files:
                     uris = files[0].get("uris", [])
@@ -1647,24 +1773,29 @@ class TaskManager:
         options = {"dir": download_dir}
         if task.get("filename"):
             options["out"] = task["filename"]
+        next_status = "pending" if self._is_serial_transfer_mode_enabled() else "downloading"
+        if self._is_serial_transfer_mode_enabled():
+            options["pause"] = "true"
 
         try:
             # 先尝试从 aria2 移除旧的失败任务
             if old_gid:
                 try:
-                    await self.aria2.remove(old_gid)
+                    await aria2.remove(old_gid)
                 except Exception:
                     pass
 
-            new_gid = await self.aria2.add_uri(url, options)
+            new_gid = await aria2.add_uri(url, options)
             self._clear_runtime_task_fields(task_id)
             await db.update_task(
-                task_id, status="downloading", aria2_gid=new_gid,
+                task_id, status=next_status, aria2_gid=new_gid,
                 download_progress=0, upload_progress=0,
                 download_speed="", upload_speed="",
                 error=None, local_path=None, url=url
             )
             self._known_gids.add(new_gid)
+            if self._is_serial_transfer_mode_enabled():
+                self._serial_gate_paused_gids.add(new_gid)
 
             await self._broadcast_task_update(task_id)
             return {"success": True, "message": "正在重新下载"}
@@ -1721,6 +1852,7 @@ class TaskManager:
 
             # 上传成功后清理本地文件
             await self._auto_delete_local(task_id, local_path)
+            await self._check_disk_usage()
 
         except asyncio.CancelledError:
             logger.info(f"任务 {task_id} 重试上传被取消")
@@ -1748,10 +1880,12 @@ class TaskManager:
         gid = task.get("aria2_gid")
         if gid:
             self._known_gids.discard(gid)
-            self._serial_paused_gids.discard(gid)
+            self._serial_gate_paused_gids.discard(gid)
+            self._serial_gate_releasing_gids.discard(gid)
             # 从 aria2 移除下载记录
             try:
-                await self.aria2.remove(gid)
+                aria2 = self._require_aria2()
+                await aria2.remove(gid)
             except Exception:
                 pass
 

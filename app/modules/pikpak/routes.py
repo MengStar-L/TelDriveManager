@@ -908,7 +908,8 @@ async def _aria2_push_only(files: List[dict], index: int, delete_pikpak_ids: Lis
             "status": f"共解析出 {len(files)} 个文件，开始推送下载链接到{push_target}...",
         })
         download_dir = aria2_cfg.get("download_dir", "")
-        gids = await aria2.add_uris_batch(tasks_to_add, base_dir=download_dir)
+        serial_mode = bool(cfg.get("upload", {}).get("serial_transfer_mode", False))
+        gids = await aria2.add_uris_batch(tasks_to_add, base_dir=download_dir, pause=serial_mode)
         success_count = 0
         for sequence, (gid, file_info, task_ctx) in enumerate(zip(gids, files, task_contexts), 1):
             if not gid:
@@ -1199,6 +1200,8 @@ async def _process_share_download(share_id: str, file_ids: List[str], pass_code_
                 if output_name:
                     opts["out"] = output_name
                     display_info["name"] = output_name
+                if cfg.get("upload", {}).get("serial_transfer_mode", False):
+                    opts["pause"] = "true"
 
                 gid = await _aria2.add_uri(url_info["url"], opts)
                 if gid:

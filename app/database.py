@@ -107,7 +107,7 @@ async def close_db():
         _db_conn = None
 
 
-async def add_task(task_id: str, url: str, filename: str = None,
+async def add_task(task_id: str, url: str, filename: Optional[str] = None,
                    teldrive_path: str = "/") -> dict:
     """添加新任务"""
     conn = await _get_conn()
@@ -117,7 +117,10 @@ async def add_task(task_id: str, url: str, filename: str = None,
         (task_id, url, filename, teldrive_path)
     )
     await conn.commit()
-    return await get_task(task_id)
+    task = await get_task(task_id)
+    if task is None:
+        raise RuntimeError(f"failed to create task {task_id}")
+    return task
 
 
 async def get_task(task_id: str) -> Optional[dict]:
@@ -303,7 +306,10 @@ async def create_parse_job(job_id: str, job_type: str, request_payload: dict,
         (job_id, job_type, status, _json_dumps(request_payload)),
     )
     await conn.commit()
-    return await get_parse_job(job_id)
+    job = await get_parse_job(job_id)
+    if job is None:
+        raise RuntimeError(f"failed to create parse job {job_id}")
+    return job
 
 
 async def get_parse_job(job_id: str) -> Optional[dict]:

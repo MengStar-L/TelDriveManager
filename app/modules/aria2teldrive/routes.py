@@ -11,7 +11,7 @@ router = APIRouter(prefix="/api/a2td")
 async def add_task(req: TaskAddRequest):
     """添加下载任务"""
     task = await task_manager.add_task(
-        url=req.url, filename=req.filename, teldrive_path=req.teldrive_path
+        url=req.url, filename=req.filename, teldrive_path=req.teldrive_path or "/"
     )
     return {"success": True, "data": task}
 

@@ -98,6 +98,9 @@ class Aria2Client:
     async def pause(self, gid: str) -> str:
         return await self._call("aria2.pause", gid)
 
+    async def force_pause(self, gid: str) -> str:
+        return await self._call("aria2.forcePause", gid)
+
     async def unpause(self, gid: str) -> str:
         return await self._call("aria2.unpause", gid)
 
@@ -152,7 +155,8 @@ class Aria2Client:
 
     # ─── 批量推送（原 AutoPikDown 的 add_uris_batch） ───
 
-    async def add_uris_batch(self, tasks: List[dict], base_dir: str = "") -> List[str]:
+    async def add_uris_batch(self, tasks: List[dict], base_dir: str = "",
+                             pause: bool = False) -> List[str]:
         """批量添加下载任务
 
         Args:
@@ -172,6 +176,8 @@ class Aria2Client:
                     opts["dir"] = os.path.join(base_dir, t["subdir"]).replace("\\", "/")
                 else:
                     opts["dir"] = base_dir
+            if pause:
+                opts["pause"] = "true"
             gid = await self.add_uri(t["url"], opts)
             gids.append(gid)
         return gids
