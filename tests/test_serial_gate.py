@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any, cast
 
 from app.modules.aria2teldrive import task_manager as task_manager_module
+from app.modules.aria2teldrive.teldrive_client import TelDriveClient
 
 
 class FakeAria2:
@@ -60,6 +61,21 @@ class FakeAria2:
 
     async def tell_status(self, gid):
         return self.status_by_gid.get(gid, {"gid": gid, "status": "paused", "files": []})
+
+
+class FakeTelDrive:
+    def __init__(self, parts=None):
+        self.parts = list(parts or [])
+        self.cleaned_upload_ids = []
+
+    async def get_upload_parts(self, upload_id):
+        return list(self.parts)
+
+    async def cleanup_upload_session(self, upload_id):
+        self.cleaned_upload_ids.append(upload_id)
+
+    def _get_part_message_id(self, part):
+        return int(part.get("partId", part.get("id")))
 
 
 class SerialGateTests(unittest.IsolatedAsyncioTestCase):
@@ -841,6 +857,93 @@ class SerialGateTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("task-3", manager._upload_retry_counts)
         self.assertNotIn("task-3", manager._upload_retry_checkpoints)
         self.assertEqual(manager._upload_confirmed_checkpoints["task-3"], 8)
+
+    async def test_cleanup_polluted_upload_uses_cached_remote_parts(self):
+        manager = self.make_manager()
+        manager.teldrive = cast(Any, FakeTelDrive())
+        manager._upload_session_meta["task-polluted"] = {
+            "upload_id": "upload-1",
+            "remote_parts": [{"partId": 101, "partNo": "1"}, {"partId": 102, "partNo": "2"}],
+        }
+        deleted = []
+        updates = []
+
+        original_get_task = task_manager_module.db.get_task
+        original_update_task = task_manager_module.db.update_task
+        try:
+            async def fake_get_task(task_id):
+                return {
+                    "task_id": task_id,
+                    "status": "failed",
+                    "error": 'structured_upload_error::{"code":"remote_parts_count_mismatch","message":"bad"}',
+                }
+
+            async def fake_update_task(task_id, **kwargs):
+                updates.append(kwargs)
+
+            async def fake_broadcast(*args, **kwargs):
+                return None
+
+            async def fake_delete_messages(message_ids):
+                deleted.extend(message_ids)
+                return True
+
+            cast(Any, task_manager_module.db).get_task = fake_get_task
+            cast(Any, task_manager_module.db).update_task = fake_update_task
+            manager._broadcast_task_update = cast(Any, fake_broadcast)
+            manager._delete_telegram_messages = cast(Any, fake_delete_messages)
+
+            result = await manager.cleanup_polluted_upload("task-polluted")
+        finally:
+            cast(Any, task_manager_module.db).get_task = original_get_task
+            cast(Any, task_manager_module.db).update_task = original_update_task
+
+        self.assertTrue(result["success"])
+        self.assertEqual(deleted, [101, 102])
+        self.assertEqual(manager.teldrive.cleaned_upload_ids, ["upload-1"])
+        self.assertNotIn("task-polluted", manager._upload_session_meta)
+        self.assertEqual(updates[-1]["status"], "failed")
+
+    async def test_retry_upload_guard_skips_duplicate_runner(self):
+        manager = self.make_manager()
+        manager._upload_session_state["dup-task"] = "finalized"
+
+        called = []
+
+        async def fake_wait():
+            called.append("wait")
+
+        manager._wait_upload_slot = cast(Any, fake_wait)
+        await manager._retry_upload("dup-task")
+
+        self.assertEqual(called, [])
+        self.assertNotIn("dup-task", manager._upload_tasks)
+
+
+class TelDriveClientTests(unittest.TestCase):
+    def test_validate_remote_parts_count_mismatch(self):
+        client = TelDriveClient()
+        result = client._validate_remote_parts(
+            [{"partId": i, "partNo": i} for i in range(1, 29)],
+            26,
+        )
+        self.assertEqual(result["error_code"], "remote_parts_count_mismatch")
+
+    def test_validate_remote_parts_duplicate_numbers(self):
+        client = TelDriveClient()
+        result = client._validate_remote_parts(
+            [
+                {"partId": 1, "partNo": "1"},
+                {"partId": 2, "partNo": "1"},
+            ],
+            2,
+        )
+        self.assertEqual(result["error_code"], "remote_parts_duplicate_numbers")
+
+    def test_get_part_number_normalizes_strings(self):
+        client = TelDriveClient()
+        self.assertEqual(client._get_part_number({"partNo": "26"}), 26)
+        self.assertEqual(client._get_part_message_id({"partId": "88"}), 88)
 
 
 if __name__ == "__main__":

@@ -1964,6 +1964,10 @@ function getA2TDUploadActionLabel(task) {
     return progress > 0 ? `上传中 ${progress.toFixed(1)}%` : '上传中';
 }
 
+function isA2TDPollutedUploadTask(task) {
+    return typeof task?.error === 'string' && task.error.startsWith('structured_upload_error::');
+}
+
 function getA2TDTaskActions(task) {
     const pendingAction = a2tdPendingTaskActions.get(task.task_id);
     if (pendingAction) {

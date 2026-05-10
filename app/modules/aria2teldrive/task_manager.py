@@ -1,4 +1,4 @@
-"""任务管理器 - 监控 aria2 下载并自动上传到 TelDrive"""
+﻿"""任务管理器 - 监控 aria2 下载并自动上传到 TelDrive"""
 
 import asyncio
 import json
@@ -66,6 +66,8 @@ class TaskManager:
         self._upload_retry_counts: dict = {}
         self._upload_retry_checkpoints: dict = {}
         self._upload_confirmed_checkpoints: dict = {}
+        self._upload_session_state: dict = {}
+        self._upload_session_meta: dict = {}
         # 自动重试计时器
         self._last_retry_time: float = 0.0
         # 上传速度跟踪：per-task 已上传字节 → monitor loop 汇总算总速度
@@ -1009,6 +1011,72 @@ class TaskManager:
         self._upload_retry_checkpoints.pop(task_id, None)
         self._upload_confirmed_checkpoints.pop(task_id, None)
 
+    @staticmethod
+    def _format_structured_upload_error(error_code: str, message: str, details: Optional[dict] = None) -> str:
+        payload = {"code": error_code, "message": message, "details": details or {}}
+        return f"structured_upload_error::{json.dumps(payload, ensure_ascii=False)}"
+
+    @staticmethod
+    def _parse_structured_upload_error(error) -> Optional[dict]:
+        text = str(error or "")
+        prefix = "structured_upload_error::"
+        if not text.startswith(prefix):
+            return None
+        try:
+            payload = json.loads(text[len(prefix):])
+        except Exception:
+            return None
+        return payload if isinstance(payload, dict) else None
+
+    def _is_polluted_upload_error(self, error) -> bool:
+        payload = self._parse_structured_upload_error(error)
+        if not payload:
+            return False
+        code = str(payload.get("code") or "")
+        return code.startswith("remote_parts_") or code == "upload_session_conflict"
+
+    def _set_upload_session_state(self, task_id: str, state: Optional[str], meta: Optional[dict] = None):
+        if state:
+            self._upload_session_state[task_id] = state
+        else:
+            self._upload_session_state.pop(task_id, None)
+        if meta is not None:
+            self._upload_session_meta[task_id] = dict(meta)
+
+    def _clear_upload_session_state(self, task_id: str, *, keep_meta: bool = False):
+        self._upload_session_state.pop(task_id, None)
+        if not keep_meta:
+            self._upload_session_meta.pop(task_id, None)
+
+    def _mark_upload_session_scheduled(self, task_id: str) -> bool:
+        if self._upload_session_state.get(task_id) in {"scheduled", "running", "finalized"}:
+            return False
+        self._upload_session_state[task_id] = "scheduled"
+        return True
+
+    def _mark_upload_session_running(self, task_id: str) -> bool:
+        current = self._upload_session_state.get(task_id)
+        if current == "finalized":
+            return False
+        if current not in {None, "scheduled", "running"}:
+            return False
+        self._upload_session_state[task_id] = "running"
+        return True
+
+    def _mark_upload_session_finalized(self, task_id: str):
+        self._upload_session_state[task_id] = "finalized"
+
+    def _store_upload_session_meta(self, task_id: str, meta: Optional[dict]):
+        if meta is not None:
+            self._upload_session_meta[task_id] = dict(meta)
+
+    def _get_upload_session_meta(self, task_id: str) -> dict:
+        return dict(self._upload_session_meta.get(task_id) or {})
+
+    def _clear_upload_retry_budget(self, task_id: str):
+        self._upload_retry_counts.pop(task_id, None)
+        self._upload_retry_checkpoints.pop(task_id, None)
+
     def _clear_upload_retry_budget(self, task_id: str):
         self._upload_retry_counts.pop(task_id, None)
         self._upload_retry_checkpoints.pop(task_id, None)
@@ -1036,7 +1104,7 @@ class TaskManager:
             "本地文件不存在",
         )
 
-        return any(marker in error for marker in blocked_markers)
+        return error.startswith("structured_upload_error::") or any(marker in error for marker in blocked_markers)
 
     @staticmethod
     def _normalize_teldrive_path(path: str) -> str:
@@ -1348,9 +1416,7 @@ class TaskManager:
 
                     if aria2_status == "complete":
                         if parsed["file_path"]:
-                            self._upload_tasks[task_id] = asyncio.create_task(
-                                self._handle_download_complete(task_id, gid)
-                            )
+                            self._schedule_upload_from_complete(task_id, gid)
                         else:
                             await db.update_task(task_id, status="completed")
                             self._terminal_gids.add(gid)
@@ -1430,9 +1496,7 @@ class TaskManager:
             if aria2_status == "complete" and current_status != "uploading":
                 local_path = parsed["file_path"]
                 if local_path:
-                    self._upload_tasks[task_id] = asyncio.create_task(
-                        self._handle_download_complete(task_id, gid)
-                    )
+                    self._schedule_upload_from_complete(task_id, gid)
                 else:
                     await db.update_task(task_id, status="completed")
                     self._terminal_gids.add(gid)
@@ -1507,98 +1571,140 @@ class TaskManager:
         extra = int(file_size / (1024 ** 3)) * 600
         return base + extra
 
+    def _schedule_upload_from_complete(self, task_id: str, gid: str) -> bool:
+        if not self._mark_upload_session_scheduled(task_id):
+            logger.info(f"skip duplicate upload scheduling for task {task_id} gid={gid}, state={self._upload_session_state.get(task_id)}")
+            return False
+        self._upload_tasks[task_id] = asyncio.create_task(self._handle_download_complete(task_id, gid))
+        return True
+
+    async def _delete_telegram_messages(self, message_ids) -> bool:
+        normalized_ids = []
+        for msg_id in message_ids or []:
+            try:
+                normalized_ids.append(int(msg_id))
+            except Exception:
+                continue
+        if not normalized_ids:
+            return True
+        try:
+            from app.modules.tel2teldrive.service import config_store, remember_internal_deleted_message_ids, service as t2td_service
+            config = config_store.runtime()
+            client = getattr(t2td_service, "client", None)
+            if client is None or not client.is_connected():
+                return False
+            remember_internal_deleted_message_ids(normalized_ids)
+            await client.delete_messages(config.telegram_channel_id, normalized_ids)
+            return True
+        except Exception as e:
+            logger.warning(f"failed to delete polluted upload telegram messages: {e}")
+            return False
+
+    async def cleanup_polluted_upload(self, task_id: str, retry_after_cleanup: bool = False) -> dict:
+        task = await db.get_task(task_id)
+        if not task:
+            return {"success": False, "message": "task not found"}
+        if not self._is_polluted_upload_error(task.get("error")):
+            return {"success": False, "message": "task has no polluted upload session to clean"}
+
+        meta = self._get_upload_session_meta(task_id)
+        upload_id = str(meta.get("upload_id") or "")
+        remote_parts = list(meta.get("remote_parts") or [])
+        if not upload_id and not remote_parts:
+            return {"success": False, "message": "missing polluted upload session metadata"}
+
+        teldrive = self._require_teldrive()
+        if upload_id:
+            try:
+                fetched_parts = await teldrive.get_upload_parts(upload_id)
+                if fetched_parts:
+                    remote_parts = fetched_parts
+            except Exception:
+                pass
+
+        message_ids = []
+        for part in remote_parts:
+            message_id = teldrive._get_part_message_id(part)
+            if message_id is not None:
+                message_ids.append(message_id)
+        if message_ids and not await self._delete_telegram_messages(message_ids):
+            return {"success": False, "message": "failed to delete polluted upload chunks; ensure tel2teldrive is connected"}
+
+        if upload_id:
+            await teldrive.cleanup_upload_session(upload_id)
+        self._clear_upload_retry_budget(task_id)
+        self._clear_upload_session_state(task_id)
+        self._set_runtime_task_fields(
+            task_id,
+            upload_note="polluted remote chunks cleaned; ready to retry upload",
+            upload_note_level="warning",
+        )
+        await db.update_task(task_id, status="failed", error="polluted remote chunks cleaned; retry upload")
+        await self._broadcast_task_update(task_id)
+
+        if retry_after_cleanup:
+            return await self.retry_task(task_id)
+        return {"success": True, "message": f"cleaned {len(message_ids)} polluted remote chunks from this upload session"}
+
     async def _handle_download_complete(self, task_id: str, gid: str):
-        """下载完成后自动上传到 TelDrive（受并发限制）"""
+        """?????????? TelDrive???????"""
+        if not self._mark_upload_session_running(task_id):
+            logger.info(f"skip duplicate upload runner for task {task_id} gid={gid}, state={self._upload_session_state.get(task_id)}")
+            self._upload_tasks.pop(task_id, None)
+            return
         if gid in self._uploading_gids:
             return
         self._uploading_gids.add(gid)
-
-        # 等待上传槽位（动态读取并发数配置）
+        finalized = False
+        keep_session_meta = False
         await self._wait_upload_slot()
         try:
             task = await db.get_task(task_id)
             if not task or not task.get("local_path"):
-                logger.warning(f"任务 {task_id} 无本地文件路径，跳过上传")
+                logger.warning(f"task {task_id} missing local_path, skip upload")
                 return
-
             local_path = self._get_upload_path(task["local_path"])
             teldrive_path = self._get_task_teldrive_path(task, local_path)
-
-
-            # 等待文件就绪（aria2 可能还在写入/移动文件）
             for attempt in range(5):
                 if os.path.exists(local_path):
                     break
-                logger.info(f"任务 {task_id} 等待文件就绪 ({attempt+1}/5): {local_path}")
                 await asyncio.sleep(1)
-
-            logger.info(f"[上传] 任务 {task_id}: "
-                        f"local={local_path}, "
-                        f"isdir={os.path.isdir(local_path)}, "
-                        f"exists={os.path.exists(local_path)}, "
-                        f"teldrive={teldrive_path}")
-
             if not os.path.exists(local_path):
-                # 输出调试信息：列出下载目录内容，帮助排查路径问题
-                download_dir = get_download_dir(self.config)
-                try:
-                    dir_contents = os.listdir(download_dir) if os.path.isdir(download_dir) else []
-                    logger.error(
-                        f"任务 {task_id} 文件不存在!\n"
-                        f"  期望路径: {local_path}\n"
-                        f"  下载目录: {download_dir}\n"
-                        f"  目录存在: {os.path.isdir(download_dir)}\n"
-                        f"  目录内容: {dir_contents[:20]}")
-                except Exception:
-                    pass
-                error_msg = f"本地文件不存在: {local_path}"
                 self._set_runtime_task_fields(task_id, upload_note=None, upload_note_level=None)
-                await db.update_task(task_id, status="failed", error=error_msg)
+                await db.update_task(task_id, status="failed", error=f"local file missing: {local_path}")
                 await self._broadcast_task_update(task_id)
                 return
-
-
             total_chunks = self._count_path_chunks(local_path)
             baseline_chunks = self._get_upload_display_baseline(task_id, total_chunks)
-            self._set_runtime_task_fields(
-                task_id,
-                upload_chunk_done=baseline_chunks,
-                upload_chunk_total=total_chunks,
-                upload_note=None,
-                upload_note_level=None,
-            )
+            self._set_runtime_task_fields(task_id, upload_chunk_done=baseline_chunks, upload_chunk_total=total_chunks, upload_note=None, upload_note_level=None)
             upload_progress = round(baseline_chunks / total_chunks * 100, 1) if total_chunks > 0 else 0.0
-            await db.update_task(task_id, status="uploading",
-                                 download_progress=100.0, upload_progress=upload_progress,
-                                 download_speed="", upload_speed="", error=None)
+            await db.update_task(task_id, status="uploading", download_progress=100.0, upload_progress=upload_progress, download_speed="", upload_speed="", error=None)
             await self._broadcast_task_update(task_id)
-
-
             if os.path.isdir(local_path):
-                logger.info(f"[上传] 走文件夹上传: {local_path}")
                 await self._upload_directory(task_id, local_path, teldrive_path)
             else:
-                logger.info(f"[上传] 走单文件上传: {local_path} -> "
-                            f"teldrive={teldrive_path}")
                 await self._upload(task_id, local_path, teldrive_path)
-
-            # 上传成功后清理本地文件
             await self._auto_delete_local(task_id, local_path)
             await self._check_disk_usage()
-
+            finalized = self._upload_session_state.get(task_id) == "finalized"
         except asyncio.CancelledError:
-            logger.info(f"任务 {task_id} 上传被取消（用户重试或取消）")
-            # 不标记 failed，让重试逻辑接管
+            logger.info(f"task {task_id} upload cancelled")
         except Exception as e:
-            logger.error(f"任务 {task_id} 上传失败: {e}")
-            self._set_runtime_task_fields(task_id, upload_note=None, upload_note_level=None)
-            await db.update_task(task_id, status="failed", error=str(e))
-            await self._broadcast_task_update(task_id)
-
+            logger.error(f"task {task_id} upload failed: {e}")
+            task_after_error = await db.get_task(task_id)
+            if task_after_error and task_after_error.get("status") != "completed":
+                keep_session_meta = self._is_polluted_upload_error(str(e))
+                self._set_runtime_task_fields(task_id, upload_note=None, upload_note_level=None)
+                await db.update_task(task_id, status="failed", error=str(e))
+                await self._broadcast_task_update(task_id)
         finally:
             self._release_upload_slot()
             self._uploading_gids.discard(gid)
             self._upload_tasks.pop(task_id, None)
+            if finalized:
+                self._mark_upload_session_finalized(task_id)
+            else:
+                self._clear_upload_session_state(task_id, keep_meta=keep_session_meta)
             try:
                 await self._dispatch_next_serial_download()
             except Exception as e:
@@ -1748,8 +1854,10 @@ class TaskManager:
                 await db.update_task(task_id, status="uploading", upload_progress=baseline_progress, upload_speed="", error=None)
                 await self._broadcast_task_update(task_id)
                 logger.info(f"自动重试上传任务 {task_id} ({next_retry}/{max_retries})")
-                t = asyncio.create_task(self._retry_upload(task_id))
-                self._upload_tasks[task_id] = t
+                self._clear_upload_session_state(task_id, keep_meta=True)
+                if self._mark_upload_session_scheduled(task_id):
+                    t = asyncio.create_task(self._retry_upload(task_id))
+                    self._upload_tasks[task_id] = t
 
 
 
@@ -1761,12 +1869,8 @@ class TaskManager:
     # ===========================================
 
     async def _upload_directory(self, task_id: str, dir_path: str, teldrive_path: str = "/"):
-        """递归上传文件夹到 TelDrive，保留目录结构"""
         import time
         teldrive = self._require_teldrive()
-
-        # 收集所有文件及其大小
-        # 直接使用 teldrive_path 作为基础路径，不额外嵌套文件夹名
         base_teldrive_path = teldrive_path.rstrip("/") if teldrive_path != "/" else "/"
         all_files = []
         for root, _dirs, filenames in os.walk(dir_path):
@@ -1775,161 +1879,80 @@ class TaskManager:
                 rel_path = os.path.relpath(full_path, dir_path)
                 file_size = os.path.getsize(full_path)
                 all_files.append((full_path, rel_path, file_size))
-
         if not all_files:
-            logger.warning(f"任务 {task_id} 文件夹为空: {dir_path}")
+            self._mark_upload_session_finalized(task_id)
             await db.update_task(task_id, status="completed", upload_progress=100.0)
             await self._broadcast_task_update(task_id)
             return
-
         total_size = sum(s for _, _, s in all_files)
         total_chunks = sum(self._count_file_chunks(s) for _, _, s in all_files)
-        uploaded_total = [0]  # 已上传的总字节数
+        uploaded_total = [0]
         baseline_chunks = self._get_upload_display_baseline(task_id, total_chunks)
         confirmed_chunks_total = [baseline_chunks]
         _last_broadcast = [0.0]
         _last_progress = [0.0]
-
-        # 注册 per-task 字节追踪
         self._task_uploaded_bytes[task_id] = 0
-        self._set_runtime_task_fields(
-            task_id,
-            upload_chunk_done=baseline_chunks,
-            upload_chunk_total=total_chunks,
-        )
-
-        logger.info(f"任务 {task_id} 检测到文件夹: {dir_path}，"
-                    f"共 {len(all_files)} 个文件，总大小 {total_size} bytes，"
-                    f"总分块 {total_chunks}，上传到 {base_teldrive_path}")
-
+        self._set_runtime_task_fields(task_id, upload_chunk_done=baseline_chunks, upload_chunk_total=total_chunks)
         try:
-            for idx, (full_path, rel_path, file_size) in enumerate(all_files, 1):
-                # 计算该文件在 TelDrive 上的目标路径
+            for full_path, rel_path, file_size in all_files:
                 rel_dir = os.path.dirname(rel_path).replace("\\", "/")
-                if rel_dir:
-                    file_teldrive_path = base_teldrive_path + "/" + rel_dir
-                else:
-                    file_teldrive_path = base_teldrive_path
-
-                logger.info(f"任务 {task_id} 上传文件 [{idx}/{len(all_files)}]: "
-                            f"{rel_path} -> {file_teldrive_path}")
-
-                # 为每个文件创建进度回调（汇总到整体进度）
+                file_teldrive_path = base_teldrive_path + "/" + rel_dir if rel_dir else base_teldrive_path
                 file_uploaded_before = uploaded_total[0]
                 file_chunks_before = confirmed_chunks_total[0]
                 file_total_chunks = self._count_file_chunks(file_size)
-
                 async def make_progress_cb(base_uploaded, base_chunks):
                     async def progress_callback(uploaded: int, total: int, confirmed_parts: int, total_parts: int):
                         current_total = base_uploaded + uploaded
-                        current_chunks = base_chunks + confirmed_parts
+                        current_chunks = min(total_chunks, base_chunks + confirmed_parts)
                         self._task_uploaded_bytes[task_id] = current_total
-                        self._set_runtime_task_fields(
-                            task_id,
-                            upload_chunk_done=current_chunks,
-                            upload_chunk_total=total_chunks,
-                            upload_note=None,
-                            upload_note_level=None,
-                        )
-                        self._record_upload_progress_checkpoint(
-                            task_id,
-                            {"task_id": task_id, "upload_chunk_done": current_chunks},
-                        )
-
+                        self._set_runtime_task_fields(task_id, upload_chunk_done=current_chunks, upload_chunk_total=total_chunks, upload_note=None, upload_note_level=None)
+                        self._record_upload_progress_checkpoint(task_id, {"task_id": task_id, "upload_chunk_done": current_chunks})
                         if total_chunks > 0:
                             progress = round(current_chunks / total_chunks * 100, 1)
                         elif total_size > 0:
                             progress = round(current_total / total_size * 100, 1)
                         else:
                             progress = 100.0
-
                         now = time.monotonic()
-                        if (progress - _last_progress[0] >= 1.0 or
-                                now - _last_broadcast[0] >= 1.0 or
-                                progress >= 100.0):
+                        if progress - _last_progress[0] >= 1.0 or now - _last_broadcast[0] >= 1.0 or progress >= 100.0:
                             _last_progress[0] = progress
                             _last_broadcast[0] = now
                             await db.update_task(task_id, upload_progress=progress, upload_speed="")
                             await self._broadcast_task_update(task_id)
                     return progress_callback
-
                 cb = await make_progress_cb(file_uploaded_before, file_chunks_before)
-
-                try:
-                    result = await asyncio.wait_for(
-                        teldrive.upload_file_chunked(
-                            full_path, file_teldrive_path, cb
-                        ),
-                        timeout=self._calc_upload_timeout(file_size)
-                    )
-                except asyncio.TimeoutError:
-                    raise Exception(f"上传超时: {rel_path}")
-
+                result = await asyncio.wait_for(teldrive.upload_file_chunked(full_path, file_teldrive_path, cb), timeout=self._calc_upload_timeout(file_size))
+                self._store_upload_session_meta(task_id, result.get("upload_meta"))
                 if not result.get("success"):
-                    raise Exception(f"上传失败: {rel_path} - {result.get('error', '未知错误')}")
-
+                    if self._is_polluted_upload_error(result.get("error")):
+                        self._set_runtime_task_fields(task_id, upload_note="remote parts polluted; clean then retry", upload_note_level="warning")
+                    raise Exception(f"upload failed: {rel_path} - {result.get('error', 'unknown error')}")
                 uploaded_total[0] += file_size
                 confirmed_chunks_total[0] = min(total_chunks, confirmed_chunks_total[0] + file_total_chunks)
-                self._set_runtime_task_fields(
-                    task_id,
-                    upload_chunk_done=confirmed_chunks_total[0],
-                    upload_chunk_total=total_chunks,
-                    upload_note=None,
-                    upload_note_level=None,
-                )
-                logger.info(f"任务 {task_id} 文件上传成功: {rel_path}")
-
-            self._set_runtime_task_fields(
-                task_id,
-                upload_chunk_done=total_chunks,
-                upload_chunk_total=total_chunks,
-                upload_note=None,
-                upload_note_level=None,
-            )
+                self._set_runtime_task_fields(task_id, upload_chunk_done=confirmed_chunks_total[0], upload_chunk_total=total_chunks, upload_note=None, upload_note_level=None)
+            self._set_runtime_task_fields(task_id, upload_chunk_done=total_chunks, upload_chunk_total=total_chunks, upload_note=None, upload_note_level=None)
             self._reset_upload_retry_state(task_id)
+            self._mark_upload_session_finalized(task_id)
             await db.update_task(task_id, status="completed", upload_progress=100.0, upload_speed="")
             await self._broadcast_task_update(task_id)
-            logger.info(f"任务 {task_id} 文件夹上传完成: {dir_path}，共 {len(all_files)} 个文件")
         finally:
             self._task_uploaded_bytes.pop(task_id, None)
 
-
-
     async def _upload(self, task_id: str, local_path: str, teldrive_path: str = "/"):
-        """上传单个文件到 TelDrive"""
         import time
         teldrive = self._require_teldrive()
-        _last_broadcast = [0.0]   # 上次广播时间
-        _last_progress = [0.0]    # 上次广播的进度值
-
-        # 注册 per-task 字节追踪
+        _last_broadcast = [0.0]
+        _last_progress = [0.0]
         self._task_uploaded_bytes[task_id] = 0
-
-        # 动态超时：保底 10 分钟 + 每 GB 额外 10 分钟
         file_size_on_disk = os.path.getsize(local_path) if os.path.isfile(local_path) else 0
         total_chunks = self._count_file_chunks(file_size_on_disk)
         baseline_chunks = self._get_upload_display_baseline(task_id, total_chunks)
-        self._set_runtime_task_fields(
-            task_id,
-            upload_chunk_done=baseline_chunks,
-            upload_chunk_total=total_chunks,
-        )
-
+        self._set_runtime_task_fields(task_id, upload_chunk_done=baseline_chunks, upload_chunk_total=total_chunks)
         async def progress_callback(uploaded: int, total: int, confirmed_parts: int, total_parts: int):
             self._task_uploaded_bytes[task_id] = uploaded
-            current_confirmed_parts = min(total_chunks, baseline_chunks + confirmed_parts)
-            self._set_runtime_task_fields(
-                task_id,
-                upload_chunk_done=current_confirmed_parts,
-                upload_chunk_total=total_chunks or total_parts,
-                upload_note=None,
-                upload_note_level=None,
-            )
-            self._record_upload_progress_checkpoint(
-                task_id,
-                {"task_id": task_id, "upload_chunk_done": current_confirmed_parts},
-            )
-
+            current_confirmed_parts = min(total_chunks or total_parts, baseline_chunks + confirmed_parts)
+            self._set_runtime_task_fields(task_id, upload_chunk_done=current_confirmed_parts, upload_chunk_total=total_chunks or total_parts, upload_note=None, upload_note_level=None)
+            self._record_upload_progress_checkpoint(task_id, {"task_id": task_id, "upload_chunk_done": current_confirmed_parts})
             if total_chunks > 0:
                 progress = round(current_confirmed_parts / total_chunks * 100, 1)
             elif total_parts > 0:
@@ -1939,48 +1962,27 @@ class TaskManager:
             else:
                 progress = 100.0
             now = time.monotonic()
-
-            # 节流：进度变化 ≥ 2% 或距上次超 2 秒才广播
-            if (progress - _last_progress[0] >= 2.0 or
-                    now - _last_broadcast[0] >= 2.0 or
-                    progress >= 100.0):
+            if progress - _last_progress[0] >= 2.0 or now - _last_broadcast[0] >= 2.0 or progress >= 100.0:
                 _last_progress[0] = progress
                 _last_broadcast[0] = now
                 await db.update_task(task_id, upload_progress=progress, upload_speed="")
                 await self._broadcast_task_update(task_id)
-
-        upload_timeout = self._calc_upload_timeout(file_size_on_disk)
+        result = await asyncio.wait_for(teldrive.upload_file_chunked(local_path, teldrive_path, progress_callback), timeout=self._calc_upload_timeout(file_size_on_disk))
         try:
-            try:
-                result = await asyncio.wait_for(
-                    teldrive.upload_file_chunked(
-                        local_path, teldrive_path, progress_callback
-                    ),
-                    timeout=upload_timeout
-                )
-            except asyncio.TimeoutError:
-                raise Exception(f"上传超时（超过 {upload_timeout}s）")
-
+            self._store_upload_session_meta(task_id, result.get("upload_meta"))
             if result.get("success"):
-                self._set_runtime_task_fields(
-                    task_id,
-                    upload_chunk_done=total_chunks,
-                    upload_chunk_total=total_chunks,
-                    upload_note=None,
-                    upload_note_level=None,
-                )
+                self._set_runtime_task_fields(task_id, upload_chunk_done=total_chunks, upload_chunk_total=total_chunks, upload_note=None, upload_note_level=None)
                 self._clear_upload_retry_budget(task_id)
-                await db.update_task(task_id, status="completed",
-                                     upload_progress=100.0, upload_speed="")
+                self._mark_upload_session_finalized(task_id)
+                await db.update_task(task_id, status="completed", upload_progress=100.0, upload_speed="")
                 await self._broadcast_task_update(task_id)
-                logger.info(f"任务 {task_id} 上传完成")
             else:
-                error = result.get("error", "上传失败")
+                error = result.get("error", "upload failed")
+                if self._is_polluted_upload_error(error):
+                    self._set_runtime_task_fields(task_id, upload_note="remote parts polluted; clean then retry", upload_note_level="warning")
                 raise Exception(error)
         finally:
             self._task_uploaded_bytes.pop(task_id, None)
-
-
 
     async def _broadcast_task_update(self, task_id: str, task_data: Optional[dict] = None):
         """广播任务状态更新（优先使用传入的 task_data 避免查库）"""
@@ -2049,21 +2051,19 @@ class TaskManager:
     # ===========================================
 
     async def pause_task(self, task_id: str) -> dict:
-        """暂停任务"""
         task = await db.get_task(task_id)
         if not task:
-            return {"success": False, "message": "任务不存在"}
-
+            return {"success": False, "message": "?????"}
         status = task.get("status")
         if status not in ("downloading", "uploading", "pending"):
-            return {"success": False, "message": "只能暂停下载中、等待中或上传中的任务"}
-
+            return {"success": False, "message": "??????????????????"}
         try:
             if status == "uploading":
                 self._cancel_existing_upload(task_id)
                 self.clear_upload_progress(task_id)
                 self._set_runtime_task_fields(task_id, upload_note=None, upload_note_level=None)
                 self._clear_upload_retry_budget(task_id)
+                self._clear_upload_session_state(task_id, keep_meta=True)
                 old_gid = task.get("aria2_gid", "")
                 if old_gid:
                     self._uploading_gids.discard(old_gid)
@@ -2071,13 +2071,11 @@ class TaskManager:
                     self._serial_gate_releasing_gids.discard(old_gid)
                 await db.update_task(task_id, status="paused", download_speed="", upload_speed="", error=None)
                 await self._broadcast_task_update(task_id)
-                return {"success": True, "message": "已暂停上传"}
-
+                return {"success": True, "message": "?????"}
             if not task.get("aria2_gid"):
                 await db.update_task(task_id, status="paused", download_speed="", error=None)
                 await self._broadcast_task_update(task_id)
-                return {"success": True, "message": "已暂停"}
-
+                return {"success": True, "message": "???"}
             aria2 = self._require_aria2()
             gid = task["aria2_gid"]
             if self._is_serial_transfer_mode_enabled() and status == "pending":
@@ -2098,61 +2096,46 @@ class TaskManager:
                 self._terminal_gids.add(gid)
                 self._serial_gate_paused_gids.discard(gid)
                 self._serial_gate_releasing_gids.discard(gid)
-                await db.update_task(
-                    task_id, status="paused", aria2_gid=None, local_path=None,
-                    download_progress=0.0, download_speed="", error=None
-                )
+                await db.update_task(task_id, status="paused", aria2_gid=None, local_path=None, download_progress=0.0, download_speed="", error=None)
                 await self._broadcast_task_update(task_id)
-                return {"success": True, "message": "已暂停"}
+                return {"success": True, "message": "???"}
             if not self._is_serial_gate_held(gid):
                 await aria2.pause(gid)
             self._serial_gate_paused_gids.discard(gid)
             self._serial_gate_releasing_gids.discard(gid)
             await db.update_task(task_id, status="paused", download_speed="")
             await self._broadcast_task_update(task_id)
-
-            return {"success": True, "message": "已暂停"}
+            return {"success": True, "message": "???"}
         except Exception as e:
             return {"success": False, "message": str(e)}
 
-
-
     async def resume_task(self, task_id: str) -> dict:
-        """恢复任务"""
         task = await db.get_task(task_id)
         if not task:
-            return {"success": False, "message": "任务不存在"}
+            return {"success": False, "message": "?????"}
         if task["status"] != "paused":
-            return {"success": False, "message": "只能恢复已暂停的任务"}
-
+            return {"success": False, "message": "??????????"}
         try:
             local_path = self._get_upload_path(task.get("local_path", ""))
             if self._is_upload_stage_task(task):
                 if not local_path or not os.path.exists(local_path):
-                    return {"success": False, "message": "本地文件不存在，无法继续上传"}
-
+                    return {"success": False, "message": "??????????????"}
                 total_chunks = self._count_path_chunks(local_path)
                 baseline_chunks = self._get_upload_display_baseline(task_id, total_chunks)
                 baseline_progress = round(baseline_chunks / total_chunks * 100, 1) if total_chunks > 0 else 0.0
                 self._clear_upload_retry_budget(task_id)
-                self._set_runtime_task_fields(
-                    task_id,
-                    upload_chunk_done=baseline_chunks,
-                    upload_chunk_total=total_chunks,
-                    upload_note="正在继续上传，等待上传槽位...",
-                    upload_note_level="warning",
-                )
+                self._set_runtime_task_fields(task_id, upload_chunk_done=baseline_chunks, upload_chunk_total=total_chunks, upload_note="?????????????...", upload_note_level="warning")
                 await db.update_task(task_id, status="uploading", upload_progress=baseline_progress, upload_speed="", error=None)
                 await self._broadcast_task_update(task_id)
-                self._upload_tasks[task_id] = asyncio.create_task(self._retry_upload(task_id))
-                return {"success": True, "message": "已恢复上传"}
-
+                self._clear_upload_session_state(task_id, keep_meta=True)
+                if self._mark_upload_session_scheduled(task_id):
+                    self._upload_tasks[task_id] = asyncio.create_task(self._retry_upload(task_id))
+                return {"success": True, "message": "?????"}
             if not task.get("aria2_gid"):
                 await db.update_task(task_id, status="pending", download_speed="", error=None)
                 await self._broadcast_task_update(task_id)
                 await self._dispatch_next_serial_download()
-                return {"success": True, "message": "已恢复"}
-
+                return {"success": True, "message": "???"}
             gid = task["aria2_gid"]
             if self._is_serial_transfer_mode_enabled():
                 aria2 = self._require_aria2()
@@ -2173,10 +2156,7 @@ class TaskManager:
                 self._terminal_gids.add(gid)
                 self._serial_gate_paused_gids.discard(gid)
                 self._serial_gate_releasing_gids.discard(gid)
-                await db.update_task(
-                    task_id, status="pending", aria2_gid=None, local_path=None,
-                    download_progress=0.0, download_speed="", error=None
-                )
+                await db.update_task(task_id, status="pending", aria2_gid=None, local_path=None, download_progress=0.0, download_speed="", error=None)
                 await self._dispatch_next_serial_download()
             else:
                 aria2 = self._require_aria2()
@@ -2185,12 +2165,9 @@ class TaskManager:
                 await aria2.unpause(gid)
                 await db.update_task(task_id, status="downloading")
             await self._broadcast_task_update(task_id)
-            return {"success": True, "message": "已恢复"}
+            return {"success": True, "message": "???"}
         except Exception as e:
             return {"success": False, "message": str(e)}
-
-
-
 
     async def cancel_task(self, task_id: str) -> dict:
         """取消任务"""
@@ -2212,6 +2189,7 @@ class TaskManager:
             self.clear_upload_progress(task_id)
             self._clear_runtime_task_fields(task_id)
             self._reset_upload_retry_state(task_id)
+            self._clear_upload_session_state(task_id)
 
             old_gid = task.get("aria2_gid", "")
             if old_gid:
@@ -2250,16 +2228,13 @@ class TaskManager:
         self._uploading_gids.discard(task_id)
 
     async def retry_task(self, task_id: str) -> dict:
-        """重试失败/卡住的任务"""
         task = await db.get_task(task_id)
         if not task:
-            return {"success": False, "message": "任务不存在"}
+            return {"success": False, "message": "?????"}
         if task["status"] not in ("failed", "uploading"):
-            return {"success": False, "message": "只能重试失败或上传中的任务"}
-
-        # 取消正在卡住的旧上传协程，清理 GID 去重标记
+            return {"success": False, "message": "?????????????"}
         self._cancel_existing_upload(task_id)
-        # 也清理 aria2_gid 对应的 uploading_gids 标记
+        self._clear_upload_session_state(task_id, keep_meta=True)
         old_gid = task.get("aria2_gid", "")
         if old_gid:
             self._uploading_gids.discard(old_gid)
@@ -2267,35 +2242,20 @@ class TaskManager:
             self._terminal_gids.discard(old_gid)
             self._serial_gate_paused_gids.discard(old_gid)
             self._serial_gate_releasing_gids.discard(old_gid)
-
-        # 清除重试计数
         self._clear_upload_retry_budget(task_id)
-
-        # 如果本地文件/文件夹已存在，直接重试上传
         local_path = self._get_upload_path(task.get("local_path", ""))
         if local_path and os.path.exists(local_path):
             total_chunks = self._count_path_chunks(local_path)
             baseline_chunks = self._get_upload_display_baseline(task_id, total_chunks)
             baseline_progress = round(baseline_chunks / total_chunks * 100, 1) if total_chunks > 0 else 0.0
-            self._set_runtime_task_fields(
-                task_id,
-                upload_chunk_done=baseline_chunks,
-                upload_chunk_total=total_chunks,
-                upload_note="正在重新上传，等待上传槽位...",
-                upload_note_level="warning",
-            )
+            self._set_runtime_task_fields(task_id, upload_chunk_done=baseline_chunks, upload_chunk_total=total_chunks, upload_note="?????????????...", upload_note_level="warning")
             await db.update_task(task_id, status="uploading", upload_progress=baseline_progress, upload_speed="", error=None)
             await self._broadcast_task_update(task_id)
-            t = asyncio.create_task(self._retry_upload(task_id))
-            self._upload_tasks[task_id] = t
-            return {"success": True, "message": "正在重试上传"}
-
-
-        # 否则需要重新下载
+            if self._mark_upload_session_scheduled(task_id):
+                self._upload_tasks[task_id] = asyncio.create_task(self._retry_upload(task_id))
+            return {"success": True, "message": "??????"}
         aria2 = self._require_aria2()
         url = task.get("url", "")
-
-        # 如果数据库中没有 URL，尝试从 aria2 查询原始 URI
         if not url and old_gid:
             try:
                 status = await aria2.tell_status(old_gid)
@@ -2306,142 +2266,101 @@ class TaskManager:
                         url = uris[0].get("uri", "")
             except Exception:
                 pass
-
         if not url:
-            return {"success": False, "message": "无法重试：缺少下载 URL 且本地文件不存在"}
-
+            return {"success": False, "message": "????????? URL ????????"}
         options = self._prepare_aria2_options(task)
-
         try:
-            # 先尝试从 aria2 移除旧的失败任务
             if old_gid:
                 try:
                     await aria2.remove(old_gid)
                 except Exception:
                     pass
-
             self._clear_runtime_task_fields(task_id)
             if self._is_serial_transfer_mode_enabled():
-                await db.update_task(
-                    task_id, status="pending", aria2_gid=None,
-                    aria2_options_json=self._serialize_aria2_options(options),
-                    download_progress=0, upload_progress=0,
-                    download_speed="", upload_speed="",
-                    error=None, local_path=None, url=url
-                )
+                await db.update_task(task_id, status="pending", aria2_gid=None, aria2_options_json=self._serialize_aria2_options(options), download_progress=0, upload_progress=0, download_speed="", upload_speed="", error=None, local_path=None, url=url)
                 await self._broadcast_task_update(task_id)
                 await self._dispatch_next_serial_download()
-                return {"success": True, "message": "已重新加入等待队列"}
-
+                return {"success": True, "message": "?????????"}
             new_gid = await aria2.add_uri(url, options)
-            await db.update_task(
-                task_id, status="downloading", aria2_gid=new_gid,
-                aria2_options_json=self._serialize_aria2_options(options),
-                download_progress=0, upload_progress=0,
-                download_speed="", upload_speed="",
-                error=None, local_path=None, url=url
-            )
+            await db.update_task(task_id, status="downloading", aria2_gid=new_gid, aria2_options_json=self._serialize_aria2_options(options), download_progress=0, upload_progress=0, download_speed="", upload_speed="", error=None, local_path=None, url=url)
             self._known_gids.add(new_gid)
-
             await self._broadcast_task_update(task_id)
-            return {"success": True, "message": "正在重新下载"}
+            return {"success": True, "message": "??????"}
         except Exception as e:
             return {"success": False, "message": str(e)}
 
     async def _retry_upload(self, task_id: str):
-        """仅重试上传步骤（受并发限制）"""
+        if not self._mark_upload_session_running(task_id):
+            logger.info(f"skip duplicate retry upload runner for task {task_id}, state={self._upload_session_state.get(task_id)}")
+            self._upload_tasks.pop(task_id, None)
+            return
+        keep_session_meta = False
+        finalized = False
         await self._wait_upload_slot()
         try:
             task = await db.get_task(task_id)
             if not task:
                 return
-
             local_path = self._get_upload_path(task.get("local_path", ""))
-
             if not local_path or not os.path.exists(local_path):
                 self._set_runtime_task_fields(task_id, upload_note=None, upload_note_level=None)
-                await db.update_task(task_id, status="failed",
-                                     error="本地文件不存在，无法重试上传")
+                await db.update_task(task_id, status="failed", error="local file missing, cannot retry upload")
                 await self._broadcast_task_update(task_id)
                 return
-
-
             teldrive_path = self._get_task_teldrive_path(task, local_path)
-
             max_retries = self.config.get("upload", {}).get("max_retries", 3)
             retry_attempt = self._upload_retry_counts.get(task_id, 0)
             total_chunks = self._count_path_chunks(local_path)
             baseline_chunks = self._get_upload_display_baseline(task_id, total_chunks)
             baseline_progress = round(baseline_chunks / total_chunks * 100, 1) if total_chunks > 0 else 0.0
-            retry_note = (
-                f"正在自动重试上传（{retry_attempt}/{max_retries}）..."
-                if retry_attempt > 0 else
-                "正在重新上传..."
-            )
-
-            # 重置上传状态
-            self._set_runtime_task_fields(
-                task_id,
-                upload_chunk_done=baseline_chunks,
-                upload_chunk_total=total_chunks,
-                upload_note=retry_note,
-                upload_note_level="warning",
-            )
-            await db.update_task(task_id, status="uploading",
-                                 upload_progress=baseline_progress, upload_speed="", error=None)
+            retry_note = f"retrying upload automatically ({retry_attempt}/{max_retries})..." if retry_attempt > 0 else "retrying upload..."
+            self._set_runtime_task_fields(task_id, upload_chunk_done=baseline_chunks, upload_chunk_total=total_chunks, upload_note=retry_note, upload_note_level="warning")
+            await db.update_task(task_id, status="uploading", upload_progress=baseline_progress, upload_speed="", error=None)
             await self._broadcast_task_update(task_id)
-
-
-            # 判断是文件夹还是单文件
             if os.path.isdir(local_path):
                 await self._upload_directory(task_id, local_path, teldrive_path)
             else:
                 await self._upload(task_id, local_path, teldrive_path)
-
-            # 上传成功后清理本地文件
             await self._auto_delete_local(task_id, local_path)
             await self._check_disk_usage()
-
+            finalized = self._upload_session_state.get(task_id) == "finalized"
         except asyncio.CancelledError:
-            logger.info(f"任务 {task_id} 重试上传被取消")
+            logger.info(f"task {task_id} retry upload cancelled")
         except Exception as e:
-            logger.error(f"任务 {task_id} 重试上传失败: {e}")
+            logger.error(f"task {task_id} retry upload failed: {e}")
+            keep_session_meta = self._is_polluted_upload_error(str(e))
             self._set_runtime_task_fields(task_id, upload_note=None, upload_note_level=None)
             await db.update_task(task_id, status="failed", error=str(e))
             await self._broadcast_task_update(task_id)
-
         finally:
             self._release_upload_slot()
             self._upload_tasks.pop(task_id, None)
+            if finalized:
+                self._mark_upload_session_finalized(task_id)
+            else:
+                self._clear_upload_session_state(task_id, keep_meta=keep_session_meta)
 
     async def delete_task(self, task_id: str) -> dict:
-        """删除任务记录"""
         task = await db.get_task(task_id)
         if not task:
-            return {"success": False, "message": "任务不存在"}
-
-        # 如果任务还在进行中，先取消
+            return {"success": False, "message": "?????"}
         if task["status"] in ("downloading", "uploading", "pending", "paused"):
             await self.cancel_task(task_id)
-
-
         gid = task.get("aria2_gid")
         if gid:
             self._known_gids.discard(gid)
             self._serial_gate_paused_gids.discard(gid)
             self._serial_gate_releasing_gids.discard(gid)
-            # 从 aria2 移除下载记录
             try:
                 aria2 = self._require_aria2()
                 await aria2.remove(gid)
             except Exception:
                 pass
-
         self._clear_runtime_task_fields(task_id)
+        self._clear_upload_session_state(task_id)
         await db.delete_task(task_id)
         await self.broadcast({"type": "task_deleted", "data": {"task_id": task_id}})
-        return {"success": True, "message": "已删除"}
-
+        return {"success": True, "message": "???"}
 
     async def get_all_tasks(self) -> list:
         """获取所有任务"""

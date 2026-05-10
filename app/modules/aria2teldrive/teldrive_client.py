@@ -10,6 +10,7 @@ import uuid
 import hashlib
 import math
 import logging
+import json
 from pathlib import Path
 from typing import Optional, Callable, List, Dict, Any
 
@@ -52,6 +53,67 @@ class TelDriveClient:
         return {
             "Cookie": f"access_token={self.access_token}"
         }
+
+    @staticmethod
+    def _coerce_int(value: Any) -> Optional[int]:
+        try:
+            if value in (None, ""):
+                return None
+            return int(str(value).strip())
+        except Exception:
+            return None
+
+    def _get_part_number(self, part: Dict[str, Any]) -> Optional[int]:
+        return self._coerce_int(part.get("partNo", part.get("partId")))
+
+    def _get_part_message_id(self, part: Dict[str, Any]) -> Optional[int]:
+        return self._coerce_int(part.get("partId", part.get("id")))
+
+    @staticmethod
+    def _structured_error(error_code: str, message: str, **extra) -> dict:
+        payload = {"code": error_code, "message": message}
+        if extra:
+            payload["details"] = extra
+        return {
+            "success": False,
+            "error": f"structured_upload_error::{json.dumps(payload, ensure_ascii=False)}",
+            "error_code": error_code,
+            "error_details": extra,
+        }
+
+    def _validate_remote_parts(self, remote_parts: List[Dict[str, Any]], total_parts: int) -> Optional[dict]:
+        if len(remote_parts) != total_parts:
+            return self._structured_error(
+                "remote_parts_count_mismatch",
+                f"远端分块数量异常: expected={total_parts}, actual={len(remote_parts)}",
+                expected_total_parts=total_parts,
+                actual_total_parts=len(remote_parts),
+            )
+
+        message_ids = [self._get_part_message_id(part) for part in remote_parts]
+        if any(message_id is None for message_id in message_ids):
+            return self._structured_error(
+                "remote_parts_invalid_shape",
+                "远端分块缺少有效的 partId/id",
+                expected_total_parts=total_parts,
+                actual_total_parts=len(remote_parts),
+            )
+
+        part_numbers = [self._get_part_number(part) for part in remote_parts]
+        if all(number is not None for number in part_numbers):
+            numbers = [int(number) for number in part_numbers if number is not None]
+            expected_numbers = list(range(1, total_parts + 1))
+            if sorted(numbers) != expected_numbers:
+                error_code = "remote_parts_duplicate_numbers" if len(set(numbers)) != len(numbers) else "remote_parts_invalid_shape"
+                return self._structured_error(
+                    error_code,
+                    f"远端分块编号异常: expected=1..{total_parts}, actual={numbers}",
+                    expected_total_parts=total_parts,
+                    actual_total_parts=len(remote_parts),
+                    remote_part_numbers=numbers,
+                )
+
+        return None
 
     # ===========================================
     # 连接与基础 API
@@ -171,9 +233,14 @@ class TelDriveClient:
         """检查某个 part 是否已存在 — 对标 upload.go 的 checkFilePartExist"""
         parts = await self._get_file_parts(session, upload_id)
         for part in parts:
-            if part.get("partId") == part_no or part.get("partNo") == part_no:
+            normalized = self._get_part_number(part)
+            if normalized is not None and normalized == part_no:
                 return part
         return None
+
+    async def get_upload_parts(self, upload_id: str) -> List[Dict]:
+        async with aiohttp.ClientSession(timeout=self.DEFAULT_TIMEOUT) as session:
+            return await self._get_file_parts(session, upload_id)
 
     async def _touch(self, session: aiohttp.ClientSession,
                      name: str, path: str) -> dict:
@@ -199,6 +266,10 @@ class TelDriveClient:
                 logger.debug(f"清理上传记录 {upload_id}: HTTP {resp.status}")
         except Exception as e:
             logger.debug(f"清理上传记录失败: {e}")
+
+    async def cleanup_upload_session(self, upload_id: str) -> None:
+        async with aiohttp.ClientSession(timeout=self.DEFAULT_TIMEOUT) as session:
+            await self._cleanup_upload(session, upload_id)
 
     @staticmethod
     def _md5_hash(text: str) -> str:
@@ -254,7 +325,7 @@ class TelDriveClient:
         while True:
             # 断点续传：检查 part 是否已存在
             existing = await self._check_part_exists(session, upload_id, part_no)
-            if existing and existing.get("name"):
+            if existing and self._get_part_message_id(existing) is not None:
                 logger.info(f"  块 {part_no}/{total_parts} 已存在，跳过上传")
                 return existing
 
@@ -337,14 +408,16 @@ class TelDriveClient:
     async def _create_file_record(self, session: aiohttp.ClientSession,
                                    name: str, upload_id: str, path: str,
                                    uploaded_parts: List[Dict],
-                                   total_size: int) -> dict:
+                                   total_size: int,
+                                   total_parts: int) -> dict:
         """上传完成后校验 parts 并创建文件记录"""
         # 校验：比对远程 parts 数量与本地上传的数量
         remote_parts = await self._get_file_parts(session, upload_id)
-        if len(remote_parts) != len(uploaded_parts):
-            logger.warning(
-                f"Parts 数量不一致: 本地 {len(uploaded_parts)}, 远程 {len(remote_parts)}"
-            )
+        validation_error = self._validate_remote_parts(remote_parts, total_parts)
+        if validation_error:
+            validation_error["remote_parts"] = remote_parts
+            validation_error["uploaded_parts"] = uploaded_parts
+            return validation_error
 
         # 构建 parts 列表（使用远程返回的 partId 和 salt）
         format_parts = []
@@ -369,7 +442,7 @@ class TelDriveClient:
         ) as resp:
             if resp.status in (200, 201):
                 result = await resp.json()
-                return {"success": True, "data": result}
+                return {"success": True, "data": result, "remote_parts": remote_parts}
             else:
                 text = await resp.text()
                 return {
@@ -525,6 +598,13 @@ class TelDriveClient:
         upload_id = str(uuid.uuid4())
 
         total_parts = int(math.ceil(file_size / self.chunk_size)) if file_size > 0 else 0
+        upload_meta = {
+            "upload_id": upload_id,
+            "total_parts": total_parts,
+            "confirmed_part_numbers": [],
+            "uploaded_parts": [],
+            "remote_parts": [],
+        }
 
         logger.info(f"开始上传: {filename} ({file_size} bytes, {total_parts} 块, "
                      f"并发={self.upload_concurrency}, chunk={self.chunk_size_str})")
@@ -575,12 +655,17 @@ class TelDriveClient:
                         session, file_path, upload_id, filename,
                         file_size, total_parts, progress_callback
                     )
+                upload_meta["confirmed_part_numbers"] = list(range(1, len(uploaded_parts) + 1))
+                upload_meta["uploaded_parts"] = uploaded_parts
 
                 # 步骤 5: 创建文件记录（含 parts 校验）
                 result = await self._create_file_record(
                     session, filename, upload_id, teldrive_path,
-                    uploaded_parts, file_size
+                    uploaded_parts, file_size, total_parts
                 )
+                result["upload_meta"] = upload_meta
+                if isinstance(result.get("remote_parts"), list):
+                    upload_meta["remote_parts"] = result["remote_parts"]
 
                 if result.get("success"):
                     logger.info(f"文件 {filename} 上传成功")
