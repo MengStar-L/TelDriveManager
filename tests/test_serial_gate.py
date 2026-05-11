@@ -1014,6 +1014,101 @@ class SerialGateTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(tokens), 2)
         self.assertEqual(len(created), 1)
 
+    async def test_refresh_upload_session_hydrates_persisted_part_metadata(self):
+        manager = self.make_manager()
+        task = {
+            "task_id": "resume-task",
+            "upload_id": "upload-xyz",
+            "upload_session_state": "running",
+            "upload_confirmed_chunks": 0,
+            "upload_confirmed_total": 17,
+            "upload_confirmed_parts_json": "[1,2,3,4]",
+            "upload_remote_parts_json": '[{"partNo":1,"partId":101},{"partNo":2,"partId":102}]',
+        }
+
+        current = await manager._refresh_upload_session_from_db("resume-task", task)
+
+        self.assertEqual(current["upload_id"], "upload-xyz")
+        self.assertEqual(manager._runtime_task_state["resume-task"]["upload_chunk_done"], 4)
+        self.assertEqual(manager._runtime_task_state["resume-task"]["upload_chunk_total"], 17)
+        self.assertEqual(manager._upload_session_meta["resume-task"]["confirmed_part_numbers"], [1, 2, 3, 4])
+        self.assertEqual(manager._upload_session_meta["resume-task"]["remote_parts"][0]["partId"], 101)
+
+    async def test_recover_stale_upload_session_resets_running_owner(self):
+        manager = self.make_manager()
+        updates = []
+        stale_task = {
+            "task_id": "stale-task",
+            "upload_session_state": "running",
+            "upload_session_owner": "old-owner",
+            "updated_at": "2000-01-01 00:00:00",
+        }
+
+        original_update = task_manager_module.db.update_task
+        original_get_task = task_manager_module.db.get_task
+        try:
+            async def fake_update(task_id, **kwargs):
+                updates.append((task_id, kwargs))
+
+            async def fake_get_task(task_id):
+                return {**stale_task, "upload_session_state": "idle", "upload_session_token": None}
+
+            cast(Any, task_manager_module.db).update_task = fake_update
+            cast(Any, task_manager_module.db).get_task = fake_get_task
+
+            recovered = await manager._recover_stale_upload_session_if_needed("stale-task", stale_task)
+        finally:
+            cast(Any, task_manager_module.db).update_task = original_update
+            cast(Any, task_manager_module.db).get_task = original_get_task
+
+        self.assertEqual(updates[-1][0], "stale-task")
+        self.assertEqual(updates[-1][1]["upload_session_state"], "idle")
+        self.assertEqual(recovered["upload_session_state"], "idle")
+
+    async def test_checkpoint_persist_conflict_raises_structured_error(self):
+        manager = self.make_manager()
+        original_update = task_manager_module.db.update_upload_checkpoint
+        try:
+            async def fake_update(*args, **kwargs):
+                return False
+
+            cast(Any, task_manager_module.db).update_upload_checkpoint = fake_update
+            with self.assertRaises(RuntimeError) as ctx:
+                await manager._ensure_upload_checkpoint_persisted(
+                    "task-conflict",
+                    "token-1",
+                    17,
+                    17,
+                    stage="file-progress",
+                )
+        finally:
+            cast(Any, task_manager_module.db).update_upload_checkpoint = original_update
+
+        self.assertIn("structured_upload_error::", str(ctx.exception))
+        self.assertIn("upload_session_conflict", str(ctx.exception))
+
+    async def test_complete_session_conflict_raises_structured_error(self):
+        manager = self.make_manager()
+        original_complete = task_manager_module.db.complete_upload_session
+        try:
+            async def fake_complete(*args, **kwargs):
+                return False
+
+            cast(Any, task_manager_module.db).complete_upload_session = fake_complete
+            with self.assertRaises(RuntimeError) as ctx:
+                await manager._complete_upload_session_or_raise(
+                    "task-conflict",
+                    "token-1",
+                    17,
+                    17,
+                    stage="file-finalize",
+                )
+        finally:
+            cast(Any, task_manager_module.db).complete_upload_session = original_complete
+
+        self.assertIn("structured_upload_error::", str(ctx.exception))
+        self.assertIn("upload_session_conflict", str(ctx.exception))
+
 
 class TelDriveClientTests(unittest.TestCase):
     def test_validate_remote_parts_count_mismatch(self):

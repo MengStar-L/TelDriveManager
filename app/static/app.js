@@ -1963,6 +1963,7 @@ function getA2TDActionButton(taskId, action, label, icon, tone = 'neutral') {
 
 function getA2TDUploadActionLabel(task) {
     const { done, total } = getA2TDUploadChunkStats(task);
+    if (total > 0 && done >= total && task.status !== 'completed') return `封装中 ${done}/${total}`;
     if (total > 0) return `上传中 ${done}/${total}`;
     const progress = getA2TDNumber(task.upload_progress);
     return progress > 0 ? `上传中 ${progress.toFixed(1)}%` : '上传中';
@@ -2080,6 +2081,9 @@ function buildA2TDTaskCardContent(task) {
             uploadChunkTotal > 0 ? `${uploadChunkDone}/${uploadChunkTotal} 块` : '等待上传',
             'primary upload'
         );
+        if (uploadChunkTotal > 0 && uploadChunkDone >= uploadChunkTotal && task.status !== 'completed') {
+            pushMetaItem('正在封装最终文件', 'secondary');
+        }
         pushMetaItem(`已确认 ${escapeA2TDHtml(transferredText)}`);
         if (task.upload_speed) {
             pushMetaItem(`速度 ${escapeA2TDHtml(task.upload_speed)}`);

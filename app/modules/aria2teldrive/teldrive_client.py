@@ -80,6 +80,48 @@ class TelDriveClient:
             numbers.append(number)
         return sorted(numbers)
 
+    def _normalize_confirmed_part_numbers(self, part_numbers: Any, total_parts: int = 0) -> List[int]:
+        normalized = []
+        seen = set()
+        for value in list(part_numbers or []):
+            number = self._coerce_int(value)
+            if number is None or number <= 0:
+                continue
+            if total_parts > 0 and number > total_parts:
+                continue
+            if number in seen:
+                continue
+            seen.add(number)
+            normalized.append(number)
+        return sorted(normalized)
+
+    def _normalize_remote_parts(self, remote_parts: Any, total_parts: int = 0) -> List[Dict[str, Any]]:
+        normalized: list[Dict[str, Any]] = []
+        for part in list(remote_parts or []):
+            if not isinstance(part, dict):
+                continue
+            number = self._get_part_number(part)
+            message_id = self._get_part_message_id(part)
+            if number is None or message_id is None or number <= 0:
+                continue
+            if total_parts > 0 and number > total_parts:
+                normalized.append(dict(part))
+                continue
+            item = dict(part)
+            item["partNo"] = number
+            item["partId"] = message_id
+            normalized.append(item)
+        return normalized
+
+    def _build_remote_parts_map(self, remote_parts: Any, total_parts: int = 0) -> Dict[int, Dict[str, Any]]:
+        result: Dict[int, Dict[str, Any]] = {}
+        for part in self._normalize_remote_parts(remote_parts, total_parts):
+            number = self._get_part_number(part)
+            if number is None or number in result:
+                continue
+            result[number] = dict(part)
+        return result
+
     @staticmethod
     def _structured_error(error_code: str, message: str, **extra) -> dict:
         payload = {"code": error_code, "message": message}
@@ -240,12 +282,17 @@ class TelDriveClient:
             return []
 
     async def _check_part_exists(self, session: aiohttp.ClientSession,
-                                  upload_id: str, part_no: int) -> Optional[Dict]:
+                                  upload_id: str, part_no: int,
+                                  remote_parts_map: Optional[Dict[int, Dict[str, Any]]] = None) -> Optional[Dict]:
         """检查某个 part 是否已存在 — 对标 upload.go 的 checkFilePartExist"""
+        if remote_parts_map is not None and part_no in remote_parts_map:
+            return dict(remote_parts_map[part_no])
         parts = await self._get_file_parts(session, upload_id)
         for part in parts:
             normalized = self._get_part_number(part)
             if normalized is not None and normalized == part_no:
+                if remote_parts_map is not None:
+                    remote_parts_map[part_no] = dict(part)
                 return part
         return None
 
@@ -469,33 +516,52 @@ class TelDriveClient:
                                  file_path: Path, upload_id: str,
                                  filename: str, file_size: int,
                                  total_parts: int,
-                                 progress_callback: Optional[Callable]) -> List[Dict]:
+                                 progress_callback: Optional[Callable],
+                                 confirmed_part_numbers: Optional[List[int]] = None,
+                                 remote_parts: Optional[List[Dict[str, Any]]] = None,
+                                 part_confirm_callback: Optional[Callable] = None) -> List[Dict]:
         """串行逐块上传，按 TelDrive 已确认的 part 累计进度。"""
         parts = []
         offset = 0
         part_no = 1
         confirmed_bytes = 0
-        confirmed_parts = 0
+        confirmed_set = set(self._normalize_confirmed_part_numbers(confirmed_part_numbers, total_parts))
+        remote_parts_map = self._build_remote_parts_map(remote_parts, total_parts)
+
+        for confirmed_no in list(confirmed_set):
+            if confirmed_no not in remote_parts_map:
+                existing = await self._check_part_exists(session, upload_id, confirmed_no, remote_parts_map)
+                if existing and self._get_part_message_id(existing) is not None:
+                    remote_parts_map[confirmed_no] = dict(existing)
 
         while offset < file_size:
-
             cur_chunk_size = min(self.chunk_size, file_size - offset)
             logger.info(f"  上传块 {part_no}/{total_parts} ({cur_chunk_size} bytes)")
 
-            part_result = await self._upload_single_chunk(
-                session, upload_id, file_path,
-                chunk_offset=offset,
-                chunk_size=cur_chunk_size,
-                part_no=part_no, filename=filename, total_parts=total_parts,
-            )
+            if part_no in confirmed_set and part_no in remote_parts_map:
+                part_result = dict(remote_parts_map[part_no])
+            else:
+                part_result = await self._upload_single_chunk(
+                    session, upload_id, file_path,
+                    chunk_offset=offset,
+                    chunk_size=cur_chunk_size,
+                    part_no=part_no, filename=filename, total_parts=total_parts,
+                )
+                remote_parts_map[part_no] = dict(part_result)
             parts.append(part_result)
+            confirmed_set.add(part_no)
             confirmed_bytes += cur_chunk_size
-            confirmed_parts += 1
             if progress_callback:
-                await progress_callback(min(confirmed_bytes, file_size), file_size, confirmed_parts, total_parts)
-
+                await progress_callback(min(confirmed_bytes, file_size), file_size, len(confirmed_set), total_parts)
+            if part_confirm_callback:
+                await part_confirm_callback(
+                    part_no,
+                    dict(part_result),
+                    self._normalize_confirmed_part_numbers(confirmed_set, total_parts),
+                    [dict(remote_parts_map[number]) for number in sorted(remote_parts_map.keys())],
+                    total_parts,
+                )
             offset += cur_chunk_size
-
             part_no += 1
 
         return parts
@@ -577,7 +643,12 @@ class TelDriveClient:
     # ===========================================
 
     async def upload_file_chunked(self, file_path: str, teldrive_path: str = "/",
-                                   progress_callback: Callable = None) -> dict:
+                                   progress_callback: Callable = None,
+                                   *,
+                                   upload_id: Optional[str] = None,
+                                   confirmed_part_numbers: Optional[List[int]] = None,
+                                   remote_parts: Optional[List[Dict[str, Any]]] = None,
+                                   part_confirm_callback: Optional[Callable] = None) -> dict:
         """上传文件到 TelDrive（完整流程）
 
         流程（参考 OpenList driver.go 的 Put 方法）：
@@ -606,15 +677,16 @@ class TelDriveClient:
 
         file_size = file_path.stat().st_size
         filename = file_path.name
-        upload_id = str(uuid.uuid4())
+        upload_id = str(upload_id or uuid.uuid4())
 
         total_parts = int(math.ceil(file_size / self.chunk_size)) if file_size > 0 else 0
+        confirmed_numbers = self._normalize_confirmed_part_numbers(confirmed_part_numbers, total_parts)
         upload_meta = {
             "upload_id": upload_id,
             "total_parts": total_parts,
-            "confirmed_part_numbers": [],
+            "confirmed_part_numbers": confirmed_numbers,
             "uploaded_parts": [],
-            "remote_parts": [],
+            "remote_parts": self._normalize_remote_parts(remote_parts, total_parts),
         }
 
         logger.info(f"开始上传: {filename} ({file_size} bytes, {total_parts} 块, "
@@ -633,15 +705,17 @@ class TelDriveClient:
             connect=self.UPLOAD_CONNECT_TIMEOUT,
             sock_read=self.UPLOAD_SOCK_READ_TIMEOUT,
         )
+        should_cleanup_upload = False
         async with aiohttp.ClientSession(timeout=upload_session_timeout) as session:
             try:
                 # 步骤 1: 查找并删除同名文件（对标 driver.go Put 中的逻辑）
-                existing_file = await self._find_file(session, teldrive_path, filename)
-                if existing_file:
-                    file_id = existing_file.get("id")
-                    if file_id:
-                        logger.info(f"发现同名文件 {filename} (id={file_id})，删除后重新上传")
-                        await self._delete_file(session, file_id)
+                if not confirmed_numbers:
+                    existing_file = await self._find_file(session, teldrive_path, filename)
+                    if existing_file:
+                        file_id = existing_file.get("id")
+                        if file_id:
+                            logger.info(f"发现同名文件 {filename} (id={file_id})，删除后重新上传")
+                            await self._delete_file(session, file_id)
 
                 # 步骤 2: 初始化上传会话 — GET /api/uploads/{uploadId}
                 async with session.get(
@@ -655,17 +729,36 @@ class TelDriveClient:
                     logger.info(f"空文件，直接创建记录")
                     return await self._touch(session, filename, teldrive_path)
 
-                # 步骤 4: 上传分块
-                if total_parts <= 1:
-                    uploaded_parts = await self._do_single_upload(
-                        session, file_path, upload_id, filename,
-                        file_size, total_parts, progress_callback
+                remote_parts_live = self._normalize_remote_parts(
+                    await self._get_file_parts(session, upload_id),
+                    total_parts,
+                )
+                upload_meta["remote_parts"] = remote_parts_live
+                remote_numbers = self._extract_confirmed_part_numbers(remote_parts_live)
+                all_confirmed_numbers = self._normalize_confirmed_part_numbers(
+                    list(set(confirmed_numbers) | set(remote_numbers)),
+                    total_parts,
+                )
+                upload_meta["confirmed_part_numbers"] = all_confirmed_numbers
+                if len(remote_parts_live) > total_parts:
+                    polluted = self._structured_error(
+                        "remote_parts_count_mismatch",
+                        f"远端分块数量异常: expected={total_parts}, actual={len(remote_parts_live)}",
+                        expected_total_parts=total_parts,
+                        actual_total_parts=len(remote_parts_live),
                     )
-                else:
-                    uploaded_parts = await self._do_multi_upload(
-                        session, file_path, upload_id, filename,
-                        file_size, total_parts, progress_callback
-                    )
+                    polluted["upload_meta"] = upload_meta
+                    polluted["remote_parts"] = remote_parts_live
+                    return polluted
+
+                # 步骤 4: 上传分块（保守正确策略：统一串行补缺块）
+                uploaded_parts = await self._do_single_upload(
+                    session, file_path, upload_id, filename,
+                    file_size, total_parts, progress_callback,
+                    confirmed_part_numbers=all_confirmed_numbers,
+                    remote_parts=remote_parts_live,
+                    part_confirm_callback=part_confirm_callback,
+                )
                 upload_meta["confirmed_part_numbers"] = self._extract_confirmed_part_numbers(uploaded_parts)
                 upload_meta["uploaded_parts"] = uploaded_parts
 
@@ -676,9 +769,11 @@ class TelDriveClient:
                 )
                 result["upload_meta"] = upload_meta
                 if isinstance(result.get("remote_parts"), list):
-                    upload_meta["remote_parts"] = result["remote_parts"]
+                    upload_meta["remote_parts"] = self._normalize_remote_parts(result["remote_parts"], total_parts)
+                    upload_meta["confirmed_part_numbers"] = self._extract_confirmed_part_numbers(upload_meta["remote_parts"])
 
                 if result.get("success"):
+                    should_cleanup_upload = True
                     logger.info(f"文件 {filename} 上传成功")
                 else:
                     logger.error(f"文件 {filename} 创建记录失败: {result.get('error')}")
@@ -687,8 +782,9 @@ class TelDriveClient:
 
             except Exception as e:
                 logger.error(f"上传文件失败: {e}")
-                return {"success": False, "error": str(e)}
+                return {"success": False, "error": str(e), "upload_meta": upload_meta}
 
             finally:
                 # 步骤 6: 清理上传记录（对标 driver.go Put 的 defer）
-                await self._cleanup_upload(session, upload_id)
+                if should_cleanup_upload:
+                    await self._cleanup_upload(session, upload_id)

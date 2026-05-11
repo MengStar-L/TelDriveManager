@@ -7,6 +7,7 @@ import shutil
 import logging
 import psutil
 import uuid
+from datetime import datetime, timezone
 from typing import Optional, Set
 from pathlib import Path
 
@@ -840,16 +841,16 @@ class TaskManager:
         # 恢复僵死的 uploading 任务（应用重启后 uploading 状态不会自动恢复）
         for t in all_tasks:
             task_id = t["task_id"]
-            self._sync_upload_checkpoint_cache(t)
-            self._upload_session_state[task_id] = self._normalize_upload_session_state(t.get("upload_session_state"))
+            await self._refresh_upload_session_from_db(task_id, t)
 
             if t["status"] == "uploading":
                 local_path = self._get_upload_path(t.get("local_path", ""))
                 if local_path and os.path.exists(local_path):
+                    recovered = await self._recover_stale_upload_session_if_needed(task_id, t, force=True)
                     token = uuid.uuid4().hex
                     acquired = await db.try_acquire_upload_session(
                         task_id,
-                        ("idle", "scheduled", "running"),
+                        ("idle",),
                         token,
                         self._session_owner,
                         next_state="scheduled",
@@ -859,6 +860,8 @@ class TaskManager:
                         self._upload_session_state[task_id] = "scheduled"
                         upload_t = asyncio.create_task(self._retry_upload(task_id, token))
                         self._upload_tasks[task_id] = upload_t
+                    else:
+                        logger.info(f"跳过恢复上传任务 {task_id}，已有活跃上传会话: state={recovered.get('upload_session_state')}")
                 else:
                     logger.warning(f"僵死上传任务 {task_id} 本地文件不存在，标记失败")
                     await db.update_task(task_id, status="failed",
@@ -956,7 +959,11 @@ class TaskManager:
         merged = dict(task)
         merged.pop("aria2_options_json", None)
         task_id = str(merged.get("task_id") or "")
-        confirmed_chunks = self._coerce_upload_checkpoint_value(merged.get("upload_confirmed_chunks"))
+        confirmed_parts = self._get_persisted_confirmed_part_numbers(merged)
+        confirmed_chunks = max(
+            self._coerce_upload_checkpoint_value(merged.get("upload_confirmed_chunks")),
+            float(len(confirmed_parts)),
+        )
         confirmed_total = max(0, int(merged.get("upload_confirmed_total") or 0))
         if confirmed_chunks > 0 or confirmed_total > 0:
             self._upload_confirmed_checkpoints[task_id] = max(
@@ -1057,23 +1064,167 @@ class TaskManager:
         if not task:
             return 0.0
         task_id = str(task.get("task_id") or "")
-        confirmed = self._coerce_upload_checkpoint_value(task.get("upload_confirmed_chunks"))
+        confirmed_parts = self._get_persisted_confirmed_part_numbers(task)
+        confirmed = max(
+            self._coerce_upload_checkpoint_value(task.get("upload_confirmed_chunks")),
+            float(len(confirmed_parts)),
+        )
         if task_id and confirmed > 0:
             previous = self._coerce_upload_checkpoint_value(self._upload_confirmed_checkpoints.get(task_id))
             self._upload_confirmed_checkpoints[task_id] = max(previous, confirmed)
         return confirmed
+
+    @staticmethod
+    def _load_json_list(raw_value) -> list:
+        if isinstance(raw_value, list):
+            return list(raw_value)
+        if raw_value in (None, ""):
+            return []
+        try:
+            value = json.loads(raw_value)
+        except Exception:
+            return []
+        return list(value) if isinstance(value, list) else []
+
+    def _normalize_confirmed_part_numbers(self, values, total_parts: int = 0) -> list[int]:
+        result: list[int] = []
+        seen: set[int] = set()
+        for value in self._load_json_list(values) if not isinstance(values, (list, tuple, set)) else list(values):
+            try:
+                number = int(value)
+            except Exception:
+                continue
+            if number <= 0:
+                continue
+            if total_parts > 0 and number > total_parts:
+                continue
+            if number in seen:
+                continue
+            seen.add(number)
+            result.append(number)
+        return sorted(result)
+
+    def _normalize_remote_parts(self, values, total_parts: int = 0) -> list[dict]:
+        result: list[dict] = []
+        for item in self._load_json_list(values) if not isinstance(values, list) else list(values):
+            if not isinstance(item, dict):
+                continue
+            part_number = None
+            try:
+                part_number = int(item.get("partNo", item.get("partId", item.get("id"))))
+            except Exception:
+                part_number = None
+            if part_number is None or part_number <= 0:
+                continue
+            if total_parts > 0 and part_number > total_parts:
+                result.append(dict(item))
+                continue
+            normalized = dict(item)
+            normalized["partNo"] = part_number
+            result.append(normalized)
+        return result
+
+    def _get_persisted_confirmed_part_numbers(self, task: Optional[dict]) -> list[int]:
+        if not task:
+            return []
+        total_parts = max(0, int(task.get("upload_confirmed_total") or 0))
+        return self._normalize_confirmed_part_numbers(task.get("upload_confirmed_parts_json"), total_parts)
+
+    def _get_persisted_remote_parts(self, task: Optional[dict]) -> list[dict]:
+        if not task:
+            return []
+        total_parts = max(0, int(task.get("upload_confirmed_total") or 0))
+        return self._normalize_remote_parts(task.get("upload_remote_parts_json"), total_parts)
+
+    def _serialize_confirmed_part_numbers(self, values, total_parts: int = 0) -> str:
+        return json.dumps(self._normalize_confirmed_part_numbers(values, total_parts), ensure_ascii=False)
+
+    def _serialize_remote_parts(self, values, total_parts: int = 0) -> str:
+        return json.dumps(self._normalize_remote_parts(values, total_parts), ensure_ascii=False)
+
+    def _get_task_confirmed_chunk_baseline(self, task: Optional[dict], total_chunks: int) -> float:
+        confirmed_count = max(
+            self._coerce_upload_checkpoint_value(task.get("upload_confirmed_chunks") if task else 0),
+            float(len(self._get_persisted_confirmed_part_numbers(task))),
+        )
+        if total_chunks > 0:
+            return min(confirmed_count, float(total_chunks))
+        return confirmed_count
+
+    @staticmethod
+    def _parse_db_timestamp(raw_value) -> Optional[datetime]:
+        text = str(raw_value or "").strip()
+        if not text:
+            return None
+        for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S"):
+            try:
+                return datetime.strptime(text, fmt).replace(tzinfo=timezone.utc)
+            except Exception:
+                continue
+        return None
+
+    def _is_upload_session_stale(self, task: Optional[dict], stale_seconds: int = 120) -> bool:
+        if not task:
+            return False
+        state = self._normalize_upload_session_state(task.get("upload_session_state"))
+        if state not in {"scheduled", "running"}:
+            return False
+        task_id = str(task.get("task_id") or "")
+        if task_id in self._upload_tasks:
+            return False
+        last_seen = (
+            self._parse_db_timestamp(task.get("upload_last_reconciled_at"))
+            or self._parse_db_timestamp(task.get("updated_at"))
+            or self._parse_db_timestamp(task.get("upload_started_at"))
+        )
+        if last_seen is None:
+            return True
+        return (datetime.now(timezone.utc) - last_seen).total_seconds() >= stale_seconds
+
+    async def _recover_stale_upload_session_if_needed(
+        self,
+        task_id: str,
+        task: Optional[dict] = None,
+        *,
+        force: bool = False,
+    ) -> dict:
+        current = dict(task or await db.get_task(task_id) or {})
+        if not current:
+            return {}
+        if not force and not self._is_upload_session_stale(current):
+            return current
+        state = self._normalize_upload_session_state(current.get("upload_session_state"))
+        if state not in {"scheduled", "running"}:
+            return current
+        logger.info(f"recover stale upload session for task {task_id}, state={state}, owner={current.get('upload_session_owner')}")
+        await db.update_task(
+            task_id,
+            upload_session_state="idle",
+            upload_session_token=None,
+            upload_session_owner=None,
+        )
+        self._clear_upload_session_state(task_id, keep_meta=True)
+        return dict(await db.get_task(task_id) or current)
 
     async def _refresh_upload_session_from_db(self, task_id: str, task: Optional[dict] = None) -> dict:
         current = dict(task or await db.get_task(task_id) or {})
         if not current:
             return {}
         confirmed = self._sync_upload_checkpoint_cache(current)
+        confirmed_parts = self._get_persisted_confirmed_part_numbers(current)
+        remote_parts = self._get_persisted_remote_parts(current)
         self._set_runtime_task_fields(
             task_id,
             upload_chunk_done=confirmed,
             upload_chunk_total=max(0, int(current.get("upload_confirmed_total") or 0)),
         )
         self._upload_session_state[task_id] = self._normalize_upload_session_state(current.get("upload_session_state"))
+        self._upload_session_meta[task_id] = {
+            "upload_id": current.get("upload_id"),
+            "confirmed_part_numbers": confirmed_parts,
+            "remote_parts": remote_parts,
+            "total_parts": max(0, int(current.get("upload_confirmed_total") or 0)),
+        }
         return current
 
     @staticmethod
@@ -1099,6 +1250,88 @@ class TaskManager:
             return False
         code = str(payload.get("code") or "")
         return code.startswith("remote_parts_") or code == "upload_session_conflict"
+
+    async def _ensure_upload_checkpoint_persisted(
+        self,
+        task_id: str,
+        token: Optional[str],
+        confirmed_chunks: float,
+        confirmed_total: int,
+        *,
+        stage: str,
+        confirmed_part_numbers=None,
+        remote_parts=None,
+        upload_id: Optional[str] = None,
+        reconciled: bool = False,
+    ) -> None:
+        if not token:
+            return
+        updated = await db.update_upload_checkpoint(
+            task_id,
+            token,
+            confirmed_chunks,
+            confirmed_total,
+            self._serialize_confirmed_part_numbers(confirmed_part_numbers, confirmed_total)
+            if confirmed_part_numbers is not None else None,
+            self._serialize_remote_parts(remote_parts, confirmed_total)
+            if remote_parts is not None else None,
+            upload_id,
+            reconciled,
+        )
+        if updated:
+            return
+        raise RuntimeError(
+            self._format_structured_upload_error(
+                "upload_session_conflict",
+                "upload session lost ownership while persisting checkpoint",
+                {
+                    "task_id": task_id,
+                    "stage": stage,
+                    "confirmed_chunks": confirmed_chunks,
+                    "confirmed_total": confirmed_total,
+                },
+            )
+        )
+
+    async def _complete_upload_session_or_raise(
+        self,
+        task_id: str,
+        token: Optional[str],
+        confirmed_chunks: float,
+        confirmed_total: int,
+        *,
+        stage: str,
+        confirmed_part_numbers=None,
+        remote_parts=None,
+        upload_id: Optional[str] = None,
+    ) -> None:
+        if not token:
+            return
+        completed = await db.complete_upload_session(
+            task_id,
+            token,
+            confirmed_chunks,
+            confirmed_total,
+            self._serialize_confirmed_part_numbers(confirmed_part_numbers, confirmed_total)
+            if confirmed_part_numbers is not None else None,
+            self._serialize_remote_parts(remote_parts, confirmed_total)
+            if remote_parts is not None else None,
+            upload_id,
+        )
+        if completed:
+            return
+        raise RuntimeError(
+            self._format_structured_upload_error(
+                "upload_session_conflict",
+                "upload session lost ownership before completion",
+                {
+                    "task_id": task_id,
+                    "stage": stage,
+                    "confirmed_chunks": confirmed_chunks,
+                    "confirmed_total": confirmed_total,
+                },
+            )
+        )
 
     def _set_upload_session_state(self, task_id: str, state: Optional[str], meta: Optional[dict] = None):
         if state:
@@ -1162,8 +1395,15 @@ class TaskManager:
             "用户手动暂停上传",
             "本地文件不存在",
         )
-
-        return error.startswith("structured_upload_error::") or any(marker in error for marker in blocked_markers)
+        payload = None
+        if error.startswith("structured_upload_error::"):
+            try:
+                payload = json.loads(error.split("::", 1)[1])
+            except Exception:
+                payload = None
+        if isinstance(payload, dict) and str(payload.get("code") or "") == "remote_parts_count_mismatch":
+            return False
+        return any(marker in error for marker in blocked_markers)
 
     @staticmethod
     def _normalize_teldrive_path(path: str) -> str:
@@ -1634,6 +1874,7 @@ class TaskManager:
         task = await db.get_task(task_id)
         if not task:
             return False
+        task = await self._recover_stale_upload_session_if_needed(task_id, task)
         await self._refresh_upload_session_from_db(task_id, task)
         if (
             task.get("status") == "completed"
@@ -1724,11 +1965,15 @@ class TaskManager:
             task_id,
             status="failed",
             error="polluted remote chunks cleaned; retry upload",
+            upload_id=None,
             upload_session_state="idle",
             upload_session_token=None,
             upload_session_owner=None,
             upload_confirmed_chunks=0,
             upload_confirmed_total=0,
+            upload_confirmed_parts_json="[]",
+            upload_remote_parts_json="[]",
+            upload_last_reconciled_at=None,
             upload_finished_at=None,
         )
         await self._broadcast_task_update(task_id)
@@ -1770,10 +2015,7 @@ class TaskManager:
                 await self._broadcast_task_update(task_id)
                 return
             total_chunks = self._count_path_chunks(local_path)
-            baseline_chunks = min(
-                self._coerce_upload_checkpoint_value(task.get("upload_confirmed_chunks")),
-                float(total_chunks) if total_chunks > 0 else self._coerce_upload_checkpoint_value(task.get("upload_confirmed_chunks")),
-            )
+            baseline_chunks = self._get_task_confirmed_chunk_baseline(task, total_chunks)
             self._upload_confirmed_checkpoints[task_id] = baseline_chunks
             self._set_runtime_task_fields(task_id, upload_chunk_done=baseline_chunks, upload_chunk_total=total_chunks, upload_note=None, upload_note_level=None)
             upload_progress = round(baseline_chunks / total_chunks * 100, 1) if total_chunks > 0 else 0.0
@@ -1857,20 +2099,12 @@ class TaskManager:
             return
         try:
             all_tasks = await db.get_all_tasks()
-            max_retries = self.config.get("upload", {}).get("max_retries", 3)
             cleaned_any = False
             for task in all_tasks:
                 status = task["status"]
-                task_id = task["task_id"]
 
                 # 已完成：清理残留文件
                 should_clean = (status == "completed")
-
-                # 失败且重试次数耗尽：清理文件释放磁盘
-                if status == "failed":
-                    retries = self._upload_retry_counts.get(task_id, 0)
-                    if retries >= max_retries:
-                        should_clean = True
 
                 if not should_clean:
                     continue
@@ -1881,7 +2115,7 @@ class TaskManager:
                 local_path = self._get_upload_path(local_path)
                 if not local_path or not os.path.exists(local_path):
                     continue
-                label = "失败(重试耗尽)" if status == "failed" else "已完成"
+                label = "已完成"
                 logger.info(f"兜底清理：删除{label}任务的残留文件: {local_path}")
                 try:
                     if os.path.isdir(local_path):
@@ -1899,8 +2133,7 @@ class TaskManager:
             logger.debug(f"清理文件异常: {e}")
 
     async def _auto_retry_failed_uploads(self):
-        """自动重试失败的上传任务，超过 max_retries 次后放弃并清理本地文件"""
-        max_retries = self.config.get("upload", {}).get("max_retries", 3)
+        """自动重试失败的上传任务，按已确认分块续传。"""
         try:
             all_tasks = await db.get_all_tasks()
             for raw_task in all_tasks:
@@ -1910,6 +2143,11 @@ class TaskManager:
                 if task["status"] != "failed":
                     continue
                 if not self._is_upload_stage_task(task):
+                    continue
+                if self._is_polluted_upload_error(task.get("error")):
+                    if task["task_id"] not in self._upload_tasks:
+                        logger.info(f"自动清理污染上传会话: {task['task_id']}")
+                        await self.cleanup_polluted_upload(task["task_id"], retry_after_cleanup=True)
                     continue
                 if self._should_skip_auto_retry(task):
                     continue
@@ -1940,22 +2178,14 @@ class TaskManager:
                     self._upload_retry_checkpoints[task_id] = current_checkpoint
 
                 retries = self._upload_retry_counts.get(task_id, 0)
-                if retries >= max_retries:
-                    # 重试耗尽，跳过（文件清理由 _cleanup_completed_files 处理）
-                    continue
-
-                # 发起重试
                 next_retry = retries + 1
                 self._upload_retry_counts[task_id] = next_retry
                 self._upload_retry_checkpoints[task_id] = current_checkpoint
                 total_chunks = self._count_path_chunks(local_path)
-                baseline_chunks = min(
-                    self._coerce_upload_checkpoint_value(task.get("upload_confirmed_chunks")),
-                    float(total_chunks) if total_chunks > 0 else self._coerce_upload_checkpoint_value(task.get("upload_confirmed_chunks")),
-                )
+                baseline_chunks = self._get_task_confirmed_chunk_baseline(task, total_chunks)
                 self._upload_confirmed_checkpoints[task_id] = baseline_chunks
                 baseline_progress = round(baseline_chunks / total_chunks * 100, 1) if total_chunks > 0 else 0.0
-                retry_message = f"上传失败，正在自动重试（{next_retry}/{max_retries}），等待上传槽位..."
+                retry_message = f"上传失败，正在继续续传（第 {next_retry} 次重试），等待上传槽位..."
                 self._set_runtime_task_fields(
                     task_id,
                     upload_chunk_done=baseline_chunks,
@@ -1965,7 +2195,7 @@ class TaskManager:
                 )
                 await db.update_task(task_id, status="uploading", upload_progress=baseline_progress, upload_speed="", error=None)
                 await self._broadcast_task_update(task_id)
-                logger.info(f"自动重试上传任务 {task_id} ({next_retry}/{max_retries})")
+                logger.info(f"自动续传上传任务 {task_id} (retry={next_retry})")
                 self._clear_upload_session_state(task_id, keep_meta=True)
                 token = uuid.uuid4().hex
                 acquired = await db.try_acquire_upload_session(
@@ -1999,16 +2229,22 @@ class TaskManager:
                 rel_path = os.path.relpath(full_path, dir_path)
                 file_size = os.path.getsize(full_path)
                 all_files.append((full_path, rel_path, file_size))
+        all_files.sort(key=lambda item: item[1].replace("\\", "/"))
         if not all_files:
             self._mark_upload_session_finalized(task_id)
             await db.update_task(task_id, status="completed", upload_progress=100.0)
             await self._broadcast_task_update(task_id)
             return
+        current_task = await db.get_task(task_id) or {}
         total_size = sum(s for _, _, s in all_files)
         total_chunks = sum(self._count_file_chunks(s) for _, _, s in all_files)
         uploaded_total = [0]
-        baseline_chunks = self._get_upload_display_baseline(task_id, total_chunks)
+        baseline_chunks = self._get_task_confirmed_chunk_baseline(current_task, total_chunks)
         confirmed_chunks_total = [baseline_chunks]
+        remaining_confirmed_chunks = int(baseline_chunks)
+        persisted_upload_id = str(current_task.get("upload_id") or "")
+        persisted_confirmed_part_numbers = self._get_persisted_confirmed_part_numbers(current_task)
+        persisted_remote_parts = self._get_persisted_remote_parts(current_task)
         _last_broadcast = [0.0]
         _last_progress = [0.0]
         self._task_uploaded_bytes[task_id] = 0
@@ -2020,15 +2256,55 @@ class TaskManager:
                 file_uploaded_before = uploaded_total[0]
                 file_chunks_before = confirmed_chunks_total[0]
                 file_total_chunks = self._count_file_chunks(file_size)
+                resume_current_file = remaining_confirmed_chunks < file_total_chunks
+                if remaining_confirmed_chunks >= file_total_chunks:
+                    uploaded_total[0] += file_size
+                    confirmed_chunks_total[0] = min(total_chunks, confirmed_chunks_total[0] + file_total_chunks)
+                    remaining_confirmed_chunks -= file_total_chunks
+                    continue
+                current_file_baseline = max(0, remaining_confirmed_chunks)
+                if current_file_baseline > 0 and not persisted_confirmed_part_numbers:
+                    persisted_confirmed_part_numbers = list(range(1, current_file_baseline + 1))
+                current_file_upload_id = persisted_upload_id or uuid.uuid4().hex
+                if token:
+                    prepared = await db.update_upload_session_metadata(
+                        task_id,
+                        token,
+                        upload_id=current_file_upload_id,
+                        confirmed_parts_json=self._serialize_confirmed_part_numbers(
+                            persisted_confirmed_part_numbers,
+                            file_total_chunks,
+                        ),
+                        remote_parts_json=self._serialize_remote_parts(
+                            persisted_remote_parts,
+                            file_total_chunks,
+                        ),
+                        confirmed_chunks=float(file_chunks_before + len(persisted_confirmed_part_numbers)),
+                        confirmed_total=int(total_chunks),
+                        reconciled=bool(persisted_confirmed_part_numbers or persisted_remote_parts),
+                    )
+                    if not prepared:
+                        raise RuntimeError(
+                            self._format_structured_upload_error(
+                                "upload_session_conflict",
+                                "upload session lost ownership while preparing directory file upload",
+                                {"task_id": task_id, "stage": f"directory-file-prepare:{rel_path}"},
+                            )
+                        )
                 async def make_progress_cb(base_uploaded, base_chunks):
                     async def progress_callback(uploaded: int, total: int, confirmed_parts: int, total_parts: int):
                         current_total = base_uploaded + uploaded
-                        current_chunks = min(total_chunks, base_chunks + confirmed_parts)
+                        current_chunks = min(total_chunks, base_chunks + float(confirmed_parts))
                         self._task_uploaded_bytes[task_id] = current_total
                         self._set_runtime_task_fields(task_id, upload_chunk_done=current_chunks, upload_chunk_total=total_chunks, upload_note=None, upload_note_level=None)
                         self._record_upload_progress_checkpoint(task_id, {"task_id": task_id, "upload_chunk_done": current_chunks})
-                        if token:
-                            await db.update_upload_checkpoint(task_id, token, current_chunks, total_chunks)
+                        await self._ensure_upload_checkpoint_persisted(
+                            task_id,
+                            token,
+                            current_chunks,
+                            total_chunks,
+                            stage=f"directory-progress:{rel_path}",
+                        )
                         if total_chunks > 0:
                             progress = round(current_chunks / total_chunks * 100, 1)
                         elif total_size > 0:
@@ -2042,25 +2318,121 @@ class TaskManager:
                             await db.update_task(task_id, upload_progress=progress, upload_speed="")
                             await self._broadcast_task_update(task_id)
                     return progress_callback
+                async def part_confirm_callback(part_no: int, part: dict, confirmed_numbers: list[int], remote_parts: list[dict], total_parts: int):
+                    current_chunks = min(total_chunks, file_chunks_before + len(confirmed_numbers))
+                    self._upload_confirmed_checkpoints[task_id] = float(current_chunks)
+                    self._set_runtime_task_fields(
+                        task_id,
+                        upload_chunk_done=float(current_chunks),
+                        upload_chunk_total=total_chunks,
+                        upload_note=None,
+                        upload_note_level=None,
+                    )
+                    await self._ensure_upload_checkpoint_persisted(
+                        task_id,
+                        token,
+                        float(current_chunks),
+                        total_chunks,
+                        stage=f"directory-part-confirm:{rel_path}:{part_no}",
+                        confirmed_part_numbers=confirmed_numbers,
+                        remote_parts=remote_parts,
+                        upload_id=current_file_upload_id,
+                        reconciled=True,
+                    )
                 cb = await make_progress_cb(file_uploaded_before, file_chunks_before)
-                result = await asyncio.wait_for(teldrive.upload_file_chunked(full_path, file_teldrive_path, cb), timeout=self._calc_upload_timeout(file_size))
-                self._store_upload_session_meta(task_id, result.get("upload_meta"))
+                result = await asyncio.wait_for(
+                    teldrive.upload_file_chunked(
+                        full_path,
+                        file_teldrive_path,
+                        cb,
+                        upload_id=current_file_upload_id,
+                        confirmed_part_numbers=persisted_confirmed_part_numbers,
+                        remote_parts=persisted_remote_parts,
+                        part_confirm_callback=part_confirm_callback,
+                    ),
+                    timeout=self._calc_upload_timeout(file_size),
+                )
+                upload_meta = dict(result.get("upload_meta") or {})
+                current_confirmed_numbers = self._normalize_confirmed_part_numbers(
+                    upload_meta.get("confirmed_part_numbers"),
+                    file_total_chunks,
+                )
+                current_remote_parts = self._normalize_remote_parts(
+                    upload_meta.get("remote_parts"),
+                    file_total_chunks,
+                )
+                self._store_upload_session_meta(task_id, upload_meta)
+                if token:
+                    synced = await db.update_upload_session_metadata(
+                        task_id,
+                        token,
+                        upload_id=str(upload_meta.get("upload_id") or current_file_upload_id),
+                        confirmed_parts_json=self._serialize_confirmed_part_numbers(current_confirmed_numbers, file_total_chunks),
+                        remote_parts_json=self._serialize_remote_parts(current_remote_parts, file_total_chunks),
+                        confirmed_chunks=float(file_chunks_before + len(current_confirmed_numbers)),
+                        confirmed_total=int(total_chunks),
+                        reconciled=True,
+                    )
+                    if not synced:
+                        raise RuntimeError(
+                            self._format_structured_upload_error(
+                                "upload_session_conflict",
+                                "upload session lost ownership while syncing directory upload metadata",
+                                {"task_id": task_id, "stage": f"directory-file-meta-sync:{rel_path}"},
+                            )
+                        )
                 if not result.get("success"):
                     if self._is_polluted_upload_error(result.get("error")):
                         self._set_runtime_task_fields(task_id, upload_note="remote parts polluted; clean then retry", upload_note_level="warning")
                     raise Exception(f"upload failed: {rel_path} - {result.get('error', 'unknown error')}")
                 uploaded_total[0] += file_size
                 confirmed_chunks_total[0] = min(total_chunks, confirmed_chunks_total[0] + file_total_chunks)
+                remaining_confirmed_chunks = 0
                 self._set_runtime_task_fields(task_id, upload_chunk_done=confirmed_chunks_total[0], upload_chunk_total=total_chunks, upload_note=None, upload_note_level=None)
+                await self._ensure_upload_checkpoint_persisted(
+                    task_id,
+                    token,
+                    confirmed_chunks_total[0],
+                    total_chunks,
+                    stage=f"directory-file-complete:{rel_path}",
+                    confirmed_part_numbers=[],
+                    remote_parts=[],
+                    upload_id="",
+                )
                 if token:
-                    await db.update_upload_checkpoint(task_id, token, confirmed_chunks_total[0], total_chunks)
+                    await db.update_task(
+                        task_id,
+                        upload_id=None,
+                        upload_confirmed_parts_json="[]",
+                        upload_remote_parts_json="[]",
+                        upload_confirmed_chunks=float(confirmed_chunks_total[0]),
+                        upload_confirmed_total=int(total_chunks),
+                    )
+                persisted_upload_id = ""
+                persisted_confirmed_part_numbers = []
+                persisted_remote_parts = []
             self._set_runtime_task_fields(task_id, upload_chunk_done=total_chunks, upload_chunk_total=total_chunks, upload_note=None, upload_note_level=None)
             self._upload_confirmed_checkpoints[task_id] = float(total_chunks)
-            if token:
-                await db.complete_upload_session(task_id, token, float(total_chunks), int(total_chunks))
+            await self._complete_upload_session_or_raise(
+                task_id,
+                token,
+                float(total_chunks),
+                int(total_chunks),
+                stage="directory-finalize",
+                confirmed_part_numbers=[],
+                remote_parts=[],
+                upload_id=None,
+            )
             self._reset_upload_retry_state(task_id)
             self._mark_upload_session_finalized(task_id)
-            await db.update_task(task_id, upload_confirmed_chunks=float(total_chunks), upload_confirmed_total=int(total_chunks))
+            await db.update_task(
+                task_id,
+                upload_id=None,
+                upload_confirmed_chunks=float(total_chunks),
+                upload_confirmed_total=int(total_chunks),
+                upload_confirmed_parts_json="[]",
+                upload_remote_parts_json="[]",
+            )
             await self._broadcast_task_update(task_id)
         finally:
             self._task_uploaded_bytes.pop(task_id, None)
@@ -2071,17 +2443,50 @@ class TaskManager:
         _last_broadcast = [0.0]
         _last_progress = [0.0]
         self._task_uploaded_bytes[task_id] = 0
+        current_task = await db.get_task(task_id) or {}
         file_size_on_disk = os.path.getsize(local_path) if os.path.isfile(local_path) else 0
         total_chunks = self._count_file_chunks(file_size_on_disk)
-        baseline_chunks = self._get_upload_display_baseline(task_id, total_chunks)
+        confirmed_part_numbers = self._get_persisted_confirmed_part_numbers(current_task)
+        persisted_remote_parts = self._get_persisted_remote_parts(current_task)
+        persisted_upload_id = str(current_task.get("upload_id") or uuid.uuid4().hex)
+        if token:
+            updated = await db.update_upload_session_metadata(
+                task_id,
+                token,
+                upload_id=persisted_upload_id,
+                confirmed_parts_json=self._serialize_confirmed_part_numbers(confirmed_part_numbers, total_chunks),
+                remote_parts_json=self._serialize_remote_parts(persisted_remote_parts, total_chunks),
+                confirmed_chunks=float(len(confirmed_part_numbers)),
+                confirmed_total=int(total_chunks),
+                reconciled=bool(confirmed_part_numbers or persisted_remote_parts),
+            )
+            if not updated:
+                raise RuntimeError(
+                    self._format_structured_upload_error(
+                        "upload_session_conflict",
+                        "upload session lost ownership while preparing upload metadata",
+                        {"task_id": task_id, "stage": "file-prepare"},
+                    )
+                )
+        baseline_chunks = min(
+            float(len(confirmed_part_numbers)),
+            float(total_chunks) if total_chunks > 0 else float(len(confirmed_part_numbers)),
+        )
+        self._upload_confirmed_checkpoints[task_id] = baseline_chunks
         self._set_runtime_task_fields(task_id, upload_chunk_done=baseline_chunks, upload_chunk_total=total_chunks)
+
         async def progress_callback(uploaded: int, total: int, confirmed_parts: int, total_parts: int):
             self._task_uploaded_bytes[task_id] = uploaded
-            current_confirmed_parts = min(total_chunks or total_parts, baseline_chunks + confirmed_parts)
+            current_confirmed_parts = min(total_chunks or total_parts, float(confirmed_parts))
             self._set_runtime_task_fields(task_id, upload_chunk_done=current_confirmed_parts, upload_chunk_total=total_chunks or total_parts, upload_note=None, upload_note_level=None)
             self._record_upload_progress_checkpoint(task_id, {"task_id": task_id, "upload_chunk_done": current_confirmed_parts})
-            if token:
-                await db.update_upload_checkpoint(task_id, token, current_confirmed_parts, int(total_chunks or total_parts))
+            await self._ensure_upload_checkpoint_persisted(
+                task_id,
+                token,
+                current_confirmed_parts,
+                int(total_chunks or total_parts),
+                stage="file-progress",
+            )
             if total_chunks > 0:
                 progress = round(current_confirmed_parts / total_chunks * 100, 1)
             elif total_parts > 0:
@@ -2096,17 +2501,98 @@ class TaskManager:
                 _last_broadcast[0] = now
                 await db.update_task(task_id, upload_progress=progress, upload_speed="")
                 await self._broadcast_task_update(task_id)
-        result = await asyncio.wait_for(teldrive.upload_file_chunked(local_path, teldrive_path, progress_callback), timeout=self._calc_upload_timeout(file_size_on_disk))
+
+        async def part_confirm_callback(part_no: int, part: dict, confirmed_numbers: list[int], remote_parts: list[dict], total_parts: int):
+            confirmed_count = min(len(confirmed_numbers), total_parts)
+            self._upload_confirmed_checkpoints[task_id] = float(confirmed_count)
+            self._set_runtime_task_fields(
+                task_id,
+                upload_chunk_done=float(confirmed_count),
+                upload_chunk_total=total_parts,
+                upload_note=None,
+                upload_note_level=None,
+            )
+            await self._ensure_upload_checkpoint_persisted(
+                task_id,
+                token,
+                float(confirmed_count),
+                total_parts,
+                stage=f"file-part-confirm:{part_no}",
+                confirmed_part_numbers=confirmed_numbers,
+                remote_parts=remote_parts,
+                upload_id=persisted_upload_id,
+                reconciled=True,
+            )
+
+        result = await asyncio.wait_for(
+            teldrive.upload_file_chunked(
+                local_path,
+                teldrive_path,
+                progress_callback,
+                upload_id=persisted_upload_id or None,
+                confirmed_part_numbers=confirmed_part_numbers,
+                remote_parts=persisted_remote_parts,
+                part_confirm_callback=part_confirm_callback,
+            ),
+            timeout=self._calc_upload_timeout(file_size_on_disk),
+        )
         try:
-            self._store_upload_session_meta(task_id, result.get("upload_meta"))
+            upload_meta = dict(result.get("upload_meta") or {})
+            current_upload_id = str(upload_meta.get("upload_id") or persisted_upload_id or "")
+            current_confirmed_numbers = self._normalize_confirmed_part_numbers(
+                upload_meta.get("confirmed_part_numbers"),
+                total_chunks,
+            )
+            current_remote_parts = self._normalize_remote_parts(
+                upload_meta.get("remote_parts"),
+                total_chunks,
+            )
+            self._store_upload_session_meta(task_id, upload_meta)
+            if token and current_upload_id:
+                updated = await db.update_upload_session_metadata(
+                    task_id,
+                    token,
+                    upload_id=current_upload_id,
+                    confirmed_parts_json=self._serialize_confirmed_part_numbers(current_confirmed_numbers, total_chunks),
+                    remote_parts_json=self._serialize_remote_parts(current_remote_parts, total_chunks),
+                    confirmed_chunks=float(len(current_confirmed_numbers)),
+                    confirmed_total=int(total_chunks),
+                    reconciled=True,
+                )
+                if not updated:
+                    raise RuntimeError(
+                        self._format_structured_upload_error(
+                            "upload_session_conflict",
+                            "upload session lost ownership while syncing upload metadata",
+                            {"task_id": task_id, "stage": "file-meta-sync"},
+                        )
+                    )
             if result.get("success"):
                 self._set_runtime_task_fields(task_id, upload_chunk_done=total_chunks, upload_chunk_total=total_chunks, upload_note=None, upload_note_level=None)
                 self._upload_confirmed_checkpoints[task_id] = float(total_chunks)
-                if token:
-                    await db.complete_upload_session(task_id, token, float(total_chunks), int(total_chunks))
+                await self._complete_upload_session_or_raise(
+                    task_id,
+                    token,
+                    float(total_chunks),
+                    int(total_chunks),
+                    stage="file-finalize",
+                    confirmed_part_numbers=current_confirmed_numbers or list(range(1, total_chunks + 1)),
+                    remote_parts=current_remote_parts,
+                    upload_id=current_upload_id or None,
+                )
                 self._clear_upload_retry_budget(task_id)
                 self._mark_upload_session_finalized(task_id)
-                await db.update_task(task_id, upload_confirmed_chunks=float(total_chunks), upload_confirmed_total=int(total_chunks))
+                await db.update_task(
+                    task_id,
+                    upload_id=current_upload_id or None,
+                    upload_confirmed_chunks=float(total_chunks),
+                    upload_confirmed_total=int(total_chunks),
+                    upload_confirmed_parts_json=self._serialize_confirmed_part_numbers(
+                        current_confirmed_numbers or list(range(1, total_chunks + 1)),
+                        total_chunks,
+                    ),
+                    upload_remote_parts_json=self._serialize_remote_parts(current_remote_parts, total_chunks),
+                )
                 await self._broadcast_task_update(task_id)
             else:
                 error = result.get("error", "upload failed")
@@ -2255,10 +2741,7 @@ class TaskManager:
                 if not local_path or not os.path.exists(local_path):
                     return {"success": False, "message": "??????????????"}
                 total_chunks = self._count_path_chunks(local_path)
-                baseline_chunks = min(
-                    self._coerce_upload_checkpoint_value(task.get("upload_confirmed_chunks")),
-                    float(total_chunks) if total_chunks > 0 else self._coerce_upload_checkpoint_value(task.get("upload_confirmed_chunks")),
-                )
+                baseline_chunks = self._get_task_confirmed_chunk_baseline(task, total_chunks)
                 self._upload_confirmed_checkpoints[task_id] = baseline_chunks
                 baseline_progress = round(baseline_chunks / total_chunks * 100, 1) if total_chunks > 0 else 0.0
                 self._clear_upload_retry_budget(task_id)
@@ -2388,10 +2871,7 @@ class TaskManager:
         local_path = self._get_upload_path(task.get("local_path", ""))
         if local_path and os.path.exists(local_path):
             total_chunks = self._count_path_chunks(local_path)
-            baseline_chunks = min(
-                self._coerce_upload_checkpoint_value(task.get("upload_confirmed_chunks")),
-                float(total_chunks) if total_chunks > 0 else self._coerce_upload_checkpoint_value(task.get("upload_confirmed_chunks")),
-            )
+            baseline_chunks = self._get_task_confirmed_chunk_baseline(task, total_chunks)
             self._upload_confirmed_checkpoints[task_id] = baseline_chunks
             baseline_progress = round(baseline_chunks / total_chunks * 100, 1) if total_chunks > 0 else 0.0
             self._set_runtime_task_fields(task_id, upload_chunk_done=baseline_chunks, upload_chunk_total=total_chunks, upload_note="?????????????...", upload_note_level="warning")
@@ -2427,14 +2907,14 @@ class TaskManager:
             if self._is_serial_transfer_mode_enabled():
                 await db.update_task(task_id, status="pending", aria2_gid=None, aria2_options_json=self._serialize_aria2_options(options), download_progress=0, upload_progress=0, download_speed="", upload_speed="", error=None, local_path=None, url=url)
                 self._upload_confirmed_checkpoints[task_id] = 0.0
-                await db.update_task(task_id, upload_session_state="idle", upload_session_token=None, upload_session_owner=None, upload_confirmed_chunks=0, upload_confirmed_total=0, upload_finished_at=None)
+                await db.update_task(task_id, upload_id=None, upload_session_state="idle", upload_session_token=None, upload_session_owner=None, upload_confirmed_chunks=0, upload_confirmed_total=0, upload_confirmed_parts_json="[]", upload_remote_parts_json="[]", upload_last_reconciled_at=None, upload_finished_at=None)
                 await self._broadcast_task_update(task_id)
                 await self._dispatch_next_serial_download()
                 return {"success": True, "message": "?????????"}
             new_gid = await aria2.add_uri(url, options)
             await db.update_task(task_id, status="downloading", aria2_gid=new_gid, aria2_options_json=self._serialize_aria2_options(options), download_progress=0, upload_progress=0, download_speed="", upload_speed="", error=None, local_path=None, url=url)
             self._upload_confirmed_checkpoints[task_id] = 0.0
-            await db.update_task(task_id, upload_session_state="idle", upload_session_token=None, upload_session_owner=None, upload_confirmed_chunks=0, upload_confirmed_total=0, upload_finished_at=None)
+            await db.update_task(task_id, upload_id=None, upload_session_state="idle", upload_session_token=None, upload_session_owner=None, upload_confirmed_chunks=0, upload_confirmed_total=0, upload_confirmed_parts_json="[]", upload_remote_parts_json="[]", upload_last_reconciled_at=None, upload_finished_at=None)
             self._known_gids.add(new_gid)
             await self._broadcast_task_update(task_id)
             return {"success": True, "message": "??????"}
@@ -2466,10 +2946,7 @@ class TaskManager:
             max_retries = self.config.get("upload", {}).get("max_retries", 3)
             retry_attempt = self._upload_retry_counts.get(task_id, 0)
             total_chunks = self._count_path_chunks(local_path)
-            baseline_chunks = min(
-                self._coerce_upload_checkpoint_value(task.get("upload_confirmed_chunks")),
-                float(total_chunks) if total_chunks > 0 else self._coerce_upload_checkpoint_value(task.get("upload_confirmed_chunks")),
-            )
+            baseline_chunks = self._get_task_confirmed_chunk_baseline(task, total_chunks)
             self._upload_confirmed_checkpoints[task_id] = baseline_chunks
             baseline_progress = round(baseline_chunks / total_chunks * 100, 1) if total_chunks > 0 else 0.0
             retry_note = f"retrying upload automatically ({retry_attempt}/{max_retries})..." if retry_attempt > 0 else "retrying upload..."

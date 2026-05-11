@@ -27,11 +27,15 @@ CREATE TABLE IF NOT EXISTS tasks (
     aria2_gid TEXT,
     aria2_options_json TEXT DEFAULT '{}',
     local_path TEXT,
+    upload_id TEXT,
     upload_session_state TEXT DEFAULT 'idle',
     upload_session_token TEXT,
     upload_session_owner TEXT,
     upload_confirmed_chunks REAL DEFAULT 0,
     upload_confirmed_total INTEGER DEFAULT 0,
+    upload_confirmed_parts_json TEXT DEFAULT '[]',
+    upload_remote_parts_json TEXT DEFAULT '[]',
+    upload_last_reconciled_at TIMESTAMP,
     upload_started_at TIMESTAMP,
     upload_finished_at TIMESTAMP,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -95,11 +99,15 @@ async def init_db():
     conn = await _get_conn()
     await conn.execute(CREATE_TABLE_SQL)
     await _ensure_column(conn, "tasks", "aria2_options_json", "TEXT DEFAULT '{}'")
+    await _ensure_column(conn, "tasks", "upload_id", "TEXT")
     await _ensure_column(conn, "tasks", "upload_session_state", "TEXT DEFAULT 'idle'")
     await _ensure_column(conn, "tasks", "upload_session_token", "TEXT")
     await _ensure_column(conn, "tasks", "upload_session_owner", "TEXT")
     await _ensure_column(conn, "tasks", "upload_confirmed_chunks", "REAL DEFAULT 0")
     await _ensure_column(conn, "tasks", "upload_confirmed_total", "INTEGER DEFAULT 0")
+    await _ensure_column(conn, "tasks", "upload_confirmed_parts_json", "TEXT DEFAULT '[]'")
+    await _ensure_column(conn, "tasks", "upload_remote_parts_json", "TEXT DEFAULT '[]'")
+    await _ensure_column(conn, "tasks", "upload_last_reconciled_at", "TIMESTAMP")
     await _ensure_column(conn, "tasks", "upload_started_at", "TIMESTAMP")
     await _ensure_column(conn, "tasks", "upload_finished_at", "TIMESTAMP")
     await conn.execute(CREATE_PROGRESS_LOGS_TABLE_SQL)
@@ -260,22 +268,41 @@ async def update_upload_checkpoint(
     token: str,
     confirmed_chunks: float,
     confirmed_total: int,
+    confirmed_parts_json: Optional[str] = None,
+    remote_parts_json: Optional[str] = None,
+    upload_id: Optional[str] = None,
+    reconciled: bool = False,
 ) -> bool:
     conn = await _get_conn()
-    cursor = await conn.execute(
-        """
-        UPDATE tasks
-        SET upload_confirmed_chunks = MAX(COALESCE(upload_confirmed_chunks, 0), ?),
-            upload_confirmed_total = CASE
+    fields = [
+        "upload_confirmed_chunks = MAX(COALESCE(upload_confirmed_chunks, 0), ?)",
+        """upload_confirmed_total = CASE
                 WHEN ? > 0 THEN ?
                 ELSE COALESCE(upload_confirmed_total, 0)
-            END,
+            END""",
+    ]
+    params: list[Any] = [confirmed_chunks, confirmed_total, confirmed_total]
+    if confirmed_parts_json is not None:
+        fields.append("upload_confirmed_parts_json = ?")
+        params.append(confirmed_parts_json)
+    if remote_parts_json is not None:
+        fields.append("upload_remote_parts_json = ?")
+        params.append(remote_parts_json)
+    if upload_id is not None:
+        fields.append("upload_id = ?")
+        params.append(upload_id)
+    if reconciled:
+        fields.append("upload_last_reconciled_at = CURRENT_TIMESTAMP")
+    cursor = await conn.execute(
+        f"""
+        UPDATE tasks
+        SET {", ".join(fields)},
             updated_at = CURRENT_TIMESTAMP
         WHERE task_id = ?
           AND upload_session_token = ?
           AND COALESCE(upload_session_state, 'idle') IN ('scheduled', 'running')
         """,
-        (confirmed_chunks, confirmed_total, confirmed_total, task_id, token),
+        (*params, task_id, token),
     )
     await conn.commit()
     return cursor.rowcount > 0
@@ -286,25 +313,94 @@ async def complete_upload_session(
     token: str,
     confirmed_chunks: float,
     confirmed_total: int,
+    confirmed_parts_json: Optional[str] = None,
+    remote_parts_json: Optional[str] = None,
+    upload_id: Optional[str] = None,
 ) -> bool:
     conn = await _get_conn()
+    fields = [
+        "status = 'completed'",
+        "upload_progress = 100.0",
+        "upload_speed = ''",
+        "error = NULL",
+        "upload_session_state = 'completed'",
+        "upload_confirmed_chunks = ?",
+        "upload_confirmed_total = ?",
+        "upload_finished_at = CURRENT_TIMESTAMP",
+    ]
+    params: list[Any] = [confirmed_chunks, confirmed_total]
+    if confirmed_parts_json is not None:
+        fields.append("upload_confirmed_parts_json = ?")
+        params.append(confirmed_parts_json)
+    if remote_parts_json is not None:
+        fields.append("upload_remote_parts_json = ?")
+        params.append(remote_parts_json)
+    if upload_id is not None:
+        fields.append("upload_id = ?")
+        params.append(upload_id)
     cursor = await conn.execute(
-        """
+        f"""
         UPDATE tasks
-        SET status = 'completed',
-            upload_progress = 100.0,
-            upload_speed = '',
-            error = NULL,
-            upload_session_state = 'completed',
-            upload_confirmed_chunks = ?,
-            upload_confirmed_total = ?,
-            upload_finished_at = CURRENT_TIMESTAMP,
+        SET {", ".join(fields)},
             updated_at = CURRENT_TIMESTAMP
         WHERE task_id = ?
           AND upload_session_token = ?
           AND COALESCE(upload_session_state, 'idle') IN ('scheduled', 'running')
         """,
-        (confirmed_chunks, confirmed_total, task_id, token),
+        (*params, task_id, token),
+    )
+    await conn.commit()
+    return cursor.rowcount > 0
+
+
+async def update_upload_session_metadata(
+    task_id: str,
+    token: str,
+    *,
+    upload_id: Optional[str] = None,
+    confirmed_parts_json: Optional[str] = None,
+    remote_parts_json: Optional[str] = None,
+    confirmed_chunks: Optional[float] = None,
+    confirmed_total: Optional[int] = None,
+    reconciled: bool = False,
+) -> bool:
+    fields: list[str] = []
+    params: list[Any] = []
+    if upload_id is not None:
+        fields.append("upload_id = ?")
+        params.append(upload_id)
+    if confirmed_parts_json is not None:
+        fields.append("upload_confirmed_parts_json = ?")
+        params.append(confirmed_parts_json)
+    if remote_parts_json is not None:
+        fields.append("upload_remote_parts_json = ?")
+        params.append(remote_parts_json)
+    if confirmed_chunks is not None:
+        fields.append("upload_confirmed_chunks = MAX(COALESCE(upload_confirmed_chunks, 0), ?)")
+        params.append(confirmed_chunks)
+    if confirmed_total is not None:
+        fields.append(
+            """upload_confirmed_total = CASE
+                WHEN ? > 0 THEN ?
+                ELSE COALESCE(upload_confirmed_total, 0)
+            END"""
+        )
+        params.extend([confirmed_total, confirmed_total])
+    if reconciled:
+        fields.append("upload_last_reconciled_at = CURRENT_TIMESTAMP")
+    if not fields:
+        return True
+    conn = await _get_conn()
+    cursor = await conn.execute(
+        f"""
+        UPDATE tasks
+        SET {", ".join(fields)},
+            updated_at = CURRENT_TIMESTAMP
+        WHERE task_id = ?
+          AND upload_session_token = ?
+          AND COALESCE(upload_session_state, 'idle') IN ('scheduled', 'running')
+        """,
+        (*params, task_id, token),
     )
     await conn.commit()
     return cursor.rowcount > 0
