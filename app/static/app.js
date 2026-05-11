@@ -1342,8 +1342,12 @@ function upsertA2TDTask(task, options = {}) {
         nextTask.upload_progress = existingUpload;
     }
 
-    const completedByProgress = incomingDownload >= 100 && incomingUpload >= 100;
-    if (existingStatus === 'completed' || nextStatus === 'completed' || completedByProgress) {
+    const completedByConfirmedChunks = nextStatus === 'completed' || (
+        getA2TDNumber(nextTask.upload_chunk_total) > 0
+        && getA2TDNumber(nextTask.upload_chunk_done) >= getA2TDNumber(nextTask.upload_chunk_total)
+        && (existingStatus === 'completed' || nextStatus === 'completed')
+    );
+    if (existingStatus === 'completed' || nextStatus === 'completed' || completedByConfirmedChunks) {
         nextTask.status = 'completed';
         nextTask.download_progress = Math.max(100, existingDownload, incomingDownload);
         nextTask.upload_progress = Math.max(100, existingUpload, incomingUpload);

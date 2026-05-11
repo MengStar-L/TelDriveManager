@@ -2,6 +2,7 @@ import asyncio
 import json
 import tempfile
 import unittest
+import uuid
 from pathlib import Path
 from typing import Any, cast
 
@@ -591,6 +592,7 @@ class SerialGateTests(unittest.IsolatedAsyncioTestCase):
 
         original_get_all = task_manager_module.db.get_all_tasks
         original_update_task = task_manager_module.db.update_task
+        original_acquire = task_manager_module.db.try_acquire_upload_session
         try:
             async def fake_get_all():
                 return [{
@@ -600,6 +602,8 @@ class SerialGateTests(unittest.IsolatedAsyncioTestCase):
                     "upload_progress": 0.0,
                     "local_path": "resume.bin",
                     "error": "timeout",
+                    "upload_confirmed_chunks": 10,
+                    "upload_confirmed_total": 26,
                 }]
 
             async def fake_update_task(task_id, **kwargs):
@@ -609,12 +613,16 @@ class SerialGateTests(unittest.IsolatedAsyncioTestCase):
             async def fake_broadcast(*args, **kwargs):
                 return None
 
-            async def fake_retry_upload(task_id):
+            async def fake_retry_upload(task_id, token=None):
                 created_tasks.append(task_id)
                 return None
 
+            async def fake_acquire(*args, **kwargs):
+                return True
+
             cast(Any, task_manager_module.db).get_all_tasks = fake_get_all
             cast(Any, task_manager_module.db).update_task = fake_update_task
+            cast(Any, task_manager_module.db).try_acquire_upload_session = fake_acquire
             manager._broadcast_task_update = cast(Any, fake_broadcast)
             manager._retry_upload = cast(Any, fake_retry_upload)
             manager._get_upload_path = cast(Any, lambda path: path)
@@ -630,6 +638,7 @@ class SerialGateTests(unittest.IsolatedAsyncioTestCase):
         finally:
             cast(Any, task_manager_module.db).get_all_tasks = original_get_all
             cast(Any, task_manager_module.db).update_task = original_update_task
+            cast(Any, task_manager_module.db).try_acquire_upload_session = original_acquire
 
         self.assertEqual(manager._upload_retry_counts["task-1"], 2)
         self.assertEqual(manager._upload_retry_checkpoints["task-1"], 10)
@@ -652,6 +661,7 @@ class SerialGateTests(unittest.IsolatedAsyncioTestCase):
 
         original_get_all = task_manager_module.db.get_all_tasks
         original_update_task = task_manager_module.db.update_task
+        original_acquire = task_manager_module.db.try_acquire_upload_session
         try:
             async def fake_get_all():
                 return [{
@@ -661,6 +671,8 @@ class SerialGateTests(unittest.IsolatedAsyncioTestCase):
                     "upload_progress": 0.0,
                     "local_path": "resume.bin",
                     "error": "timeout",
+                    "upload_confirmed_chunks": 14,
+                    "upload_confirmed_total": 26,
                 }]
 
             async def fake_update_task(task_id, **kwargs):
@@ -670,12 +682,16 @@ class SerialGateTests(unittest.IsolatedAsyncioTestCase):
             async def fake_broadcast(*args, **kwargs):
                 return None
 
-            async def fake_retry_upload(task_id):
+            async def fake_retry_upload(task_id, token=None):
                 created_tasks.append(task_id)
                 return None
 
+            async def fake_acquire(*args, **kwargs):
+                return True
+
             cast(Any, task_manager_module.db).get_all_tasks = fake_get_all
             cast(Any, task_manager_module.db).update_task = fake_update_task
+            cast(Any, task_manager_module.db).try_acquire_upload_session = fake_acquire
             manager._broadcast_task_update = cast(Any, fake_broadcast)
             manager._retry_upload = cast(Any, fake_retry_upload)
             manager._get_upload_path = cast(Any, lambda path: path)
@@ -691,6 +707,7 @@ class SerialGateTests(unittest.IsolatedAsyncioTestCase):
         finally:
             cast(Any, task_manager_module.db).get_all_tasks = original_get_all
             cast(Any, task_manager_module.db).update_task = original_update_task
+            cast(Any, task_manager_module.db).try_acquire_upload_session = original_acquire
 
         self.assertEqual(manager._upload_retry_counts["task-2"], 1)
         self.assertEqual(manager._upload_retry_checkpoints["task-2"], 14)
@@ -712,6 +729,7 @@ class SerialGateTests(unittest.IsolatedAsyncioTestCase):
 
         original_get_task = task_manager_module.db.get_task
         original_update_task = task_manager_module.db.update_task
+        original_acquire = task_manager_module.db.try_acquire_upload_session
         try:
             async def fake_get_task(task_id):
                 return {
@@ -720,6 +738,8 @@ class SerialGateTests(unittest.IsolatedAsyncioTestCase):
                     "download_progress": 100.0,
                     "upload_progress": 0.0,
                     "local_path": "resume.bin",
+                    "upload_confirmed_chunks": 14,
+                    "upload_confirmed_total": 26,
                 }
 
             async def fake_update_task(task_id, **kwargs):
@@ -728,12 +748,16 @@ class SerialGateTests(unittest.IsolatedAsyncioTestCase):
             async def fake_broadcast(*args, **kwargs):
                 return None
 
-            async def fake_retry_upload(task_id):
+            async def fake_retry_upload(task_id, token=None):
                 created_tasks.append(task_id)
                 return None
 
+            async def fake_acquire(*args, **kwargs):
+                return True
+
             cast(Any, task_manager_module.db).get_task = fake_get_task
             cast(Any, task_manager_module.db).update_task = fake_update_task
+            cast(Any, task_manager_module.db).try_acquire_upload_session = fake_acquire
             manager._broadcast_task_update = cast(Any, fake_broadcast)
             manager._retry_upload = cast(Any, fake_retry_upload)
             manager._get_upload_path = cast(Any, lambda path: path)
@@ -749,6 +773,7 @@ class SerialGateTests(unittest.IsolatedAsyncioTestCase):
         finally:
             cast(Any, task_manager_module.db).get_task = original_get_task
             cast(Any, task_manager_module.db).update_task = original_update_task
+            cast(Any, task_manager_module.db).try_acquire_upload_session = original_acquire
 
         self.assertTrue(result["success"])
         self.assertAlmostEqual(updates["upload_progress"], 53.8)
@@ -771,6 +796,7 @@ class SerialGateTests(unittest.IsolatedAsyncioTestCase):
 
         original_get_task = task_manager_module.db.get_task
         original_update_task = task_manager_module.db.update_task
+        original_acquire = task_manager_module.db.try_acquire_upload_session
         try:
             async def fake_get_task(task_id):
                 return {
@@ -780,6 +806,8 @@ class SerialGateTests(unittest.IsolatedAsyncioTestCase):
                     "upload_progress": 0.0,
                     "aria2_gid": "gid-5",
                     "local_path": "resume.bin",
+                    "upload_confirmed_chunks": 14,
+                    "upload_confirmed_total": 26,
                 }
 
             async def fake_update_task(task_id, **kwargs):
@@ -788,12 +816,16 @@ class SerialGateTests(unittest.IsolatedAsyncioTestCase):
             async def fake_broadcast(*args, **kwargs):
                 return None
 
-            async def fake_retry_upload(task_id):
+            async def fake_retry_upload(task_id, token=None):
                 created_tasks.append(task_id)
                 return None
 
+            async def fake_acquire(*args, **kwargs):
+                return True
+
             cast(Any, task_manager_module.db).get_task = fake_get_task
             cast(Any, task_manager_module.db).update_task = fake_update_task
+            cast(Any, task_manager_module.db).try_acquire_upload_session = fake_acquire
             manager._broadcast_task_update = cast(Any, fake_broadcast)
             manager._retry_upload = cast(Any, fake_retry_upload)
             manager._get_upload_path = cast(Any, lambda path: path)
@@ -809,6 +841,7 @@ class SerialGateTests(unittest.IsolatedAsyncioTestCase):
         finally:
             cast(Any, task_manager_module.db).get_task = original_get_task
             cast(Any, task_manager_module.db).update_task = original_update_task
+            cast(Any, task_manager_module.db).try_acquire_upload_session = original_acquire
 
         self.assertTrue(result["success"])
         self.assertAlmostEqual(updates["upload_progress"], 53.8)
@@ -906,18 +939,80 @@ class SerialGateTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_retry_upload_guard_skips_duplicate_runner(self):
         manager = self.make_manager()
-        manager._upload_session_state["dup-task"] = "finalized"
+        token = uuid.uuid4().hex
 
         called = []
 
         async def fake_wait():
             called.append("wait")
 
+        async def fake_confirm(task_id, incoming_token):
+            self.assertEqual(task_id, "dup-task")
+            self.assertEqual(incoming_token, token)
+            return False
+
+        async def fake_get_task(task_id):
+            self.assertEqual(task_id, "dup-task")
+            return {
+                "task_id": task_id,
+                "upload_session_state": "running",
+                "upload_confirmed_chunks": 0,
+                "upload_confirmed_total": 0,
+            }
+
+        original_confirm = task_manager_module.db.confirm_upload_session_running
+        original_get_task = task_manager_module.db.get_task
         manager._wait_upload_slot = cast(Any, fake_wait)
-        await manager._retry_upload("dup-task")
+        try:
+            cast(Any, task_manager_module.db).confirm_upload_session_running = fake_confirm
+            cast(Any, task_manager_module.db).get_task = fake_get_task
+            await manager._retry_upload("dup-task", token)
+        finally:
+            cast(Any, task_manager_module.db).confirm_upload_session_running = original_confirm
+            cast(Any, task_manager_module.db).get_task = original_get_task
 
         self.assertEqual(called, [])
         self.assertNotIn("dup-task", manager._upload_tasks)
+
+    async def test_schedule_upload_from_complete_acquires_once(self):
+        manager = self.make_manager()
+        created = []
+        tokens = []
+
+        original_get_task = task_manager_module.db.get_task
+        original_acquire = task_manager_module.db.try_acquire_upload_session
+        original_create_task = task_manager_module.asyncio.create_task
+        try:
+            async def fake_get_task(task_id):
+                return {
+                    "task_id": task_id,
+                    "status": "uploading",
+                    "upload_session_state": "idle",
+                    "upload_finished_at": None,
+                }
+
+            async def fake_acquire(task_id, from_states, token, owner, next_state="scheduled"):
+                tokens.append(token)
+                return len(tokens) == 1
+
+            def fake_create_task(coro):
+                created.append(coro)
+                coro.close()
+                return cast(Any, object())
+
+            cast(Any, task_manager_module.db).get_task = fake_get_task
+            cast(Any, task_manager_module.db).try_acquire_upload_session = fake_acquire
+            cast(Any, task_manager_module.asyncio).create_task = fake_create_task
+
+            await manager._schedule_upload_from_complete("task-complete", "gid-1")
+            await manager._schedule_upload_from_complete("task-complete", "gid-1")
+        finally:
+            cast(Any, task_manager_module.db).get_task = original_get_task
+            cast(Any, task_manager_module.db).try_acquire_upload_session = original_acquire
+            cast(Any, task_manager_module.asyncio).create_task = original_create_task
+
+        self.assertEqual(len(tokens), 2)
+        self.assertEqual(len(created), 1)
 
 
 class TelDriveClientTests(unittest.TestCase):

@@ -27,6 +27,13 @@ CREATE TABLE IF NOT EXISTS tasks (
     aria2_gid TEXT,
     aria2_options_json TEXT DEFAULT '{}',
     local_path TEXT,
+    upload_session_state TEXT DEFAULT 'idle',
+    upload_session_token TEXT,
+    upload_session_owner TEXT,
+    upload_confirmed_chunks REAL DEFAULT 0,
+    upload_confirmed_total INTEGER DEFAULT 0,
+    upload_started_at TIMESTAMP,
+    upload_finished_at TIMESTAMP,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 )
@@ -88,6 +95,13 @@ async def init_db():
     conn = await _get_conn()
     await conn.execute(CREATE_TABLE_SQL)
     await _ensure_column(conn, "tasks", "aria2_options_json", "TEXT DEFAULT '{}'")
+    await _ensure_column(conn, "tasks", "upload_session_state", "TEXT DEFAULT 'idle'")
+    await _ensure_column(conn, "tasks", "upload_session_token", "TEXT")
+    await _ensure_column(conn, "tasks", "upload_session_owner", "TEXT")
+    await _ensure_column(conn, "tasks", "upload_confirmed_chunks", "REAL DEFAULT 0")
+    await _ensure_column(conn, "tasks", "upload_confirmed_total", "INTEGER DEFAULT 0")
+    await _ensure_column(conn, "tasks", "upload_started_at", "TIMESTAMP")
+    await _ensure_column(conn, "tasks", "upload_finished_at", "TIMESTAMP")
     await conn.execute(CREATE_PROGRESS_LOGS_TABLE_SQL)
     await conn.execute(CREATE_PARSE_JOBS_TABLE_SQL)
     await conn.execute(
@@ -184,6 +198,157 @@ async def update_task(task_id: str, **kwargs) -> None:
         values
     )
     await conn.commit()
+
+
+async def try_acquire_upload_session(
+    task_id: str,
+    from_states: list[str] | tuple[str, ...],
+    token: str,
+    owner: str,
+    *,
+    next_state: str = "scheduled",
+    reset_finished_at: bool = False,
+) -> bool:
+    if not from_states:
+        return False
+    conn = await _get_conn()
+    placeholders = ", ".join("?" for _ in from_states)
+    fields = [
+        "upload_session_state = ?",
+        "upload_session_token = ?",
+        "upload_session_owner = ?",
+        "upload_started_at = CURRENT_TIMESTAMP",
+    ]
+    params: list[Any] = [next_state, token, owner]
+    if reset_finished_at:
+        fields.append("upload_finished_at = NULL")
+    params.extend([task_id, *from_states])
+    cursor = await conn.execute(
+        f"""
+        UPDATE tasks
+        SET {", ".join(fields)}, updated_at = CURRENT_TIMESTAMP
+        WHERE task_id = ?
+          AND COALESCE(upload_session_state, 'idle') IN ({placeholders})
+          AND upload_finished_at IS NULL
+        """,
+        params,
+    )
+    await conn.commit()
+    return cursor.rowcount > 0
+
+
+async def confirm_upload_session_running(task_id: str, token: str) -> bool:
+    conn = await _get_conn()
+    cursor = await conn.execute(
+        """
+        UPDATE tasks
+        SET upload_session_state = 'running',
+            updated_at = CURRENT_TIMESTAMP
+        WHERE task_id = ?
+          AND upload_session_token = ?
+          AND COALESCE(upload_session_state, 'idle') = 'scheduled'
+          AND upload_finished_at IS NULL
+        """,
+        (task_id, token),
+    )
+    await conn.commit()
+    return cursor.rowcount > 0
+
+
+async def update_upload_checkpoint(
+    task_id: str,
+    token: str,
+    confirmed_chunks: float,
+    confirmed_total: int,
+) -> bool:
+    conn = await _get_conn()
+    cursor = await conn.execute(
+        """
+        UPDATE tasks
+        SET upload_confirmed_chunks = MAX(COALESCE(upload_confirmed_chunks, 0), ?),
+            upload_confirmed_total = CASE
+                WHEN ? > 0 THEN ?
+                ELSE COALESCE(upload_confirmed_total, 0)
+            END,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE task_id = ?
+          AND upload_session_token = ?
+          AND COALESCE(upload_session_state, 'idle') IN ('scheduled', 'running')
+        """,
+        (confirmed_chunks, confirmed_total, confirmed_total, task_id, token),
+    )
+    await conn.commit()
+    return cursor.rowcount > 0
+
+
+async def complete_upload_session(
+    task_id: str,
+    token: str,
+    confirmed_chunks: float,
+    confirmed_total: int,
+) -> bool:
+    conn = await _get_conn()
+    cursor = await conn.execute(
+        """
+        UPDATE tasks
+        SET status = 'completed',
+            upload_progress = 100.0,
+            upload_speed = '',
+            error = NULL,
+            upload_session_state = 'completed',
+            upload_confirmed_chunks = ?,
+            upload_confirmed_total = ?,
+            upload_finished_at = CURRENT_TIMESTAMP,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE task_id = ?
+          AND upload_session_token = ?
+          AND COALESCE(upload_session_state, 'idle') IN ('scheduled', 'running')
+        """,
+        (confirmed_chunks, confirmed_total, task_id, token),
+    )
+    await conn.commit()
+    return cursor.rowcount > 0
+
+
+async def release_upload_session(
+    task_id: str,
+    token: str,
+    next_state: str,
+    *,
+    error: Optional[str] = None,
+    keep_checkpoint: bool = True,
+    reset_checkpoint: bool = False,
+    clear_finished_at: bool = False,
+) -> bool:
+    conn = await _get_conn()
+    fields = [
+        "upload_session_state = ?",
+        "upload_session_token = NULL",
+        "upload_session_owner = NULL",
+    ]
+    params: list[Any] = [next_state]
+    if error is not None:
+        fields.append("error = ?")
+        params.append(error)
+    if reset_checkpoint:
+        fields.append("upload_confirmed_chunks = 0")
+        fields.append("upload_confirmed_total = 0")
+    elif not keep_checkpoint:
+        fields.append("upload_confirmed_chunks = 0")
+    if clear_finished_at:
+        fields.append("upload_finished_at = NULL")
+    params.extend([task_id, token])
+    cursor = await conn.execute(
+        f"""
+        UPDATE tasks
+        SET {", ".join(fields)}, updated_at = CURRENT_TIMESTAMP
+        WHERE task_id = ?
+          AND upload_session_token = ?
+        """,
+        params,
+    )
+    await conn.commit()
+    return cursor.rowcount > 0
 
 
 async def delete_task(task_id: str) -> bool:

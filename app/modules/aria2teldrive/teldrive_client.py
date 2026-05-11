@@ -69,6 +69,17 @@ class TelDriveClient:
     def _get_part_message_id(self, part: Dict[str, Any]) -> Optional[int]:
         return self._coerce_int(part.get("partId", part.get("id")))
 
+    def _extract_confirmed_part_numbers(self, parts: List[Dict[str, Any]]) -> List[int]:
+        numbers = []
+        seen = set()
+        for part in parts or []:
+            number = self._get_part_number(part)
+            if number is None or number in seen:
+                continue
+            seen.add(number)
+            numbers.append(number)
+        return sorted(numbers)
+
     @staticmethod
     def _structured_error(error_code: str, message: str, **extra) -> dict:
         payload = {"code": error_code, "message": message}
@@ -655,7 +666,7 @@ class TelDriveClient:
                         session, file_path, upload_id, filename,
                         file_size, total_parts, progress_callback
                     )
-                upload_meta["confirmed_part_numbers"] = list(range(1, len(uploaded_parts) + 1))
+                upload_meta["confirmed_part_numbers"] = self._extract_confirmed_part_numbers(uploaded_parts)
                 upload_meta["uploaded_parts"] = uploaded_parts
 
                 # 步骤 5: 创建文件记录（含 parts 校验）
