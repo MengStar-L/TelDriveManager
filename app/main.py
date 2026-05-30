@@ -11,7 +11,7 @@ if str(ROOT_DIR) not in sys.path:
 
 import asyncio
 import logging
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 
 from fastapi import Cookie, FastAPI, Request
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
@@ -39,6 +39,24 @@ STATIC_DIR = Path(__file__).parent / "static"
 FAVICON_PATH = ROOT_DIR / "image.png"
 
 
+async def _run_tel2teldrive_supervised():
+    from app.modules.tel2teldrive.service import service as t2td_service
+
+    while True:
+        try:
+            await t2td_service.run_forever()
+            if t2td_service.stop_event.is_set():
+                return
+            logger.warning("Tel2TelDrive 服务意外退出，5 秒后自动重启")
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.exception("Tel2TelDrive 服务异常退出，5 秒后自动重启: %s", exc)
+            with suppress(Exception):
+                await t2td_service._cleanup_client()
+        await asyncio.sleep(5)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """应用生命周期管理"""
@@ -57,8 +75,7 @@ async def lifespan(app: FastAPI):
     # 启动 Tel2TelDrive 服务
     t2td_task = None
     try:
-        from app.modules.tel2teldrive.service import service as t2td_service
-        t2td_task = asyncio.create_task(t2td_service.run_forever())
+        t2td_task = asyncio.create_task(_run_tel2teldrive_supervised())
         logger.info("Tel2TelDrive 服务已启动")
     except Exception as e:
         logger.warning(f"Tel2TelDrive 服务启动失败（可能缺少配置）: {e}")

@@ -64,7 +64,7 @@ class TelDriveClient:
             return None
 
     def _get_part_number(self, part: Dict[str, Any]) -> Optional[int]:
-        return self._coerce_int(part.get("partNo", part.get("partId")))
+        return self._coerce_int(part.get("partNo"))
 
     def _get_part_message_id(self, part: Dict[str, Any]) -> Optional[int]:
         return self._coerce_int(part.get("partId", part.get("id")))
@@ -153,20 +153,30 @@ class TelDriveClient:
             )
 
         part_numbers = [self._get_part_number(part) for part in remote_parts]
-        if all(number is not None for number in part_numbers):
-            numbers = [int(number) for number in part_numbers if number is not None]
-            expected_numbers = list(range(1, total_parts + 1))
-            if sorted(numbers) != expected_numbers:
-                error_code = "remote_parts_duplicate_numbers" if len(set(numbers)) != len(numbers) else "remote_parts_invalid_shape"
-                return self._structured_error(
-                    error_code,
-                    f"远端分块编号异常: expected=1..{total_parts}, actual={numbers}",
-                    expected_total_parts=total_parts,
-                    actual_total_parts=len(remote_parts),
-                    remote_part_numbers=numbers,
-                )
+        if any(number is None for number in part_numbers):
+            return self._structured_error(
+                "remote_parts_invalid_shape",
+                "远端分块缺少有效的 partNo",
+                expected_total_parts=total_parts,
+                actual_total_parts=len(remote_parts),
+            )
+
+        numbers = [int(number) for number in part_numbers if number is not None]
+        expected_numbers = list(range(1, total_parts + 1))
+        if sorted(numbers) != expected_numbers:
+            error_code = "remote_parts_duplicate_numbers" if len(set(numbers)) != len(numbers) else "remote_parts_invalid_shape"
+            return self._structured_error(
+                error_code,
+                f"远端分块编号异常: expected=1..{total_parts}, actual={numbers}",
+                expected_total_parts=total_parts,
+                actual_total_parts=len(remote_parts),
+                remote_part_numbers=numbers,
+            )
 
         return None
+
+    def _order_remote_parts(self, remote_parts: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        return sorted((dict(part) for part in remote_parts), key=lambda part: self._get_part_number(part) or 0)
 
     # ===========================================
     # 连接与基础 API
@@ -385,7 +395,9 @@ class TelDriveClient:
             existing = await self._check_part_exists(session, upload_id, part_no)
             if existing and self._get_part_message_id(existing) is not None:
                 logger.info(f"  块 {part_no}/{total_parts} 已存在，跳过上传")
-                return existing
+                result = dict(existing)
+                result.setdefault("partNo", part_no)
+                return result
 
 
             part_name = self._get_part_name(filename, part_no, total_parts)
@@ -443,6 +455,7 @@ class TelDriveClient:
                     if resp.status in (200, 201):
                         result = await resp.json()
                         if result.get("name") or result.get("partId") is not None:
+                            result.setdefault("partNo", part_no)
                             return result
                         raise Exception(f"上传块 {part_no} 响应缺少有效数据: {result}")
                     else:
@@ -477,9 +490,11 @@ class TelDriveClient:
             validation_error["uploaded_parts"] = uploaded_parts
             return validation_error
 
+        ordered_remote_parts = self._order_remote_parts(remote_parts)
+
         # 构建 parts 列表（使用远程返回的 partId 和 salt）
         format_parts = []
-        for p in remote_parts:
+        for p in ordered_remote_parts:
             part_entry = {"id": p.get("partId", p.get("id"))}
             if p.get("salt"):
                 part_entry["salt"] = p["salt"]
@@ -500,7 +515,7 @@ class TelDriveClient:
         ) as resp:
             if resp.status in (200, 201):
                 result = await resp.json()
-                return {"success": True, "data": result, "remote_parts": remote_parts}
+                return {"success": True, "data": result, "remote_parts": ordered_remote_parts}
             else:
                 text = await resp.text()
                 return {
