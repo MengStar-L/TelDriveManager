@@ -649,6 +649,10 @@ broker = DashboardBroker(INITIAL_RUNTIME.log_buffer_size, INITIAL_RUNTIME)
 logger = ActivityLogger(broker, INITIAL_RUNTIME.log_file_path if INITIAL_RUNTIME.log_file else DEFAULT_LOG_FILE)
 
 
+async def run_blocking_io(func: Any, *args: Any, **kwargs: Any) -> Any:
+    return await asyncio.to_thread(func, *args, **kwargs)
+
+
 def normalize_message_ids(value: Any) -> list[int]:
     values = value
     if isinstance(values, dict):
@@ -897,14 +901,20 @@ async def add_file_to_teldrive(
 
     response = None
     try:
-        response = requests.post(f"{config.teldrive_url}/api/files", headers=headers, json=payload, timeout=30)
-        response.raise_for_status()
-        data = response.json()
+        response = await run_blocking_io(
+            requests.post,
+            f"{config.teldrive_url}/api/files",
+            headers=headers,
+            json=payload,
+            timeout=30,
+        )
+        await run_blocking_io(response.raise_for_status)
+        data = await run_blocking_io(response.json)
         file_id = str(data.get("id", "")).strip()
         if file_id:
-            mapping = load_mapping()
+            mapping = await run_blocking_io(load_mapping)
             mapping[file_id] = merge_message_ids(mapping.get(file_id), [message_id])
-            save_mapping(mapping)
+            await run_blocking_io(save_mapping, mapping)
             await record_teldrive_action(
                 config,
                 action="auto_add",
@@ -937,13 +947,14 @@ async def delete_file_from_teldrive(
 ) -> bool:
     response = None
     try:
-        response = requests.post(
+        response = await run_blocking_io(
+            requests.post,
             f"{config.teldrive_url}/api/files/delete",
             headers={"Authorization": f"Bearer {config.bearer_token}", "Content-Type": "application/json"},
             json={"ids": [file_id]},
             timeout=30,
         )
-        response.raise_for_status()
+        await run_blocking_io(response.raise_for_status)
         remember_internal_deleted_file_ids([file_id])
         await record_teldrive_action(
             config,
@@ -1280,8 +1291,8 @@ async def delete_teldrive_files_for_missing_messages(
     if not missing_ids:
         return 0
 
-    mapping = load_mapping()
-    current_teldrive_files = td_files if td_files is not None else get_teldrive_files(config)
+    mapping = await run_blocking_io(load_mapping)
+    current_teldrive_files = td_files if td_files is not None else await run_blocking_io(get_teldrive_files, config)
     deleted_count = 0
     mapping_changed = False
 
@@ -1314,14 +1325,14 @@ async def delete_teldrive_files_for_missing_messages(
             deleted_count += 1
 
     if mapping_changed:
-        save_mapping(mapping)
+        await run_blocking_io(save_mapping, mapping)
     return deleted_count
 
 
 async def build_initial_mapping(client: TelegramClient, config: RuntimeConfig):
     logger.info("开始构建文件映射")
-    td_files = get_teldrive_files(config)
-    mapping = load_mapping()
+    td_files = await run_blocking_io(get_teldrive_files, config)
+    mapping = await run_blocking_io(load_mapping)
 
     stale_ids = [file_id for file_id in mapping if file_id not in td_files]
     if stale_ids:
@@ -1330,9 +1341,9 @@ async def build_initial_mapping(client: TelegramClient, config: RuntimeConfig):
         logger.info(f"已清理 {len(stale_ids)} 条过期映射")
 
     if config.db_enabled:
-        updated = sync_mapping_from_db(config, mapping)
+        updated = await run_blocking_io(sync_mapping_from_db, config, mapping)
         if updated:
-            saved_mapping = merge_and_save_mapping_snapshot(td_files, mapping)
+            saved_mapping = await run_blocking_io(merge_and_save_mapping_snapshot, td_files, mapping)
             logger.info(f"已从数据库刷新文件映射: {updated} 条")
             logger.info(f"当前文件映射共 {len(saved_mapping)} 条")
             return
@@ -1344,7 +1355,7 @@ async def build_initial_mapping(client: TelegramClient, config: RuntimeConfig):
         if isinstance(info, dict) and info.get("name") and not is_md5_name(str(info.get("name")))
     ]
     if not target_names:
-        saved_mapping = merge_and_save_mapping_snapshot(td_files, mapping)
+        saved_mapping = await run_blocking_io(merge_and_save_mapping_snapshot, td_files, mapping)
         logger.info("当前没有需要构建映射的 TelDrive 文件")
         logger.info(f"当前文件映射共 {len(saved_mapping)} 条")
         return
@@ -1355,7 +1366,7 @@ async def build_initial_mapping(client: TelegramClient, config: RuntimeConfig):
             timeout=INITIAL_MAPPING_SCAN_TIMEOUT,
         )
     except asyncio.TimeoutError:
-        saved_mapping = merge_and_save_mapping_snapshot(td_files, mapping)
+        saved_mapping = await run_blocking_io(merge_and_save_mapping_snapshot, td_files, mapping)
         logger.error(
             f"历史消息扫描超过 {INITIAL_MAPPING_SCAN_TIMEOUT} 秒，已停止本轮初始映射构建，实时监听不受影响"
         )
@@ -1375,7 +1386,7 @@ async def build_initial_mapping(client: TelegramClient, config: RuntimeConfig):
         else:
             missing_count += 1
 
-    saved_mapping = merge_and_save_mapping_snapshot(td_files, mapping)
+    saved_mapping = await run_blocking_io(merge_and_save_mapping_snapshot, td_files, mapping)
     logger.info(f"映射构建完成: 匹配到 {matched_count} 个文件，未找到 {missing_count} 个，总计 {len(saved_mapping)} 条")
     if missing_count:
         logger.warning(f"仍有 {missing_count} 个 TelDrive 文件未找到对应 Telegram 消息")
@@ -1388,170 +1399,230 @@ MISSING_SAFE_ABS_THRESHOLD = 10
 
 
 async def sync_deletions(client: TelegramClient, config: RuntimeConfig):
-    # 安全校验：channel_id 无效时不启动删除同步
     if not config.telegram_channel_id:
         logger.warning(f"Telegram 频道 ID 为空或为 0，删除同步已禁用（当前值: {config.telegram_channel_id!r}）")
         return
 
     logger.info(f"删除同步已启动，轮询间隔 {config.sync_interval} 秒")
-    prev_files = get_teldrive_files(config)
+    try:
+        prev_files = await run_blocking_io(get_teldrive_files, config)
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        logger.error(f"初始化 TelDrive 快照失败，删除同步将在下一轮继续: {type(exc).__name__}: {exc}")
+        prev_files = {}
     prev_ids = set(prev_files.keys())
     logger.info(f"初始 TelDrive 快照共 {len(prev_ids)} 个文件")
     pending_deletions: dict[str, dict[str, Any]] = {}
 
     while True:
         await asyncio.sleep(config.sync_interval)
-        curr_files = get_teldrive_files(config)
-        mapping = load_mapping()
-        tracked_message_ids = merge_message_ids(*mapping.values())
-        if tracked_message_ids:
-            existing_message_ids = await get_existing_message_ids(client, config.telegram_channel_id, tracked_message_ids)
-            # 查询失败（返回 None）时跳过本轮删除判断，避免误删
-            if existing_message_ids is None:
-                logger.warning("Telegram 消息状态查询失败，本轮跳过删除同步")
-            else:
-                missing_message_ids = [msg_id for msg_id in tracked_message_ids if msg_id not in existing_message_ids]
-                if missing_message_ids:
-                    total = len(tracked_message_ids)
-                    missing_count = len(missing_message_ids)
-                    ratio = missing_count / total if total else 0
-                    # 安全阈值：缺失比例过高时极可能是查询异常，拒绝执行删除
-                    if ratio > MISSING_SAFE_RATIO and missing_count > MISSING_SAFE_ABS_THRESHOLD:
-                        logger.error(
-                            f"⚠️ 安全保护触发！缺失消息 {missing_count}/{total} ({ratio:.0%}) 超过安全阈值，"
-                            f"疑似频道 ID 错误或网络异常，已阻止本轮所有删除操作"
-                        )
-                    else:
-                        deleted_count = await delete_teldrive_files_for_missing_messages(
-                            config,
-                            missing_message_ids,
-                            td_files=curr_files,
-                            reason="telegram_part_deleted",
-                        )
-                        if deleted_count:
-                            logger.warning(f"检测到 Telegram 文件分块缺失，已自动删除 {deleted_count} 个 TelDrive 文件")
-                            curr_files = get_teldrive_files(config)
-                            mapping = load_mapping()
+        try:
+            curr_files = await run_blocking_io(get_teldrive_files, config)
+            mapping = await run_blocking_io(load_mapping)
+            tracked_message_ids = merge_message_ids(*mapping.values())
+            if tracked_message_ids:
+                existing_message_ids = await get_existing_message_ids(client, config.telegram_channel_id, tracked_message_ids)
+                if existing_message_ids is None:
+                    logger.warning("Telegram 消息状态查询失败，本轮跳过删除同步")
+                else:
+                    missing_message_ids = [msg_id for msg_id in tracked_message_ids if msg_id not in existing_message_ids]
+                    if missing_message_ids:
+                        total = len(tracked_message_ids)
+                        missing_count = len(missing_message_ids)
+                        ratio = missing_count / total if total else 0
+                        if ratio > MISSING_SAFE_RATIO and missing_count > MISSING_SAFE_ABS_THRESHOLD:
+                            logger.error(
+                                f"⚠️ 安全保护触发！缺失消息 {missing_count}/{total} ({ratio:.0%}) 超过安全阈值，"
+                                f"疑似频道 ID 错误或网络异常，已阻止本轮所有删除操作"
+                            )
+                        else:
+                            deleted_count = await delete_teldrive_files_for_missing_messages(
+                                config,
+                                missing_message_ids,
+                                td_files=curr_files,
+                                reason="telegram_part_deleted",
+                            )
+                            if deleted_count:
+                                logger.warning(f"检测到 Telegram 文件分块缺失，已自动删除 {deleted_count} 个 TelDrive 文件")
+                                curr_files = await run_blocking_io(get_teldrive_files, config)
+                                mapping = await run_blocking_io(load_mapping)
 
-        curr_ids = set(curr_files.keys())
-        curr_names = {info["name"] for info in curr_files.values() if isinstance(info, dict) and info.get("name")}
-        disappeared_ids = prev_ids - curr_ids
-        new_ids = curr_ids - prev_ids
+            curr_ids = set(curr_files.keys())
+            curr_names = {info["name"] for info in curr_files.values() if isinstance(info, dict) and info.get("name")}
+            disappeared_ids = prev_ids - curr_ids
+            new_ids = curr_ids - prev_ids
 
-        logger.info(
-            f"同步检查: 上次 {len(prev_ids)} 个 -> 本次 {len(curr_ids)} 个 | 新增 {len(new_ids)} | 消失 {len(disappeared_ids)}"
-        )
+            logger.info(
+                f"同步检查: 上次 {len(prev_ids)} 个 -> 本次 {len(curr_ids)} 个 | 新增 {len(new_ids)} | 消失 {len(disappeared_ids)}"
+            )
 
-        if disappeared_ids:
-            for file_id in disappeared_ids:
-                old_info = prev_files.get(file_id, {})
-                old_name = old_info.get("name", "") if isinstance(old_info, dict) else ""
-                if consume_internal_deleted_file_id(file_id):
-                    mapping.pop(file_id, None)
-                    continue
-                if old_name and old_name in curr_names:
-                    new_name_to_id = {
-                        info["name"]: new_id
-                        for new_id, info in curr_files.items()
-                        if new_id in new_ids and isinstance(info, dict) and info.get("name")
-                    }
-                    old_messages = normalize_message_ids(mapping.pop(file_id, []))
-                    if old_name in new_name_to_id:
-                        new_file_id = new_name_to_id[old_name]
-                        mapping[new_file_id] = merge_message_ids(mapping.get(new_file_id), old_messages)
-                        logger.info(f"检测到文件迁移，已迁移映射: {old_name}")
-                    save_mapping(mapping)
-                elif file_id not in pending_deletions:
-                    if is_md5_name(old_name):
+            if disappeared_ids:
+                for file_id in disappeared_ids:
+                    old_info = prev_files.get(file_id, {})
+                    old_name = old_info.get("name", "") if isinstance(old_info, dict) else ""
+                    if consume_internal_deleted_file_id(file_id):
+                        mapping.pop(file_id, None)
                         continue
-                    pending_deletions[file_id] = {
-                        "name": old_name,
-                        "msg_ids": normalize_message_ids(mapping.get(file_id, [])),
-                        "count": 1,
-                    }
-                    logger.warning(f"文件消失待确认: {old_name} (1/{config.confirm_cycles})")
+                    if old_name and old_name in curr_names:
+                        new_name_to_id = {
+                            info["name"]: new_id
+                            for new_id, info in curr_files.items()
+                            if new_id in new_ids and isinstance(info, dict) and info.get("name")
+                        }
+                        old_messages = normalize_message_ids(mapping.pop(file_id, []))
+                        if old_name in new_name_to_id:
+                            new_file_id = new_name_to_id[old_name]
+                            mapping[new_file_id] = merge_message_ids(mapping.get(new_file_id), old_messages)
+                            logger.info(f"检测到文件迁移，已迁移映射: {old_name}")
+                        await run_blocking_io(save_mapping, mapping)
+                    elif file_id not in pending_deletions:
+                        if is_md5_name(old_name):
+                            continue
+                        pending_deletions[file_id] = {
+                            "name": old_name,
+                            "msg_ids": normalize_message_ids(mapping.get(file_id, [])),
+                            "count": 1,
+                        }
+                        logger.warning(f"文件消失待确认: {old_name} (1/{config.confirm_cycles})")
 
-        confirmed_ids: list[str] = []
-        for file_id, info in list(pending_deletions.items()):
-            name = info["name"]
-            if name in curr_names:
-                logger.info(f"文件重新出现，取消删除: {name}")
-                for new_id, new_info in curr_files.items():
-                    if new_info["name"] == name and new_id not in mapping:
-                        mapping[new_id] = merge_message_ids(mapping.get(new_id), info["msg_ids"])
-                        logger.info(f"已恢复文件映射: {name}")
-                        break
-                del pending_deletions[file_id]
-                mapping.pop(file_id, None)
-                save_mapping(mapping)
-                continue
+            confirmed_ids: list[str] = []
+            for file_id, info in list(pending_deletions.items()):
+                name = info["name"]
+                if name in curr_names:
+                    logger.info(f"文件重新出现，取消删除: {name}")
+                    for new_id, new_info in curr_files.items():
+                        if new_info["name"] == name and new_id not in mapping:
+                            mapping[new_id] = merge_message_ids(mapping.get(new_id), info["msg_ids"])
+                            logger.info(f"已恢复文件映射: {name}")
+                            break
+                    del pending_deletions[file_id]
+                    mapping.pop(file_id, None)
+                    await run_blocking_io(save_mapping, mapping)
+                    continue
 
-            info["count"] += 1
-            if info["count"] >= config.confirm_cycles:
-                confirmed_ids.append(file_id)
-            else:
-                logger.warning(f"文件持续消失: {name} ({info['count']}/{config.confirm_cycles})")
+                info["count"] += 1
+                if info["count"] >= config.confirm_cycles:
+                    confirmed_ids.append(file_id)
+                else:
+                    logger.warning(f"文件持续消失: {name} ({info['count']}/{config.confirm_cycles})")
 
-        if confirmed_ids:
-            msg_ids_to_delete: list[int] = []
-            for file_id in confirmed_ids:
-                info = pending_deletions.pop(file_id)
-                msg_ids_to_delete = merge_message_ids(msg_ids_to_delete, info["msg_ids"])
-                mapping.pop(file_id, None)
+            if confirmed_ids:
+                msg_ids_to_delete: list[int] = []
+                for file_id in confirmed_ids:
+                    info = pending_deletions.pop(file_id)
+                    msg_ids_to_delete = merge_message_ids(msg_ids_to_delete, info["msg_ids"])
+                    mapping.pop(file_id, None)
 
-            if msg_ids_to_delete:
-                logger.warning(
-                    f"确认删除 {len(confirmed_ids)} 个文件，准备清理 {len(msg_ids_to_delete)} 条频道消息"
-                )
-                try:
-                    remember_internal_deleted_message_ids(msg_ids_to_delete)
-                    await client.delete_messages(config.telegram_channel_id, msg_ids_to_delete)
-                    logger.info(f"已删除 {len(msg_ids_to_delete)} 条频道消息")
-                except Exception as exc:
-                    logger.error(f"删除频道消息失败: {exc}")
-            save_mapping(mapping)
+                if msg_ids_to_delete:
+                    logger.warning(
+                        f"确认删除 {len(confirmed_ids)} 个文件，准备清理 {len(msg_ids_to_delete)} 条频道消息"
+                    )
+                    try:
+                        remember_internal_deleted_message_ids(msg_ids_to_delete)
+                        await client.delete_messages(config.telegram_channel_id, msg_ids_to_delete)
+                        logger.info(f"已删除 {len(msg_ids_to_delete)} 条频道消息")
+                    except Exception as exc:
+                        logger.error(f"删除频道消息失败: {exc}")
+                await run_blocking_io(save_mapping, mapping)
 
-        if new_ids:
-            mapping = load_mapping()
-            updated = sync_mapping_from_db(config, mapping, list(new_ids)) if config.db_enabled else 0
-            unresolved_file_ids = [file_id for file_id in new_ids if file_id not in mapping]
-            if unresolved_file_ids:
-                unresolved_names = [
-                    curr_files[file_id]["name"]
-                    for file_id in unresolved_file_ids
-                    if file_id in curr_files and not is_md5_name(str(curr_files[file_id].get("name", "")))
-                ]
-                if unresolved_names:
-                    found_message_ids = await find_file_message_ids(client, config, unresolved_names)
-                    matched = 0
-                    for file_id in unresolved_file_ids:
-                        file_name = str(curr_files.get(file_id, {}).get("name", "")).strip()
-                        msg_ids = found_message_ids.get(file_name)
-                        if msg_ids:
-                            mapping[file_id] = merge_message_ids(mapping.get(file_id), msg_ids)
-                            matched += 1
-                    if matched:
-                        updated += matched
-            if updated:
-                save_mapping(mapping)
-                logger.info(f"已为 {updated} 个 TelDrive 新文件建立/刷新映射")
-            remaining = len([file_id for file_id in new_ids if file_id not in mapping])
-            if remaining:
-                logger.warning(f"仍有 {remaining} 个新文件暂无可用映射")
+            if new_ids:
+                mapping = await run_blocking_io(load_mapping)
+                updated = await run_blocking_io(sync_mapping_from_db, config, mapping, list(new_ids)) if config.db_enabled else 0
+                unresolved_file_ids = [file_id for file_id in new_ids if file_id not in mapping]
+                if unresolved_file_ids:
+                    unresolved_names = [
+                        curr_files[file_id]["name"]
+                        for file_id in unresolved_file_ids
+                        if file_id in curr_files and not is_md5_name(str(curr_files[file_id].get("name", "")))
+                    ]
+                    if unresolved_names:
+                        found_message_ids = await find_file_message_ids(client, config, unresolved_names)
+                        matched = 0
+                        for file_id in unresolved_file_ids:
+                            file_name = str(curr_files.get(file_id, {}).get("name", "")).strip()
+                            msg_ids = found_message_ids.get(file_name)
+                            if msg_ids:
+                                mapping[file_id] = merge_message_ids(mapping.get(file_id), msg_ids)
+                                matched += 1
+                        if matched:
+                            updated += matched
+                if updated:
+                    await run_blocking_io(save_mapping, mapping)
+                    logger.info(f"已为 {updated} 个 TelDrive 新文件建立/刷新映射")
+                remaining = len([file_id for file_id in new_ids if file_id not in mapping])
+                if remaining:
+                    logger.warning(f"仍有 {remaining} 个新文件暂无可用映射")
 
-        prev_ids = curr_ids
-        prev_files = curr_files
+            prev_ids = curr_ids
+            prev_files = curr_files
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.error(f"删除同步循环异常，下一轮将继续: {type(exc).__name__}: {exc}")
+            with suppress(Exception):
+                await broker.update_state(last_error=f"删除同步异常: {exc}")
 
 
 class Tel2TelDriveService:
     def __init__(self):
         self.client: TelegramClient | None = None
         self.sync_task: asyncio.Task[Any] | None = None
+        self.sync_restart_task: asyncio.Task[Any] | None = None
         self.initial_mapping_task: asyncio.Task[Any] | None = None
         self.stop_event = asyncio.Event()
         self.reload_event = asyncio.Event()
         self.refresh_qr_event = asyncio.Event()
         self.password_future: asyncio.Future[str] | None = None
+
+    def _start_sync_deletions(self, client: TelegramClient, config: RuntimeConfig):
+        if self.sync_task and not self.sync_task.done():
+            return
+        self.sync_task = asyncio.create_task(sync_deletions(client, config))
+        self.sync_task.add_done_callback(self._on_sync_task_done)
+
+    def _on_sync_task_done(self, task: asyncio.Task[Any]):
+        if task.cancelled():
+            return
+        if self.sync_task is task:
+            self.sync_task = None
+        if self.stop_event.is_set() or self.reload_event.is_set():
+            return
+        try:
+            exc = task.exception()
+        except asyncio.CancelledError:
+            return
+        if exc:
+            logger.error(f"删除同步任务异常退出: {type(exc).__name__}: {exc}")
+        else:
+            logger.warning("删除同步任务意外退出，准备自动重启")
+        if self.sync_restart_task and not self.sync_restart_task.done():
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        self.sync_restart_task = loop.create_task(self._restart_sync_deletions_after_delay())
+
+    async def _restart_sync_deletions_after_delay(self, delay: float = 5.0):
+        try:
+            await asyncio.sleep(delay)
+            if self.stop_event.is_set() or self.reload_event.is_set():
+                return
+            client = self.client
+            config = config_store.runtime()
+            if not config.sync_enabled or not config.telegram_channel_id or client is None:
+                return
+            if hasattr(client, "is_connected") and not client.is_connected():
+                return
+            logger.warning("正在自动重启删除同步任务")
+            self._start_sync_deletions(client, config)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.error(f"自动重启删除同步任务失败: {type(exc).__name__}: {exc}")
+        finally:
+            self.sync_restart_task = None
 
 
     async def run_forever(self):
@@ -1621,7 +1692,7 @@ class Tel2TelDriveService:
                     if not config.telegram_channel_id:
                         logger.warning(f"Telegram 频道 ID 无效 ({config.telegram_channel_id!r})，删除同步已跳过")
                     else:
-                        self.sync_task = asyncio.create_task(sync_deletions(self.client, config))
+                        self._start_sync_deletions(self.client, config)
                 else:
                     logger.info("删除同步已关闭 (sync_enabled = false)")
 
@@ -1703,6 +1774,12 @@ class Tel2TelDriveService:
             self.sync_task.cancel()
             try:
                 await self.sync_task
+            except (asyncio.CancelledError, Exception):
+                pass
+        if self.sync_restart_task and not self.sync_restart_task.done():
+            self.sync_restart_task.cancel()
+            try:
+                await self.sync_restart_task
             except (asyncio.CancelledError, Exception):
                 pass
         # 断开 Telegram 客户端连接，解除 run_until_disconnected 阻塞
@@ -1799,6 +1876,12 @@ class Tel2TelDriveService:
                 await self.sync_task
             self.sync_task = None
 
+        if self.sync_restart_task:
+            self.sync_restart_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await self.sync_restart_task
+            self.sync_restart_task = None
+
         if self.client:
             with suppress(Exception):
                 if self.client.is_connected():
@@ -1809,20 +1892,30 @@ class Tel2TelDriveService:
     def register_handlers(self, client: TelegramClient, config: RuntimeConfig):
         @client.on(events.NewMessage(chats=config.telegram_channel_id))
         async def on_new_message(event: Any):
-            await self.handle_new_message(client, config, event.message)
+            try:
+                await self.handle_new_message(client, config, event.message)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.error(f"处理 Telegram 新消息失败: {type(exc).__name__}: {exc}")
 
         @client.on(events.MessageDeleted(chats=config.telegram_channel_id))
         async def on_message_deleted(event: Any):
-            deleted_ids = filter_external_deleted_message_ids(getattr(event, "deleted_ids", None) or [])
-            if not deleted_ids:
-                return
-            deleted_count = await delete_teldrive_files_for_missing_messages(
-                config,
-                deleted_ids,
-                reason="telegram_message_deleted",
-            )
-            if deleted_count:
-                logger.warning(f"检测到 Telegram 删除事件，已同步删除 {deleted_count} 个 TelDrive 文件")
+            try:
+                deleted_ids = filter_external_deleted_message_ids(getattr(event, "deleted_ids", None) or [])
+                if not deleted_ids:
+                    return
+                deleted_count = await delete_teldrive_files_for_missing_messages(
+                    config,
+                    deleted_ids,
+                    reason="telegram_message_deleted",
+                )
+                if deleted_count:
+                    logger.warning(f"检测到 Telegram 删除事件，已同步删除 {deleted_count} 个 TelDrive 文件")
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.error(f"处理 Telegram 删除事件失败: {type(exc).__name__}: {exc}")
 
     async def handle_new_message(self, client: TelegramClient, config: RuntimeConfig, msg: Any):
         file_info = extract_file_info(msg)
@@ -1840,15 +1933,15 @@ class Tel2TelDriveService:
         if is_md5_name(name):
             logger.info(f"检测到 MD5 分片文件，已跳过: {name}")
             if config.db_enabled:
-                known_ids = query_db_msg_ids(config)
+                known_ids = await run_blocking_io(query_db_msg_ids, config)
                 if msg.id in known_ids:
                     logger.info(f"msg_id={msg.id} 已在 TelDrive 数据库中登记")
                 else:
                     logger.warning(f"msg_id={msg.id} 尚未在 TelDrive 数据库中找到记录")
             return
 
-        mapping = load_mapping()
-        td_files = get_teldrive_files(config)
+        mapping = await run_blocking_io(load_mapping)
+        td_files = await run_blocking_io(get_teldrive_files, config)
 
         mapped_names = set()
         for file_id in mapping:
@@ -1871,7 +1964,7 @@ class Tel2TelDriveService:
         if name in existing_name_to_id:
             file_id = existing_name_to_id[name]
             mapping[file_id] = merge_message_ids(mapping.get(file_id), [msg.id])
-            save_mapping(mapping)
+            await run_blocking_io(save_mapping, mapping)
             logger.info(f"TelDrive 已存在该文件，仅补充映射: {name}")
             return
 

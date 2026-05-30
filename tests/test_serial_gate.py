@@ -1111,6 +1111,59 @@ class SerialGateTests(unittest.IsolatedAsyncioTestCase):
 
 
 class TelDriveClientTests(unittest.TestCase):
+    def test_create_file_record_orders_remote_parts_by_part_number(self):
+        client = TelDriveClient()
+        remote_parts = [
+            {"partId": 103, "partNo": 3, "salt": "s3"},
+            {"partId": 101, "partNo": "1"},
+            {"partId": 102, "partNo": 2},
+        ]
+        captured = {}
+
+        class FakeResponse:
+            status = 201
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+
+            async def json(self):
+                return {"id": "file-1"}
+
+            async def text(self):
+                return ""
+
+        class FakeSession:
+            def post(self, *args, **kwargs):
+                captured["json"] = kwargs.get("json")
+                return FakeResponse()
+
+        async def fake_get_file_parts(session, upload_id):
+            return list(remote_parts)
+
+        client._get_file_parts = fake_get_file_parts
+
+        result = asyncio.run(
+            client._create_file_record(
+                FakeSession(),
+                "movie.mkv",
+                "upload-1",
+                "/",
+                [],
+                30,
+                3,
+            )
+        )
+
+        self.assertTrue(result["success"])
+        self.assertEqual(
+            captured["json"]["parts"],
+            [{"id": 101}, {"id": 102}, {"id": 103, "salt": "s3"}],
+        )
+        self.assertEqual([p["partNo"] for p in result["remote_parts"]], ["1", 2, 3])
+
     def test_validate_remote_parts_count_mismatch(self):
         client = TelDriveClient()
         result = client._validate_remote_parts(
@@ -1130,9 +1183,21 @@ class TelDriveClientTests(unittest.TestCase):
         )
         self.assertEqual(result["error_code"], "remote_parts_duplicate_numbers")
 
+    def test_validate_remote_parts_requires_part_number(self):
+        client = TelDriveClient()
+        result = client._validate_remote_parts(
+            [
+                {"partId": 101},
+                {"partId": 102, "partNo": 2},
+            ],
+            2,
+        )
+        self.assertEqual(result["error_code"], "remote_parts_invalid_shape")
+
     def test_get_part_number_normalizes_strings(self):
         client = TelDriveClient()
         self.assertEqual(client._get_part_number({"partNo": "26"}), 26)
+        self.assertIsNone(client._get_part_number({"partId": "88"}))
         self.assertEqual(client._get_part_message_id({"partId": "88"}), 88)
 
 
