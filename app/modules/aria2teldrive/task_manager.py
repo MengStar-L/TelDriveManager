@@ -82,7 +82,6 @@ class TaskManager:
         self._cpu_info: dict = {}
         self._last_download_speed: int = 0  # 缓存最近的 aria2 下载速度
         self._disk_protection_active: bool = False
-        self._disk_protection_applied_max_downloads: int = self._get_user_max_concurrent_downloads()
         self._disk_protection_info: dict = {
             "active": False,
             "message": "",
@@ -91,6 +90,11 @@ class TaskManager:
             "configured_max_concurrent": self._get_user_max_concurrent_downloads(),
             "applied_max_concurrent": self._get_user_max_concurrent_downloads(),
         }
+        # 磁盘闸门：被磁盘保护暂停的 aria2 GID
+        # was_active=True 表示暂停前正在下载（恢复时优先放行）
+        self._disk_gate_paused_gids: dict[str, bool] = {}
+        # 磁盘错误自动重试计数：task_id -> 次数（防循环，封顶 3 次）
+        self._disk_failure_retry_counts: dict[str, int] = {}
         # 串行模式：被暂停的 aria2 GID 集合
         self._serial_gate_paused_gids: Set[str] = set()
         self._serial_gate_releasing_gids: Set[str] = set()
@@ -227,6 +231,10 @@ class TaskManager:
             and self._is_serial_gate_held(gid)
             and aria2_status in ("active", "waiting", "paused")
         ):
+            return "pending"
+
+        # 磁盘闸门持有的任务对用户显示为等待中（而非已暂停）
+        if self._is_disk_gate_held(gid) and aria2_status in ("waiting", "paused"):
             return "pending"
 
         status_map = {
@@ -715,10 +723,6 @@ class TaskManager:
         await self._sync_serial_transfer_gate_impl(active_items, queued_items, stopped)
 
     def _get_effective_max_concurrent_downloads(self) -> int:
-        if self._is_serial_transfer_mode_enabled():
-            return self._get_user_max_concurrent_downloads()
-        if self._disk_protection_active:
-            return max(1, int(self._disk_protection_applied_max_downloads or 1))
         return self._get_user_max_concurrent_downloads()
 
     async def _apply_aria2_options(self):
@@ -739,35 +743,99 @@ class TaskManager:
         except Exception:
             pass
 
-    async def _sync_disk_space_download_protection(self, active_download_count: int):
+    @staticmethod
+    def _item_remaining_bytes(item: dict) -> int:
+        """估算 aria2 任务剩余写入字节数（未知大小计 0）"""
+        try:
+            total = int(item.get("totalLength") or 0)
+            completed = int(item.get("completedLength") or 0)
+        except (TypeError, ValueError):
+            return 0
+        return max(0, total - completed)
+
+    def _is_disk_gate_held(self, gid: str) -> bool:
+        return bool(gid and gid in self._disk_gate_paused_gids)
+
+    def _hold_gid_for_disk_gate(self, gid: str, was_active: bool = False):
+        if not gid:
+            return
+        # 已记录为"曾活跃"的不降级
+        self._disk_gate_paused_gids[gid] = was_active or self._disk_gate_paused_gids.get(gid, False)
+
+    def _discard_disk_gate_gid(self, gid: str):
+        if gid:
+            self._disk_gate_paused_gids.pop(gid, None)
+
+    def should_defer_new_downloads(self) -> bool:
+        """磁盘保护激活期间，新任务应以暂停态进入 aria2（由闸门统一放行）"""
+        return self._disk_protection_active and self._is_disk_protection_enabled()
+
+    def hold_gids_for_disk_gate(self, gids: list):
+        """批量登记外部以暂停态推入 aria2 的 GID（如 pikpak 批量推送）"""
+        for gid in gids or []:
+            self._hold_gid_for_disk_gate(str(gid or "").strip())
+
+    async def _force_pause_for_disk_gate(self, item: dict, was_active: bool) -> bool:
+        gid = item.get("gid", "")
+        aria2 = self.aria2
+        if not gid or not aria2:
+            return False
+        status = item.get("status")
+        if status == "paused":
+            self._hold_gid_for_disk_gate(gid, was_active)
+            return True
+        if status not in ("active", "waiting"):
+            return False
+        try:
+            await aria2.force_pause(gid)
+        except Exception:
+            try:
+                await aria2.pause(gid)
+            except Exception as e:
+                logger.debug(f"disk gate pause failed: {gid}, {e}")
+                return False
+        self._hold_gid_for_disk_gate(gid, was_active)
+        return True
+
+    async def _release_from_disk_gate(self, gid: str) -> bool:
+        aria2 = self.aria2
+        if not gid or not aria2:
+            return False
+        try:
+            await aria2.unpause(gid)
+        except Exception as e:
+            logger.debug(f"disk gate unpause failed: {gid}, {e}")
+            # gid 可能已不在 aria2 中（被删除/重启丢失），从闸门移除避免卡死
+            self._discard_disk_gate_gid(gid)
+            return False
+        self._discard_disk_gate_gid(gid)
+        return True
+
+    async def _sync_disk_space_download_protection(self, active: list, waiting: list):
+        """磁盘闸门：空间不足时暂停下载，空间恢复后放行（替代旧的并发数封顶）。
+
+        - projected_free < threshold：暂停所有 waiting（挡住即将启动的新下载，
+          避免 fallocate 失败连环灭队）
+        - free < threshold：连 active 也暂停（停止写盘，避免 No space left）
+        - free >= resume_threshold（滞回）：恢复曾活跃的任务；waiting 类每周期
+          最多放行 1 个，且放行前校验预算
+        """
         aria2 = self.aria2
         if not aria2:
             return
 
         if not self._is_disk_protection_enabled():
-            configured_max = self._get_user_max_concurrent_downloads()
-            should_apply = (
-                self._disk_protection_active
-                or self._disk_protection_applied_max_downloads != configured_max
-            )
-            if should_apply:
-                try:
-                    await aria2.change_global_option({
-                        "max-concurrent-downloads": str(configured_max),
-                    })
-                except Exception as e:
-                    logger.warning(f"同步串行模式 aria2 并发配置失败: {e}")
-                    return
-
+            # 串行模式自带闸门，磁盘保护整体禁用；清掉历史状态
+            if self._disk_gate_paused_gids:
+                self._disk_gate_paused_gids.clear()
             self._disk_protection_active = False
-            self._disk_protection_applied_max_downloads = configured_max
             self._disk_protection_info = {
                 "active": False,
                 "message": "",
                 "threshold_bytes": self._get_disk_protection_threshold_bytes(),
                 "resume_threshold_bytes": self._get_disk_protection_resume_bytes(),
-                "configured_max_concurrent": configured_max,
-                "applied_max_concurrent": configured_max,
+                "configured_max_concurrent": self._get_user_max_concurrent_downloads(),
+                "applied_max_concurrent": self._get_user_max_concurrent_downloads(),
             }
             return
 
@@ -775,50 +843,159 @@ class TaskManager:
         if "free" not in disk_info:
             return
 
+        active = [item for item in (active or []) if item.get("gid")]
+        waiting = [item for item in (waiting or []) if item.get("gid")]
+
+        # 接管游离的暂停任务："aria2 已暂停但 DB 状态为 pending" 说明该任务
+        # 是被闸门（或重启前的闸门、或 add_task 准入竞态）暂停的，重新纳入
+        # 闸门管理，避免永远卡在暂停态无人放行。用户手动暂停的任务 DB 状态
+        # 为 paused，不会被接管。已持有的 gid 直接跳过，不产生额外查询。
+        for item in waiting:
+            gid = item.get("gid", "")
+            if item.get("status") != "paused":
+                continue
+            if self._is_disk_gate_held(gid) or self._is_serial_gate_held(gid):
+                continue
+            try:
+                db_task = await db.get_task_by_gid(gid)
+            except Exception:
+                db_task = None
+            if db_task and db_task.get("status") == "pending":
+                self._hold_gid_for_disk_gate(gid)
+                logger.info(f"磁盘闸门接管游离的暂停任务: {gid}")
+
         free_bytes = max(0, int(disk_info.get("free") or 0))
         threshold_bytes = self._get_disk_protection_threshold_bytes()
         resume_threshold_bytes = self._get_disk_protection_resume_bytes()
-        configured_max = self._get_user_max_concurrent_downloads()
-        active_download_count = max(0, int(active_download_count or 0))
         was_active = self._disk_protection_active
-        should_protect = free_bytes < (resume_threshold_bytes if was_active else threshold_bytes)
-        target_max = configured_max if not should_protect else max(1, active_download_count)
-        should_apply = (
-            target_max != self._disk_protection_applied_max_downloads
-            or should_protect != was_active
-        )
 
-        if should_apply:
-            try:
-                await aria2.change_global_option({
-                    "max-concurrent-downloads": str(target_max),
-                })
-            except Exception as e:
-                logger.warning(f"同步磁盘保护状态到 aria2 失败: {e}")
-                return
+        # 闸门集合自清理：gid 已不在 aria2 队列中（被删除/重启丢失）则移除
+        live_gids = {item.get("gid") for item in active + waiting}
+        for gid in list(self._disk_gate_paused_gids):
+            if gid not in live_gids:
+                self._disk_gate_paused_gids.pop(gid, None)
 
+        # 预测核算：当前活跃 + 即将被 aria2 提升的等待任务的剩余写入量
+        # （status=paused 的任务不会被自动提升，不占预算；闸门持有的同理）
+        pending_write_bytes = sum(self._item_remaining_bytes(item) for item in active)
+        ungated_waiting = [
+            item for item in waiting
+            if item.get("status") == "waiting"
+            and not self._is_disk_gate_held(item.get("gid", ""))
+            and not self._is_serial_gate_held(item.get("gid", ""))
+        ]
+        pending_write_bytes += sum(self._item_remaining_bytes(item) for item in ungated_waiting)
+        projected_free = free_bytes - pending_write_bytes
+
+        paused_now = 0
+
+        # 第一级：预算不足 → 暂停等待中的任务（挡新增）
+        if projected_free < threshold_bytes and ungated_waiting:
+            for item in ungated_waiting:
+                if await self._force_pause_for_disk_gate(item, was_active=False):
+                    paused_now += 1
+
+        # 第二级：实际剩余跌破阈值 → 暂停活跃下载（停写盘）
+        if free_bytes < threshold_bytes:
+            for item in active:
+                gid = item.get("gid", "")
+                if self._is_serial_gate_held(gid):
+                    continue
+                if await self._force_pause_for_disk_gate(item, was_active=True):
+                    paused_now += 1
+
+        # 恢复（滞回）：剩余空间回到 resume 线之上
+        resumed_now = 0
+        if free_bytes >= resume_threshold_bytes and self._disk_gate_paused_gids:
+            remaining_by_gid = {
+                item.get("gid"): self._item_remaining_bytes(item)
+                for item in waiting + active
+            }
+            # 曾活跃的任务全部放行（它们的磁盘预算在被暂停前已被接受），
+            # 其剩余写入量计入预算，避免后续 waiting 类放行超卖
+            for gid, gate_was_active in list(self._disk_gate_paused_gids.items()):
+                if gate_was_active:
+                    if await self._release_from_disk_gate(gid):
+                        resumed_now += 1
+                        pending_write_bytes += remaining_by_gid.get(gid, 0)
+            # waiting 类每周期最多放行 1 个：选第一个预算放得下的
+            for gid in list(self._disk_gate_paused_gids):
+                item_remaining = remaining_by_gid.get(gid, 0)
+                if free_bytes - pending_write_bytes - item_remaining >= threshold_bytes:
+                    if await self._release_from_disk_gate(gid):
+                        resumed_now += 1
+                        pending_write_bytes += item_remaining
+                        break  # 每周期只放行一个
+
+        held_count = len(self._disk_gate_paused_gids)
+        should_protect = held_count > 0 or free_bytes < threshold_bytes
+        configured_max = self._get_user_max_concurrent_downloads()
         self._disk_protection_active = should_protect
-        self._disk_protection_applied_max_downloads = target_max
         self._disk_protection_info = {
             "active": should_protect,
-            "message": "磁盘不足，已自动保护" if should_protect else "",
+            "message": (
+                f"磁盘空间不足，已暂停 {held_count} 个下载，等待上传释放空间"
+                if should_protect else ""
+            ),
             "free_bytes": free_bytes,
+            "projected_free_bytes": projected_free,
             "threshold_bytes": threshold_bytes,
             "resume_threshold_bytes": resume_threshold_bytes,
+            "held_count": held_count,
             "configured_max_concurrent": configured_max,
-            "applied_max_concurrent": target_max,
+            "applied_max_concurrent": configured_max,
         }
 
-        if should_protect and (not was_active or should_apply):
+        if paused_now:
             logger.warning(
-                f"磁盘剩余空间不足，已自动保护 aria2 新下载: free={free_bytes}, "
-                f"threshold={threshold_bytes}, max_concurrent={target_max}/{configured_max}"
+                f"磁盘闸门已暂停 {paused_now} 个下载: free={free_bytes}, "
+                f"projected_free={projected_free}, threshold={threshold_bytes}, "
+                f"held={held_count}"
             )
-        elif was_active and not should_protect:
+        if resumed_now:
             logger.info(
-                f"磁盘空间已恢复，已解除 aria2 自动保护: free={free_bytes}, "
-                f"restore_max_concurrent={configured_max}"
+                f"磁盘空间恢复，闸门放行 {resumed_now} 个下载: free={free_bytes}, "
+                f"remaining_held={len(self._disk_gate_paused_gids)}"
             )
+        if was_active and not should_protect:
+            logger.info(f"磁盘保护已解除: free={free_bytes}")
+            await self._auto_retry_disk_failed_downloads()
+
+    async def _auto_retry_disk_failed_downloads(self):
+        """磁盘保护解除时，自动重试因磁盘空间错误失败的下载（封顶 3 次）"""
+        disk_error_markers = (
+            "No space left",
+            "fallocate failed",
+            "Write disk cache flush",
+            "aria2 错误 [9]",
+        )
+        try:
+            all_tasks = await db.get_all_tasks()
+        except Exception as e:
+            logger.debug(f"磁盘错误自愈查询任务失败: {e}")
+            return
+        for task in all_tasks:
+            if task.get("status") != "failed":
+                continue
+            error = str(task.get("error") or "")
+            if not any(marker in error for marker in disk_error_markers):
+                continue
+            task_id = task["task_id"]
+            attempts = self._disk_failure_retry_counts.get(task_id, 0)
+            if attempts >= 3:
+                continue
+            self._disk_failure_retry_counts[task_id] = attempts + 1
+            try:
+                result = await self.retry_task(task_id)
+                if result.get("success"):
+                    logger.info(
+                        f"磁盘恢复后自动重试下载: {task_id} "
+                        f"(第 {attempts + 1}/3 次)"
+                    )
+                else:
+                    logger.debug(f"磁盘错误自愈重试失败: {task_id}, {result.get('message')}")
+            except Exception as e:
+                logger.debug(f"磁盘错误自愈重试异常: {task_id}, {e}")
 
 
 
@@ -1686,7 +1863,7 @@ class TaskManager:
             return
 
         try:
-            await self._sync_disk_space_download_protection(len(active))
+            await self._sync_disk_space_download_protection(active, waiting)
         except Exception as e:
             logger.debug(f"同步磁盘保护状态失败: {e}")
 
@@ -2808,10 +2985,16 @@ class TaskManager:
             )
 
         aria2 = self._require_aria2()
-        gid = await aria2.add_uri(url, options)
+        defer = self.should_defer_new_downloads()
+        # 磁盘保护激活：以暂停态进入 aria2，由磁盘闸门在空间恢复后放行
+        # （pause 仅用于本次 add_uri，不持久化到任务的重试选项中）
+        submit_options = dict(options, pause="true") if defer else options
+        gid = await aria2.add_uri(url, submit_options)
+        if defer:
+            self._hold_gid_for_disk_gate(gid)
         task = await self.register_external_task(
             gid, url, filename, teldrive_path=teldrive_path,
-            status="downloading", aria2_options=options
+            status="pending" if defer else "downloading", aria2_options=options
         )
         if task:
             return task
@@ -2846,6 +3029,7 @@ class TaskManager:
                     self._uploading_gids.discard(old_gid)
                     self._serial_gate_paused_gids.discard(old_gid)
                     self._serial_gate_releasing_gids.discard(old_gid)
+                    self._discard_disk_gate_gid(old_gid)
                 await db.update_task(task_id, status="paused", download_speed="", upload_speed="", error=None)
                 await self._broadcast_task_update(task_id)
                 return {"success": True, "message": "?????"}
@@ -2876,10 +3060,11 @@ class TaskManager:
                 await db.update_task(task_id, status="paused", aria2_gid=None, local_path=None, download_progress=0.0, download_speed="", error=None)
                 await self._broadcast_task_update(task_id)
                 return {"success": True, "message": "???"}
-            if not self._is_serial_gate_held(gid):
+            if not self._is_serial_gate_held(gid) and not self._is_disk_gate_held(gid):
                 await aria2.pause(gid)
             self._serial_gate_paused_gids.discard(gid)
             self._serial_gate_releasing_gids.discard(gid)
+            self._discard_disk_gate_gid(gid)
             await db.update_task(task_id, status="paused", download_speed="")
             await self._broadcast_task_update(task_id)
             return {"success": True, "message": "???"}
@@ -2942,8 +3127,14 @@ class TaskManager:
                 aria2 = self._require_aria2()
                 self._serial_gate_paused_gids.discard(gid)
                 self._serial_gate_releasing_gids.discard(gid)
-                await aria2.unpause(gid)
-                await db.update_task(task_id, status="downloading")
+                if self.should_defer_new_downloads():
+                    # 磁盘保护激活：不实际 unpause，登记到闸门等空间恢复后放行
+                    self._hold_gid_for_disk_gate(gid)
+                    await db.update_task(task_id, status="pending", error=None)
+                else:
+                    self._discard_disk_gate_gid(gid)
+                    await aria2.unpause(gid)
+                    await db.update_task(task_id, status="downloading")
             await self._broadcast_task_update(task_id)
             return {"success": True, "message": "???"}
         except Exception as e:
@@ -2978,6 +3169,7 @@ class TaskManager:
                 self._terminal_gids.discard(old_gid)
                 self._serial_gate_paused_gids.discard(old_gid)
                 self._serial_gate_releasing_gids.discard(old_gid)
+                self._discard_disk_gate_gid(old_gid)
 
             local = self._get_upload_path(task.get("local_path", ""))
 
@@ -3024,9 +3216,12 @@ class TaskManager:
             self._terminal_gids.discard(old_gid)
             self._serial_gate_paused_gids.discard(old_gid)
             self._serial_gate_releasing_gids.discard(old_gid)
+            self._discard_disk_gate_gid(old_gid)
         self._clear_upload_retry_budget(task_id)
         local_path = self._get_upload_path(task.get("local_path", ""))
-        if local_path and os.path.exists(local_path):
+        # 仅当下载已完成时才走"重试上传"分支；下载中途失败的任务
+        # local_path 指向 aria2 残留的不完整文件，绝不能当成品上传
+        if local_path and os.path.exists(local_path) and self._is_upload_stage_task(task):
             total_chunks = self._count_path_chunks(local_path)
             baseline_chunks = self._get_task_confirmed_chunk_baseline(task, total_chunks)
             self._upload_confirmed_checkpoints[task_id] = baseline_chunks
@@ -3068,8 +3263,12 @@ class TaskManager:
                 await self._broadcast_task_update(task_id)
                 await self._dispatch_next_serial_download()
                 return {"success": True, "message": "?????????"}
-            new_gid = await aria2.add_uri(url, options)
-            await db.update_task(task_id, status="downloading", aria2_gid=new_gid, aria2_options_json=self._serialize_aria2_options(options), download_progress=0, upload_progress=0, download_speed="", upload_speed="", error=None, local_path=None, url=url)
+            defer = self.should_defer_new_downloads()
+            submit_options = dict(options, pause="true") if defer else options
+            new_gid = await aria2.add_uri(url, submit_options)
+            if defer:
+                self._hold_gid_for_disk_gate(new_gid)
+            await db.update_task(task_id, status="pending" if defer else "downloading", aria2_gid=new_gid, aria2_options_json=self._serialize_aria2_options(options), download_progress=0, upload_progress=0, download_speed="", upload_speed="", error=None, local_path=None, url=url)
             self._upload_confirmed_checkpoints[task_id] = 0.0
             await db.update_task(task_id, upload_id=None, upload_session_state="idle", upload_session_token=None, upload_session_owner=None, upload_confirmed_chunks=0, upload_confirmed_total=0, upload_confirmed_parts_json="[]", upload_remote_parts_json="[]", upload_last_reconciled_at=None, upload_finished_at=None, upload_source_fingerprint=None)
             self._known_gids.add(new_gid)
@@ -3149,6 +3348,7 @@ class TaskManager:
             self._known_gids.discard(gid)
             self._serial_gate_paused_gids.discard(gid)
             self._serial_gate_releasing_gids.discard(gid)
+            self._discard_disk_gate_gid(gid)
             try:
                 aria2 = self._require_aria2()
                 await aria2.remove(gid)

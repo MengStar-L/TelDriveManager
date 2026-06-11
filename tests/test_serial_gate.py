@@ -183,17 +183,18 @@ class SerialGateTests(unittest.IsolatedAsyncioTestCase):
         manager = self.make_manager()
         manager._disk_usage_info = {"free": 0}
         manager._disk_protection_active = True
-        manager._disk_protection_applied_max_downloads = 3
+        manager._disk_gate_paused_gids["stale-1"] = True
 
-        await manager._sync_disk_space_download_protection(active_download_count=2)
+        await manager._sync_disk_space_download_protection(
+            active=[{"gid": "a-1", "status": "active"}], waiting=[]
+        )
 
         self.assertFalse(manager._disk_protection_active)
         self.assertEqual(manager._disk_protection_info["active"], False)
         self.assertEqual(manager._disk_protection_info["message"], "")
-        self.assertEqual(
-            manager.aria2.global_option_changes[-1]["max-concurrent-downloads"],
-            "1",
-        )
+        # 串行模式下磁盘闸门不动作：不暂停任何任务、清空历史持有
+        self.assertEqual(manager.aria2.force_paused, [])
+        self.assertEqual(manager._disk_gate_paused_gids, {})
 
     async def test_disk_recovered_releases_gate_held_paused_item(self):
         manager = self.make_manager()
@@ -229,15 +230,25 @@ class SerialGateTests(unittest.IsolatedAsyncioTestCase):
         manager.config["upload"]["serial_transfer_mode"] = False
         manager._disk_usage_info = {"free": 0}
 
-        await manager._sync_disk_space_download_protection(active_download_count=2)
+        async def no_auto_retry():
+            return None
+
+        manager._auto_retry_disk_failed_downloads = cast(Any, no_auto_retry)
+
+        await manager._sync_disk_space_download_protection(
+            active=[
+                {"gid": "a-1", "status": "active", "totalLength": "0", "completedLength": "0"},
+                {"gid": "a-2", "status": "active", "totalLength": "0", "completedLength": "0"},
+            ],
+            waiting=[],
+        )
 
         self.assertTrue(manager._disk_protection_active)
         self.assertEqual(manager._disk_protection_info["active"], True)
         self.assertTrue(manager._disk_protection_info["message"])
-        self.assertEqual(
-            manager.aria2.global_option_changes[-1]["max-concurrent-downloads"],
-            "2",
-        )
+        # 磁盘闸门：free < threshold 时暂停活跃下载（不再 ratchet 并发数）
+        self.assertEqual(manager.aria2.force_paused, ["a-1", "a-2"])
+        self.assertEqual(manager.aria2.global_option_changes, [])
 
     async def test_add_task_queues_without_touching_aria2_in_serial_mode(self):
         manager = self.make_manager()

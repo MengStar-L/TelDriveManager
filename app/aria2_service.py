@@ -200,6 +200,9 @@ class Aria2Service:
             "--continue=true",
             "--allow-overwrite=true",
             "--auto-file-renaming=false",
+            # 不预分配文件：避免剩余空间不足时启动即 fallocate 失败，
+            # 磁盘空间由 task_manager 的磁盘闸门统一管控
+            "--file-allocation=none",
             "--max-tries=0",
             "--retry-wait=5",
             f"--input-file={ARIA2_SESSION_FILE}",

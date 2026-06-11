@@ -930,7 +930,10 @@ async def _aria2_push_only(files: List[dict], index: int, delete_pikpak_ids: Lis
                 success_count += 1
                 await _broadcast_link_pushed(index, file_info, sequence, len(files), push_target)
         else:
-            gids = await aria2.add_uris_batch(tasks_to_add, base_dir=download_dir)
+            defer = task_manager.should_defer_new_downloads()
+            gids = await aria2.add_uris_batch(tasks_to_add, base_dir=download_dir, pause=defer)
+            if defer:
+                task_manager.hold_gids_for_disk_gate(gids)
             for sequence, (gid, file_info, task_ctx, task_spec) in enumerate(zip(gids, files, task_contexts, tasks_to_add), 1):
                 if not gid:
                     continue
@@ -1246,8 +1249,12 @@ async def _process_share_download(share_id: str, file_ids: List[str], pass_code_
                     await _broadcast_link_pushed(1, display_info, sequence, len(all_urls), push_target)
                     continue
 
-                gid = await _aria2.add_uri(url_info["url"], opts)
+                defer = task_manager.should_defer_new_downloads()
+                submit_opts = dict(opts, pause="true") if defer else opts
+                gid = await _aria2.add_uri(url_info["url"], submit_opts)
                 if gid:
+                    if defer:
+                        task_manager.hold_gids_for_disk_gate([gid])
                     await _register_aria2_task(
                         gid,
                         url_info["url"],

@@ -1847,11 +1847,9 @@ function renderA2TDStats(stats) {
         if (protection.active) {
             const freeText = protection.free_bytes !== undefined ? formatBytes(getA2TDNumber(protection.free_bytes), 0) : '--';
             const thresholdText = protection.threshold_bytes !== undefined ? formatBytes(getA2TDNumber(protection.threshold_bytes), 0) : '--';
-            const appliedMax = Math.max(1, getA2TDNumber(protection.applied_max_concurrent) || 1);
-            const configuredMax = Math.max(1, getA2TDNumber(protection.configured_max_concurrent) || appliedMax);
             diskProtectNotice.style.display = 'flex';
             if (diskProtectNoticeText) {
-                diskProtectNoticeText.textContent = `${protection.message || '磁盘不足，已自动保护'}（当前剩余 ${freeText}，保护阈值 ${thresholdText}，当前并发 ${appliedMax}/${configuredMax}）`;
+                diskProtectNoticeText.textContent = `${protection.message || '磁盘不足，已自动保护'}（当前剩余 ${freeText}，保护阈值 ${thresholdText}）`;
             }
         } else {
             diskProtectNotice.style.display = 'none';
