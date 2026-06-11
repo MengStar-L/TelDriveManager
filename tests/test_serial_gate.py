@@ -1162,7 +1162,7 @@ class TelDriveClientTests(unittest.TestCase):
             captured["json"]["parts"],
             [{"id": 101}, {"id": 102}, {"id": 103, "salt": "s3"}],
         )
-        self.assertEqual([p["partNo"] for p in result["remote_parts"]], ["1", 2, 3])
+        self.assertEqual([p["partNo"] for p in result["remote_parts"]], [1, 2, 3])
 
     def test_validate_remote_parts_count_mismatch(self):
         client = TelDriveClient()

@@ -1,6 +1,7 @@
 ﻿"""任务管理器 - 监控 aria2 下载并自动上传到 TelDrive"""
 
 import asyncio
+import hashlib
 import json
 import os
 import shutil
@@ -112,7 +113,8 @@ class TaskManager:
             chunk_size=cfg["teldrive"]["chunk_size"],
             upload_concurrency=self._get_effective_upload_concurrency(),
             random_chunk_name=cfg["teldrive"].get("random_chunk_name", True),
-            max_retries=cfg.get("upload", {}).get("max_retries", 3)
+            max_retries=cfg.get("upload", {}).get("max_retries", 3),
+            min_throughput_kbps=cfg.get("upload", {}).get("min_throughput_kbps", 100),
         )
 
     def _require_aria2(self) -> Aria2Client:
@@ -1109,9 +1111,9 @@ class TaskManager:
         for item in self._load_json_list(values) if not isinstance(values, list) else list(values):
             if not isinstance(item, dict):
                 continue
-            part_number = None
+            # 只认 partNo；绝不回退用 partId/id（Telegram 消息 id）当分块编号
             try:
-                part_number = int(item.get("partNo", item.get("partId", item.get("id"))))
+                part_number = int(item.get("partNo"))
             except Exception:
                 part_number = None
             if part_number is None or part_number <= 0:
@@ -1150,6 +1152,81 @@ class TaskManager:
         if total_chunks > 0:
             return min(confirmed_count, float(total_chunks))
         return confirmed_count
+
+    def _calc_upload_source_fingerprint(self, local_path: str) -> str:
+        """上传源指纹：chunk_size + 文件大小 + mtime。
+
+        任一变化都意味着已持久化的分块 checkpoint 不再可信
+        （chunk_size 变更 → partNo 边界错位；文件变更 → 内容错位），
+        续传前必须丢弃 checkpoint 重新上传。目录任务对每个文件聚合。
+        """
+        chunk_size = int(getattr(self.teldrive, "chunk_size", 0) or 0)
+        entries = [f"chunk={chunk_size}"]
+        try:
+            if os.path.isfile(local_path):
+                stat = os.stat(local_path)
+                entries.append(f"file:{stat.st_size}:{int(stat.st_mtime)}")
+            elif os.path.isdir(local_path):
+                for root, _dirs, filenames in os.walk(local_path):
+                    for fname in sorted(filenames):
+                        full_path = os.path.join(root, fname)
+                        try:
+                            stat = os.stat(full_path)
+                        except OSError:
+                            continue
+                        rel = os.path.relpath(full_path, local_path).replace("\\", "/")
+                        entries.append(f"{rel}:{stat.st_size}:{int(stat.st_mtime)}")
+        except Exception as e:
+            logger.debug(f"calc upload source fingerprint failed: {local_path}, {e}")
+            return ""
+        return hashlib.md5("|".join(entries).encode("utf-8")).hexdigest()
+
+    async def _invalidate_stale_upload_checkpoint(self, task_id: str, task: dict,
+                                                  local_path: str) -> dict:
+        """续传前校验源指纹；不匹配则丢弃已持久化的分块 checkpoint。
+
+        返回（可能已被重置的）最新 task dict。
+        """
+        current_fingerprint = self._calc_upload_source_fingerprint(local_path)
+        stored_fingerprint = str(task.get("upload_source_fingerprint") or "")
+        has_checkpoint = bool(
+            task.get("upload_id")
+            or self._get_persisted_confirmed_part_numbers(task)
+            or self._coerce_upload_checkpoint_value(task.get("upload_confirmed_chunks")) > 0
+        )
+        if not has_checkpoint or not current_fingerprint:
+            if current_fingerprint and current_fingerprint != stored_fingerprint:
+                await db.update_task(task_id, upload_source_fingerprint=current_fingerprint)
+                task = dict(await db.get_task(task_id) or task)
+            return task
+        if stored_fingerprint == current_fingerprint:
+            return task
+
+        logger.warning(
+            f"task {task_id} 上传源指纹不匹配（chunk_size 或本地文件已变更），"
+            f"丢弃断点续传 checkpoint 重新上传"
+        )
+        stale_upload_id = str(task.get("upload_id") or "")
+        self._upload_confirmed_checkpoints[task_id] = 0.0
+        # 仅清缓存的会话 meta；会话本身（running + token）仍归当前协程所有
+        self._upload_session_meta.pop(task_id, None)
+        await db.update_task(
+            task_id,
+            upload_id=None,
+            upload_confirmed_chunks=0,
+            upload_confirmed_total=0,
+            upload_confirmed_parts_json="[]",
+            upload_remote_parts_json="[]",
+            upload_last_reconciled_at=None,
+            upload_source_fingerprint=current_fingerprint,
+        )
+        if stale_upload_id:
+            # 丢弃服务端旧会话，避免新上传与错位旧块混在同一 upload_id 下
+            try:
+                await self._require_teldrive().cleanup_upload_session(stale_upload_id)
+            except Exception as e:
+                logger.debug(f"cleanup stale upload session failed: {stale_upload_id}, {e}")
+        return dict(await db.get_task(task_id) or task)
 
     @staticmethod
     def _parse_db_timestamp(raw_value) -> Optional[datetime]:
@@ -1858,17 +1935,17 @@ class TaskManager:
         self._active_uploads = max(0, self._active_uploads - 1)
         self._upload_slot_event.set()
 
-    @staticmethod
-    def _calc_upload_timeout(file_size: int) -> int:
+    def _calc_upload_timeout(self, file_size: int) -> int:
+        """根据文件大小与最低吞吐假设计算整体上传超时（秒）。
 
-        """根据文件大小动态计算上传超时（秒）。
-
-        保底 600s (10分钟) + 每 GB 额外 600s (10分钟)。
-        例: 8GB → 600 + 8*600 = 5400s ≈ 90 分钟
+        这是 chunk 级超时之外的最后兜底（防止逻辑级卡死），按
+        upload.min_throughput_kbps（默认 100KB/s）估算全量传输耗时，
+        再乘以 3 倍余量（覆盖逐块重试与落块轮询），保底 1 小时。
+        例: 8GB @100KB/s → 83886s × 3 ≈ 70 小时，慢链路不会再被误杀。
         """
-        base = 600
-        extra = int(file_size / (1024 ** 3)) * 600
-        return base + extra
+        kbps = max(16, int(self.config.get("upload", {}).get("min_throughput_kbps") or 100))
+        transfer_seconds = int(file_size / (kbps * 1024))
+        return max(3600, transfer_seconds * 3)
 
     async def _schedule_upload_from_complete(self, task_id: str, gid: str) -> bool:
         task = await db.get_task(task_id)
@@ -1919,6 +1996,54 @@ class TaskManager:
             logger.warning(f"failed to delete polluted upload telegram messages: {e}")
             return False
 
+    async def _record_orphan_parts(self, task_id: str, upload_id: str, orphan_parts: list) -> None:
+        """孤儿块消息删除失败时落库记录，供后续人工/定期清理，不阻塞任务流转"""
+        message_ids = []
+        teldrive = self.teldrive
+        for part in orphan_parts or []:
+            message_id = teldrive._get_part_message_id(part) if teldrive else None
+            if message_id is not None:
+                message_ids.append(message_id)
+        if not message_ids:
+            return
+        logger.warning(
+            f"task {task_id} 存在 {len(message_ids)} 个未清理的孤儿分块消息: {message_ids}"
+        )
+        try:
+            await db.add_progress_log(
+                "orphan_parts",
+                {
+                    "task_id": task_id,
+                    "upload_id": upload_id,
+                    "message_ids": message_ids,
+                },
+                stream="upload_orphans",
+                job_id=task_id,
+                limit=500,
+            )
+        except Exception as e:
+            logger.debug(f"record orphan parts failed: {e}")
+
+    async def _cleanup_orphan_parts(self, task_id: str, upload_meta: dict) -> None:
+        """删除去重后落选的重复分块消息（尽力而为；失败仅记录不阻塞）"""
+        orphan_parts = list((upload_meta or {}).get("orphan_parts") or [])
+        if not orphan_parts:
+            return
+        teldrive = self.teldrive
+        message_ids = []
+        for part in orphan_parts:
+            message_id = teldrive._get_part_message_id(part) if teldrive else None
+            if message_id is not None:
+                message_ids.append(message_id)
+        if not message_ids:
+            return
+        if await self._delete_telegram_messages(message_ids):
+            logger.info(f"task {task_id} 已清理 {len(message_ids)} 个重复分块消息")
+        else:
+            await self._record_orphan_parts(
+                task_id, str((upload_meta or {}).get("upload_id") or ""), orphan_parts
+            )
+
     async def cleanup_polluted_upload(self, task_id: str, retry_after_cleanup: bool = False) -> dict:
         task = await db.get_task(task_id)
         if not task:
@@ -1927,10 +2052,11 @@ class TaskManager:
             return {"success": False, "message": "task has no polluted upload session to clean"}
 
         meta = self._get_upload_session_meta(task_id)
-        upload_id = str(meta.get("upload_id") or "")
+        # 内存 meta 可能在重启后缺失，回退到 DB 持久化字段
+        upload_id = str(meta.get("upload_id") or task.get("upload_id") or "")
         remote_parts = list(meta.get("remote_parts") or [])
-        if not upload_id and not remote_parts:
-            return {"success": False, "message": "missing polluted upload session metadata"}
+        if not remote_parts:
+            remote_parts = self._get_persisted_remote_parts(task)
 
         teldrive = self._require_teldrive()
         if upload_id:
@@ -1946,8 +2072,16 @@ class TaskManager:
             message_id = teldrive._get_part_message_id(part)
             if message_id is not None:
                 message_ids.append(message_id)
+        cleanup_note = "polluted remote chunks cleaned; ready to retry upload"
         if message_ids and not await self._delete_telegram_messages(message_ids):
-            return {"success": False, "message": "failed to delete polluted upload chunks; ensure tel2teldrive is connected"}
+            # 降级：tel2teldrive 不可用时不再永久阻塞重试 ——
+            # 记录孤儿消息 id 待后续清理，会话照常重置（重新上传会用新 upload_id，
+            # 旧消息只占频道空间，不影响新文件正确性）
+            await self._record_orphan_parts(task_id, upload_id, remote_parts)
+            cleanup_note = (
+                "polluted session reset; chunk messages recorded for later cleanup "
+                "(tel2teldrive offline)"
+            )
 
         if upload_id:
             await teldrive.cleanup_upload_session(upload_id)
@@ -1958,13 +2092,13 @@ class TaskManager:
             task_id,
             upload_chunk_done=0,
             upload_chunk_total=0,
-            upload_note="polluted remote chunks cleaned; ready to retry upload",
+            upload_note=cleanup_note,
             upload_note_level="warning",
         )
         await db.update_task(
             task_id,
             status="failed",
-            error="polluted remote chunks cleaned; retry upload",
+            error=cleanup_note,
             upload_id=None,
             upload_session_state="idle",
             upload_session_token=None,
@@ -1975,6 +2109,7 @@ class TaskManager:
             upload_remote_parts_json="[]",
             upload_last_reconciled_at=None,
             upload_finished_at=None,
+            upload_source_fingerprint=None,
         )
         await self._broadcast_task_update(task_id)
 
@@ -2014,6 +2149,8 @@ class TaskManager:
                 await db.release_upload_session(task_id, token, "idle", error=f"local file missing: {local_path}")
                 await self._broadcast_task_update(task_id)
                 return
+            task = await self._invalidate_stale_upload_checkpoint(task_id, task, local_path)
+            await self._refresh_upload_session_from_db(task_id, task)
             total_chunks = self._count_path_chunks(local_path)
             baseline_chunks = self._get_task_confirmed_chunk_baseline(task, total_chunks)
             self._upload_confirmed_checkpoints[task_id] = baseline_chunks
@@ -2178,6 +2315,24 @@ class TaskManager:
                     self._upload_retry_checkpoints[task_id] = current_checkpoint
 
                 retries = self._upload_retry_counts.get(task_id, 0)
+                # 封顶：checkpoint 不前进的连续重试超过上限后停止自动重试，
+                # 任务保持 failed，等待用户手动重试（手动重试会清零计数）
+                stall_retry_limit = max(
+                    3, int(self.config.get("upload", {}).get("max_retries", 3)) * 3
+                )
+                if retries >= stall_retry_limit:
+                    if task.get("upload_note") != "auto retry exhausted":
+                        self._set_runtime_task_fields(
+                            task_id,
+                            upload_note="auto retry exhausted",
+                            upload_note_level="error",
+                        )
+                        logger.warning(
+                            f"task {task_id} 自动重试 {retries} 次仍无进展，"
+                            f"已停止自动重试（可手动重试）"
+                        )
+                        await self._broadcast_task_update(task_id)
+                    continue
                 next_retry = retries + 1
                 self._upload_retry_counts[task_id] = next_retry
                 self._upload_retry_checkpoints[task_id] = current_checkpoint
@@ -2385,6 +2540,7 @@ class TaskManager:
                     if self._is_polluted_upload_error(result.get("error")):
                         self._set_runtime_task_fields(task_id, upload_note="remote parts polluted; clean then retry", upload_note_level="warning")
                     raise Exception(f"upload failed: {rel_path} - {result.get('error', 'unknown error')}")
+                await self._cleanup_orphan_parts(task_id, upload_meta)
                 uploaded_total[0] += file_size
                 confirmed_chunks_total[0] = min(total_chunks, confirmed_chunks_total[0] + file_total_chunks)
                 remaining_confirmed_chunks = 0
@@ -2594,6 +2750,7 @@ class TaskManager:
                     upload_remote_parts_json=self._serialize_remote_parts(current_remote_parts, total_chunks),
                 )
                 await self._broadcast_task_update(task_id)
+                await self._cleanup_orphan_parts(task_id, upload_meta)
             else:
                 error = result.get("error", "upload failed")
                 if self._is_polluted_upload_error(error):
@@ -2907,14 +3064,14 @@ class TaskManager:
             if self._is_serial_transfer_mode_enabled():
                 await db.update_task(task_id, status="pending", aria2_gid=None, aria2_options_json=self._serialize_aria2_options(options), download_progress=0, upload_progress=0, download_speed="", upload_speed="", error=None, local_path=None, url=url)
                 self._upload_confirmed_checkpoints[task_id] = 0.0
-                await db.update_task(task_id, upload_id=None, upload_session_state="idle", upload_session_token=None, upload_session_owner=None, upload_confirmed_chunks=0, upload_confirmed_total=0, upload_confirmed_parts_json="[]", upload_remote_parts_json="[]", upload_last_reconciled_at=None, upload_finished_at=None)
+                await db.update_task(task_id, upload_id=None, upload_session_state="idle", upload_session_token=None, upload_session_owner=None, upload_confirmed_chunks=0, upload_confirmed_total=0, upload_confirmed_parts_json="[]", upload_remote_parts_json="[]", upload_last_reconciled_at=None, upload_finished_at=None, upload_source_fingerprint=None)
                 await self._broadcast_task_update(task_id)
                 await self._dispatch_next_serial_download()
                 return {"success": True, "message": "?????????"}
             new_gid = await aria2.add_uri(url, options)
             await db.update_task(task_id, status="downloading", aria2_gid=new_gid, aria2_options_json=self._serialize_aria2_options(options), download_progress=0, upload_progress=0, download_speed="", upload_speed="", error=None, local_path=None, url=url)
             self._upload_confirmed_checkpoints[task_id] = 0.0
-            await db.update_task(task_id, upload_id=None, upload_session_state="idle", upload_session_token=None, upload_session_owner=None, upload_confirmed_chunks=0, upload_confirmed_total=0, upload_confirmed_parts_json="[]", upload_remote_parts_json="[]", upload_last_reconciled_at=None, upload_finished_at=None)
+            await db.update_task(task_id, upload_id=None, upload_session_state="idle", upload_session_token=None, upload_session_owner=None, upload_confirmed_chunks=0, upload_confirmed_total=0, upload_confirmed_parts_json="[]", upload_remote_parts_json="[]", upload_last_reconciled_at=None, upload_finished_at=None, upload_source_fingerprint=None)
             self._known_gids.add(new_gid)
             await self._broadcast_task_update(task_id)
             return {"success": True, "message": "??????"}
@@ -2942,6 +3099,8 @@ class TaskManager:
                 await db.release_upload_session(task_id, token, "idle", error="local file missing, cannot retry upload")
                 await self._broadcast_task_update(task_id)
                 return
+            task = await self._invalidate_stale_upload_checkpoint(task_id, task, local_path)
+            await self._refresh_upload_session_from_db(task_id, task)
             teldrive_path = self._get_task_teldrive_path(task, local_path)
             max_retries = self.config.get("upload", {}).get("max_retries", 3)
             retry_attempt = self._upload_retry_counts.get(task_id, 0)
