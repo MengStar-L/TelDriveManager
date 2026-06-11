@@ -38,6 +38,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     upload_last_reconciled_at TIMESTAMP,
     upload_started_at TIMESTAMP,
     upload_finished_at TIMESTAMP,
+    upload_source_fingerprint TEXT,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 )
@@ -110,6 +111,7 @@ async def init_db():
     await _ensure_column(conn, "tasks", "upload_last_reconciled_at", "TIMESTAMP")
     await _ensure_column(conn, "tasks", "upload_started_at", "TIMESTAMP")
     await _ensure_column(conn, "tasks", "upload_finished_at", "TIMESTAMP")
+    await _ensure_column(conn, "tasks", "upload_source_fingerprint", "TEXT")
     await conn.execute(CREATE_PROGRESS_LOGS_TABLE_SQL)
     await conn.execute(CREATE_PARSE_JOBS_TABLE_SQL)
     await conn.execute(

@@ -57,7 +57,10 @@ DEFAULT_LOG_FILE = BASE_DIR / "runtime.log"
 T2TD_ACTION_LOG_STREAM = "t2td_sync"
 T2TD_ACTION_LOG_LIMIT_MULTIPLIER = 5
 T2TD_ACTION_LOG_MIN_LIMIT = 500
-INTERNAL_DELETE_GRACE_SECONDS = 120.0
+# 内部删除宽限期：删除同步轮询间隔可配置到数百秒，宽限期必须覆盖
+# "内部删除发生 → 下一轮快照对比发现消失" 的最大间隔；
+# 已删除的 file_id/msg_id 不会再有真实的外部删除事件，放宽是安全的
+INTERNAL_DELETE_GRACE_SECONDS = 900.0
 MESSAGE_FETCH_BATCH_SIZE = 100
 INITIAL_MAPPING_SCAN_TIMEOUT = 90
 INITIAL_MAPPING_PROGRESS_EVERY = 100
@@ -1293,6 +1296,12 @@ async def delete_teldrive_files_for_missing_messages(
 
     mapping = await run_blocking_io(load_mapping)
     current_teldrive_files = td_files if td_files is not None else await run_blocking_io(get_teldrive_files, config)
+    # 删除前以 TelDrive 数据库的 parts 为权威数据复核：
+    # 本地映射可能因同名覆盖/迁移继承而携带过期 msg_id，
+    # 过期映射应当刷新而不是触发删除
+    db_mapping: dict[str, list[int]] = {}
+    if config.db_enabled:
+        db_mapping = await run_blocking_io(query_db_mapping, config)
     deleted_count = 0
     mapping_changed = False
 
@@ -1307,6 +1316,20 @@ async def delete_teldrive_files_for_missing_messages(
             mapping.pop(file_id, None)
             mapping_changed = True
             continue
+
+        authoritative_ids = normalize_message_ids(db_mapping.get(file_id)) if db_mapping else []
+        if authoritative_ids and set(authoritative_ids) != set(stored_msg_ids):
+            # 本地映射过期 → 用权威数据重算缺失
+            mapping[file_id] = authoritative_ids
+            mapping_changed = True
+            lost_ids = [msg_id for msg_id in authoritative_ids if msg_id in missing_ids]
+            if not lost_ids:
+                logger.info(
+                    f"映射已过期，按数据库权威 parts 刷新后无缺失，跳过删除: "
+                    f"{file_info.get('name', file_id)} (file_id={file_id})"
+                )
+                continue
+            stored_msg_ids = authoritative_ids
 
         file_name = str(file_info.get("name", "")).strip() or file_id
         logger.warning(f"检测到 Telegram 分块缺失，准备删除 TelDrive 文件: {file_name} (file_id={file_id})")
@@ -1465,16 +1488,13 @@ async def sync_deletions(client: TelegramClient, config: RuntimeConfig):
                         mapping.pop(file_id, None)
                         continue
                     if old_name and old_name in curr_names:
-                        new_name_to_id = {
-                            info["name"]: new_id
-                            for new_id, info in curr_files.items()
-                            if new_id in new_ids and isinstance(info, dict) and info.get("name")
-                        }
-                        old_messages = normalize_message_ids(mapping.pop(file_id, []))
-                        if old_name in new_name_to_id:
-                            new_file_id = new_name_to_id[old_name]
-                            mapping[new_file_id] = merge_message_ids(mapping.get(new_file_id), old_messages)
-                            logger.info(f"检测到文件迁移，已迁移映射: {old_name}")
+                        # 同名文件换了新 file_id：通常是"删除旧文件 + 重新上传"而非迁移。
+                        # 旧消息很可能已被 TelDrive 异步清理，把旧 msg_ids 继承给新文件
+                        # 会让删除同步在下一轮误删刚上传成功的新文件。
+                        # 改为丢弃旧映射；新文件的映射由下方 new_ids 处理流程
+                        # 通过数据库权威 parts / 频道扫描重建。
+                        mapping.pop(file_id, None)
+                        logger.info(f"同名文件更换 file_id，丢弃旧映射等待重建: {old_name}")
                         await run_blocking_io(save_mapping, mapping)
                     elif file_id not in pending_deletions:
                         if is_md5_name(old_name):
@@ -1491,11 +1511,9 @@ async def sync_deletions(client: TelegramClient, config: RuntimeConfig):
                 name = info["name"]
                 if name in curr_names:
                     logger.info(f"文件重新出现，取消删除: {name}")
-                    for new_id, new_info in curr_files.items():
-                        if new_info["name"] == name and new_id not in mapping:
-                            mapping[new_id] = merge_message_ids(mapping.get(new_id), info["msg_ids"])
-                            logger.info(f"已恢复文件映射: {name}")
-                            break
+                    # 不把旧 msg_ids 转移给新 file_id：重新出现的文件
+                    # 通常是重新上传的新实例，其分块是全新消息；
+                    # 新映射交由 new_ids 流程从数据库/频道扫描重建
                     del pending_deletions[file_id]
                     mapping.pop(file_id, None)
                     await run_blocking_io(save_mapping, mapping)

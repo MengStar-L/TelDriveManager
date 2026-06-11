@@ -56,6 +56,7 @@ target_path = "/"
 max_retries = 3
 auto_delete = true
 serial_transfer_mode = false       # 开启后下载/上传总占用强制为 1，需等上一个上传完成并释放磁盘后才继续下一个下载
+min_throughput_kbps = 100          # 上传超时按此最低吞吐估算（KB/s）；链路慢可调低，避免大文件被超时中断
 
 # ─── Telegram 消息同步 ───
 [telegram]
