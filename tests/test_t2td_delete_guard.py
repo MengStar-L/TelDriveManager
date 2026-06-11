@@ -101,7 +101,7 @@ class MissingMessageDeletionGuardTests(unittest.IsolatedAsyncioTestCase):
         )
 
     async def _run_with_fakes(self, config, mapping, td_files, db_mapping,
-                              missing_ids):
+                              missing_ids, foreign_file_ids=None):
         deleted_files = []
         saved_mappings = []
 
@@ -113,6 +113,8 @@ class MissingMessageDeletionGuardTests(unittest.IsolatedAsyncioTestCase):
                 return None
             if func is service_module.query_db_mapping:
                 return dict(db_mapping)
+            if func is service_module.query_db_foreign_file_ids:
+                return set(foreign_file_ids or ())
             if func is service_module.get_teldrive_files:
                 return dict(td_files)
             return func(*args, **kwargs)
@@ -133,6 +135,43 @@ class MissingMessageDeletionGuardTests(unittest.IsolatedAsyncioTestCase):
             service_module.run_blocking_io = original_run_blocking_io
             service_module.delete_file_from_teldrive = original_delete
         return deleted_count, deleted_files, saved_mappings
+
+    async def test_foreign_channel_file_is_never_deleted(self):
+        # 分块存储在其他频道的文件：监听频道里查不到其消息 ID 属正常，
+        # 绝不能据此删除；应从映射剔除并排除出删除同步
+        config = self.make_config(db_enabled=True)
+        deleted_count, deleted_files, saved_mappings = await self._run_with_fakes(
+            config,
+            mapping={"file-foreign": [301, 302]},
+            td_files={"file-foreign": {"name": "other-channel.mkv", "size": 10}},
+            db_mapping={},  # 频道过滤后 db_mapping 不含外频道文件
+            missing_ids=[301, 302],
+            foreign_file_ids={"file-foreign"},
+        )
+        self.assertEqual(deleted_count, 0)
+        self.assertEqual(deleted_files, [])
+        self.assertTrue(saved_mappings)
+        self.assertNotIn("file-foreign", saved_mappings[-1])
+
+
+class ChannelIdMatchTests(unittest.TestCase):
+    def test_equivalent_forms_match(self):
+        # TelDrive DB 存裸 ID，Telethon 配置常带 -100 前缀
+        self.assertTrue(service_module.channel_ids_match(3854656012, -1003854656012))
+        self.assertTrue(service_module.channel_ids_match("-1003854656012", "3854656012"))
+        self.assertTrue(service_module.channel_ids_match(1003854656012, 3854656012))
+
+    def test_different_channels_do_not_match(self):
+        self.assertFalse(service_module.channel_ids_match(3854656012, -10038190483))
+
+    def test_invalid_or_zero_never_match(self):
+        self.assertFalse(service_module.channel_ids_match(0, 3854656012))
+        self.assertFalse(service_module.channel_ids_match(None, 3854656012))
+        self.assertFalse(service_module.channel_ids_match("abc", 3854656012))
+
+    def test_short_ids_do_not_strip_100_prefix(self):
+        # 短 ID 不剥 100 前缀，避免 100123 与 123 误判等价
+        self.assertFalse(service_module.channel_ids_match(100123, 123))
 
     async def test_stale_mapping_is_refreshed_instead_of_deleting(self):
         # 本地映射记录旧 msg_id（已缺失），但数据库权威 parts 显示

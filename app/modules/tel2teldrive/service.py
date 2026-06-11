@@ -1089,6 +1089,32 @@ def get_teldrive_files(config: RuntimeConfig) -> dict[str, dict[str, Any]]:
     return result
 
 
+def _channel_id_candidates(value: Any) -> set[int]:
+    """频道 ID 的等价候选集合：兼容 -100 前缀/裸 ID/正负号差异。
+
+    TelDrive 数据库存裸 ID（如 3854656012），Telethon 配置常用
+    -1003854656012；两者应视为同一频道。
+    """
+    try:
+        v = abs(int(str(value).strip()))
+    except (TypeError, ValueError):
+        return set()
+    if not v:
+        return set()
+    candidates = {v}
+    s = str(v)
+    if s.startswith("100") and len(s) > 6:
+        with suppress(ValueError):
+            candidates.add(int(s[3:]))
+    return candidates
+
+
+def channel_ids_match(a: Any, b: Any) -> bool:
+    ca = _channel_id_candidates(a)
+    cb = _channel_id_candidates(b)
+    return bool(ca and cb and ca & cb)
+
+
 def query_db_mapping(config: RuntimeConfig) -> dict[str, list[int]]:
     if not config.db_enabled:
         return {}
@@ -1102,13 +1128,22 @@ def query_db_mapping(config: RuntimeConfig) -> dict[str, list[int]]:
             database=config.db_name,
         )
         cur = conn.cursor()
-        cur.execute("SELECT id, name, parts FROM teldrive.files WHERE type='file' AND parts IS NOT NULL")
+        cur.execute("SELECT id, name, parts, channel_id FROM teldrive.files WHERE type='file' AND parts IS NOT NULL")
         result: dict[str, list[int]] = {}
         skipped = 0
+        foreign = 0
+        # 监听频道未配置时不过滤（此时删除同步本身已禁用）
+        filter_enabled = bool(_channel_id_candidates(config.telegram_channel_id))
         for row in cur.fetchall():
-            file_id, name, parts = str(row[0]), row[1], row[2]
+            file_id, name, parts, channel_id = str(row[0]), row[1], row[2], row[3]
             if is_md5_name(name):
                 skipped += 1
+                continue
+            # 关键过滤：只纳入"分块存储在监听频道"的文件。
+            # 把其他频道的 parts 混进映射，会在监听频道里查不到 →
+            # 被误判为"消息缺失" → 触发误删或安全保护刷屏
+            if filter_enabled and not channel_ids_match(channel_id, config.telegram_channel_id):
+                foreign += 1
                 continue
             msg_ids = [part["id"] for part in parts if "id" in part]
             if msg_ids:
@@ -1116,9 +1151,70 @@ def query_db_mapping(config: RuntimeConfig) -> dict[str, list[int]]:
         conn.close()
         if skipped:
             logger.info(f"数据库映射中跳过 {skipped} 个 MD5 分片记录")
+        if foreign:
+            logger.warning(
+                f"数据库中有 {foreign} 个文件的分块存储在其他频道（非监听频道 "
+                f"{config.telegram_channel_id}），已排除出删除同步"
+            )
         return result
     except Exception as exc:
         logger.warning(f"TelDrive 数据库映射查询失败: {exc}")
+        return {}
+
+
+def query_db_foreign_file_ids(config: RuntimeConfig) -> set[str]:
+    """返回分块存储在"非监听频道"的文件 ID 集合（这些文件不参与删除同步）"""
+    if not config.db_enabled:
+        return set()
+
+    try:
+        conn = psycopg2.connect(
+            host=config.db_host,
+            port=config.db_port,
+            user=config.db_user,
+            password=config.db_password,
+            database=config.db_name,
+        )
+        cur = conn.cursor()
+        cur.execute("SELECT id, channel_id FROM teldrive.files WHERE type='file' AND parts IS NOT NULL")
+        filter_enabled = bool(_channel_id_candidates(config.telegram_channel_id))
+        if not filter_enabled:
+            conn.close()
+            return set()
+        result = {
+            str(row[0]) for row in cur.fetchall()
+            if not channel_ids_match(row[1], config.telegram_channel_id)
+        }
+        conn.close()
+        return result
+    except Exception as exc:
+        logger.warning(f"TelDrive 外频道文件查询失败: {exc}")
+        return set()
+
+
+def query_db_channel_distribution(config: RuntimeConfig) -> dict[str, int]:
+    """统计数据库中分块的频道分布：channel_id -> 文件数（用于诊断）"""
+    if not config.db_enabled:
+        return {}
+
+    try:
+        conn = psycopg2.connect(
+            host=config.db_host,
+            port=config.db_port,
+            user=config.db_user,
+            password=config.db_password,
+            database=config.db_name,
+        )
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT channel_id, count(*) FROM teldrive.files "
+            "WHERE type='file' AND parts IS NOT NULL GROUP BY channel_id"
+        )
+        result = {str(row[0]): int(row[1]) for row in cur.fetchall()}
+        conn.close()
+        return result
+    except Exception as exc:
+        logger.warning(f"TelDrive 频道分布查询失败: {exc}")
         return {}
 
 
@@ -1135,9 +1231,13 @@ def query_db_msg_ids(config: RuntimeConfig) -> set[int]:
             database=config.db_name,
         )
         cur = conn.cursor()
-        cur.execute("SELECT parts FROM teldrive.files WHERE type='file' AND parts IS NOT NULL")
+        cur.execute("SELECT parts, channel_id FROM teldrive.files WHERE type='file' AND parts IS NOT NULL")
         all_ids: set[int] = set()
-        for (parts,) in cur.fetchall():
+        filter_enabled = bool(_channel_id_candidates(config.telegram_channel_id))
+        for parts, channel_id in cur.fetchall():
+            # msg.id 来自监听频道，跨频道的 parts 比对没有意义
+            if filter_enabled and not channel_ids_match(channel_id, config.telegram_channel_id):
+                continue
             for part in parts:
                 if "id" in part:
                     all_ids.add(part["id"])
@@ -1304,8 +1404,10 @@ async def delete_teldrive_files_for_missing_messages(
     # 本地映射可能因同名覆盖/迁移继承而携带过期 msg_id，
     # 过期映射应当刷新而不是触发删除
     db_mapping: dict[str, list[int]] = {}
+    foreign_file_ids: set[str] = set()
     if config.db_enabled:
         db_mapping = await run_blocking_io(query_db_mapping, config)
+        foreign_file_ids = await run_blocking_io(query_db_foreign_file_ids, config)
     deleted_count = 0
     mapping_changed = False
 
@@ -1319,6 +1421,17 @@ async def delete_teldrive_files_for_missing_messages(
         if not file_info:
             mapping.pop(file_id, None)
             mapping_changed = True
+            continue
+
+        if file_id in foreign_file_ids:
+            # 分块存储在其他频道：监听频道里查不到属正常现象，
+            # 绝不能据此删除。从本地映射剔除，不再参与删除同步
+            mapping.pop(file_id, None)
+            mapping_changed = True
+            logger.warning(
+                f"文件分块存储在非监听频道，已排除出删除同步: "
+                f"{file_info.get('name', file_id)} (file_id={file_id})"
+            )
             continue
 
         authoritative_ids = normalize_message_ids(db_mapping.get(file_id)) if db_mapping else []
@@ -1431,15 +1544,45 @@ async def diagnose_full_missing(client: TelegramClient, config: RuntimeConfig) -
     返回一条可操作的诊断结论（追加在安全保护日志后）。
     """
     channel_id = config.telegram_channel_id
+    hints: list[str] = []
+    # 0) 数据库频道分布对照：直接指出分块实际存在哪些频道
+    if config.db_enabled:
+        try:
+            distribution = await run_blocking_io(query_db_channel_distribution, config)
+        except Exception:
+            distribution = {}
+        if distribution:
+            matched = {ch: n for ch, n in distribution.items() if channel_ids_match(ch, channel_id)}
+            others = {ch: n for ch, n in distribution.items() if not channel_ids_match(ch, channel_id)}
+            if not matched and others:
+                dist_text = ", ".join(f"{ch}({n} 个文件)" for ch, n in others.items())
+                hints.append(
+                    f"数据库显示分块实际存储在频道 {dist_text}，"
+                    f"而监听频道 {channel_id} 中没有任何分块——"
+                    f"请把 [telegram].channel_id 改为上述频道之一"
+                )
+            elif others:
+                dist_text = ", ".join(f"{ch}({n})" for ch, n in others.items())
+                hints.append(f"另有部分文件的分块在其他频道: {dist_text}（这些文件已排除出删除同步）")
+            # api_id 被误填为频道 ID 的特征：-100 前缀 + api_id
+            api_id_str = str(config.telegram_api_id or "")
+            for ch in distribution:
+                base = str(ch).lstrip("-")
+                if api_id_str and (base == api_id_str or base == f"100{api_id_str}"):
+                    hints.append(
+                        f"频道 {ch} 看起来是把 api_id ({api_id_str}) 误填成了频道 ID，"
+                        f"该频道并不存在，对应文件需要在 TelDrive 中修正或重新上传"
+                    )
     # 1) 频道本身是否可达
     try:
         entity = await client.get_entity(channel_id)
     except Exception as exc:
-        return (
-            f"诊断: 无法访问频道 {channel_id}（{type(exc).__name__}: {exc}）。"
+        hints.append(
+            f"无法访问频道 {channel_id}（{type(exc).__name__}: {exc}）。"
             f"请确认 [telegram].channel_id 正确（应为 TelDrive 实际存储分块的频道，"
             f"超级群/频道需 -100 前缀）且当前账号已加入该频道"
         )
+        return "诊断: " + "；".join(hints)
     title = getattr(entity, "title", "") or getattr(entity, "username", "") or str(channel_id)
     # 2) 频道可达但所有 ID 都查不到 → 抽样对比频道里实际有什么
     try:
@@ -1448,17 +1591,19 @@ async def diagnose_full_missing(client: TelegramClient, config: RuntimeConfig) -
     except Exception:
         newest_id = 0
     if not newest_id:
-        return (
-            f"诊断: 频道「{title}」可访问但没有任何消息。"
+        hints.append(
+            f"频道「{title}」可访问但没有任何消息。"
             f"[telegram].channel_id 很可能指向了错误的频道"
             f"（TelDrive 的分块存储在另一个频道里）"
         )
-    return (
-        f"诊断: 频道「{title}」可访问，最新消息 ID={newest_id}，"
-        f"但映射中的消息 ID 全部不存在。若 [teldrive].channel_id 与 "
-        f"[telegram].channel_id 指向不同频道，请把后者改为 TelDrive 实际使用的频道；"
-        f"若频道曾被迁移/重建，请删除 session 文件重新登录"
-    )
+    else:
+        hints.append(
+            f"频道「{title}」可访问，最新消息 ID={newest_id}，"
+            f"但映射中的消息 ID 全部不存在。若分块实际在其他频道，"
+            f"请修正 [telegram].channel_id；若频道曾被迁移/重建，"
+            f"请删除 session 文件重新登录"
+        )
+    return "诊断: " + "；".join(hints)
 
 
 async def sync_deletions(client: TelegramClient, config: RuntimeConfig):
@@ -1467,6 +1612,27 @@ async def sync_deletions(client: TelegramClient, config: RuntimeConfig):
         return
 
     logger.info(f"删除同步已启动，轮询间隔 {config.sync_interval} 秒")
+    # 启动自检：对照数据库里分块的实际存储频道与监听频道，配置错误立刻可见
+    if config.db_enabled:
+        try:
+            distribution = await run_blocking_io(query_db_channel_distribution, config)
+        except Exception:
+            distribution = {}
+        if distribution:
+            matched_files = sum(n for ch, n in distribution.items() if channel_ids_match(ch, config.telegram_channel_id))
+            foreign = {ch: n for ch, n in distribution.items() if not channel_ids_match(ch, config.telegram_channel_id)}
+            if not matched_files and foreign:
+                dist_text = ", ".join(f"{ch}({n} 个文件)" for ch, n in foreign.items())
+                logger.error(
+                    f"⚠️ 配置检查: 监听频道 {config.telegram_channel_id} 中没有任何 TelDrive 分块！"
+                    f"分块实际存储在: {dist_text}。删除同步在修正 [telegram].channel_id 前不会生效"
+                )
+            elif foreign:
+                dist_text = ", ".join(f"{ch}({n})" for ch, n in foreign.items())
+                logger.warning(
+                    f"配置检查: {sum(foreign.values())} 个文件的分块存储在非监听频道（{dist_text}），"
+                    f"这些文件已排除出删除同步"
+                )
     try:
         prev_files = await run_blocking_io(get_teldrive_files, config)
     except asyncio.CancelledError:
