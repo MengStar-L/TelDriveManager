@@ -64,6 +64,10 @@ INTERNAL_DELETE_GRACE_SECONDS = 900.0
 MESSAGE_FETCH_BATCH_SIZE = 100
 INITIAL_MAPPING_SCAN_TIMEOUT = 90
 INITIAL_MAPPING_PROGRESS_EVERY = 100
+# 安全保护连续触发的退避：连续 N 次 100% 缺失后，按倍数拉长检查间隔，
+# 避免每轮反复调用 Telegram API + 刷屏报错（配置异常不会自己恢复）
+MISSING_SAFE_BACKOFF_AFTER = 3
+MISSING_SAFE_BACKOFF_MAX_MULTIPLIER = 20
 
 
 DEFAULT_CONFIG: dict[str, dict[str, Any]] = {
@@ -1421,6 +1425,42 @@ MISSING_SAFE_RATIO = 0.5
 MISSING_SAFE_ABS_THRESHOLD = 10
 
 
+async def diagnose_full_missing(client: TelegramClient, config: RuntimeConfig) -> str:
+    """100% 缺失时的根因诊断：区分'频道不可达/配错频道'与'消息真的全被删了'。
+
+    返回一条可操作的诊断结论（追加在安全保护日志后）。
+    """
+    channel_id = config.telegram_channel_id
+    # 1) 频道本身是否可达
+    try:
+        entity = await client.get_entity(channel_id)
+    except Exception as exc:
+        return (
+            f"诊断: 无法访问频道 {channel_id}（{type(exc).__name__}: {exc}）。"
+            f"请确认 [telegram].channel_id 正确（应为 TelDrive 实际存储分块的频道，"
+            f"超级群/频道需 -100 前缀）且当前账号已加入该频道"
+        )
+    title = getattr(entity, "title", "") or getattr(entity, "username", "") or str(channel_id)
+    # 2) 频道可达但所有 ID 都查不到 → 抽样对比频道里实际有什么
+    try:
+        recent = await client.get_messages(channel_id, limit=1)
+        newest_id = recent[0].id if recent else 0
+    except Exception:
+        newest_id = 0
+    if not newest_id:
+        return (
+            f"诊断: 频道「{title}」可访问但没有任何消息。"
+            f"[telegram].channel_id 很可能指向了错误的频道"
+            f"（TelDrive 的分块存储在另一个频道里）"
+        )
+    return (
+        f"诊断: 频道「{title}」可访问，最新消息 ID={newest_id}，"
+        f"但映射中的消息 ID 全部不存在。若 [teldrive].channel_id 与 "
+        f"[telegram].channel_id 指向不同频道，请把后者改为 TelDrive 实际使用的频道；"
+        f"若频道曾被迁移/重建，请删除 session 文件重新登录"
+    )
+
+
 async def sync_deletions(client: TelegramClient, config: RuntimeConfig):
     if not config.telegram_channel_id:
         logger.warning(f"Telegram 频道 ID 为空或为 0，删除同步已禁用（当前值: {config.telegram_channel_id!r}）")
@@ -1437,6 +1477,10 @@ async def sync_deletions(client: TelegramClient, config: RuntimeConfig):
     prev_ids = set(prev_files.keys())
     logger.info(f"初始 TelDrive 快照共 {len(prev_ids)} 个文件")
     pending_deletions: dict[str, dict[str, Any]] = {}
+    # 安全保护连续触发计数与退避：配置异常不会自己恢复，
+    # 反复全量查询只会刷屏 + 浪费 Telegram API 配额
+    safe_guard_strikes = 0
+    skip_message_check_rounds = 0
 
     while True:
         await asyncio.sleep(config.sync_interval)
@@ -1444,7 +1488,9 @@ async def sync_deletions(client: TelegramClient, config: RuntimeConfig):
             curr_files = await run_blocking_io(get_teldrive_files, config)
             mapping = await run_blocking_io(load_mapping)
             tracked_message_ids = merge_message_ids(*mapping.values())
-            if tracked_message_ids:
+            if tracked_message_ids and skip_message_check_rounds > 0:
+                skip_message_check_rounds -= 1
+            elif tracked_message_ids:
                 existing_message_ids = await get_existing_message_ids(client, config.telegram_channel_id, tracked_message_ids)
                 if existing_message_ids is None:
                     logger.warning("Telegram 消息状态查询失败，本轮跳过删除同步")
@@ -1455,11 +1501,31 @@ async def sync_deletions(client: TelegramClient, config: RuntimeConfig):
                         missing_count = len(missing_message_ids)
                         ratio = missing_count / total if total else 0
                         if ratio > MISSING_SAFE_RATIO and missing_count > MISSING_SAFE_ABS_THRESHOLD:
+                            safe_guard_strikes += 1
                             logger.error(
                                 f"⚠️ 安全保护触发！缺失消息 {missing_count}/{total} ({ratio:.0%}) 超过安全阈值，"
-                                f"疑似频道 ID 错误或网络异常，已阻止本轮所有删除操作"
+                                f"已阻止本轮所有删除操作（连续第 {safe_guard_strikes} 次）"
                             )
+                            # 100% 缺失几乎必然是配置/会话异常而非真实删除 → 给出根因诊断
+                            if ratio >= 0.999 and safe_guard_strikes <= 2:
+                                try:
+                                    logger.error(await diagnose_full_missing(client, config))
+                                except Exception as exc:
+                                    logger.debug(f"缺失诊断失败: {type(exc).__name__}: {exc}")
+                            if safe_guard_strikes >= MISSING_SAFE_BACKOFF_AFTER:
+                                multiplier = min(
+                                    MISSING_SAFE_BACKOFF_MAX_MULTIPLIER,
+                                    2 ** (safe_guard_strikes - MISSING_SAFE_BACKOFF_AFTER + 1),
+                                )
+                                skip_message_check_rounds = multiplier
+                                logger.warning(
+                                    f"安全保护已连续触发 {safe_guard_strikes} 次，"
+                                    f"消息缺失检查退避 {multiplier} 轮"
+                                    f"（约 {multiplier * config.sync_interval} 秒）；"
+                                    f"文件快照同步不受影响。修正配置并保存后将自动恢复"
+                                )
                         else:
+                            safe_guard_strikes = 0
                             deleted_count = await delete_teldrive_files_for_missing_messages(
                                 config,
                                 missing_message_ids,
@@ -1470,6 +1536,8 @@ async def sync_deletions(client: TelegramClient, config: RuntimeConfig):
                                 logger.warning(f"检测到 Telegram 文件分块缺失，已自动删除 {deleted_count} 个 TelDrive 文件")
                                 curr_files = await run_blocking_io(get_teldrive_files, config)
                                 mapping = await run_blocking_io(load_mapping)
+                    else:
+                        safe_guard_strikes = 0
 
             curr_ids = set(curr_files.keys())
             curr_names = {info["name"] for info in curr_files.values() if isinstance(info, dict) and info.get("name")}
