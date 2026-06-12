@@ -38,3 +38,4 @@ history_*.md
 # Downloads dir
 downloads/
 
+db_backup_*.json
