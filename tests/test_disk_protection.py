@@ -83,7 +83,8 @@ class DiskGateTests(unittest.IsolatedAsyncioTestCase):
 
     # ── 停活跃：实际剩余跌破阈值 ──
 
-    async def test_free_below_threshold_pauses_active_too(self):
+    async def test_free_below_threshold_pauses_all_when_none_fits(self):
+        # 物理极限：free=3G，唯一活跃任务剩余 7G 塞不进 → 全停并标记 stalled
         manager = self.make_manager(free_gb=3, threshold_gb=5)
 
         await manager._sync_disk_space_download_protection(
@@ -96,6 +97,44 @@ class DiskGateTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(manager._disk_gate_paused_gids["a-1"])   # 曾活跃
         self.assertFalse(manager._disk_gate_paused_gids["w-1"])
         self.assertTrue(manager._disk_protection_active)
+        self.assertTrue(manager._disk_protection_info["stalled"])
+
+    async def test_free_below_threshold_keeps_smallest_remaining_running(self):
+        # 防死锁核心：free=3G < threshold 5G，但有任务剩余 2G 能塞进 → 保留它继续
+        # 跑（去下完触发上传释放空间），其余活跃任务暂停；不应 stalled。
+        manager = self.make_manager(free_gb=3, threshold_gb=5)
+
+        await manager._sync_disk_space_download_protection(
+            active=[
+                self.item("a-big", "active", total_gb=10, completed_gb=2),    # 剩 8G
+                self.item("a-small", "active", total_gb=5, completed_gb=3),   # 剩 2G
+            ],
+            waiting=[],
+        )
+
+        # 最接近完成且放得下的 a-small 继续跑；a-big 暂停
+        self.assertEqual(manager.aria2.force_paused, ["a-big"])
+        self.assertIn("a-big", manager._disk_gate_paused_gids)
+        self.assertNotIn("a-small", manager._disk_gate_paused_gids)
+        self.assertFalse(manager._disk_protection_info["stalled"])
+        self.assertTrue(manager._disk_protection_active)  # 仍有持有 → 保护激活
+
+    async def test_free_below_threshold_unknown_size_always_paused(self):
+        # 未知大小（remaining=0）无法核算写入预算 → 紧急状态下一律暂停，
+        # 即便另有小任务在跑，也不放过未知大小的任务无界写盘。
+        manager = self.make_manager(free_gb=3, threshold_gb=5)
+
+        await manager._sync_disk_space_download_protection(
+            active=[
+                self.item("a-small", "active", total_gb=5, completed_gb=3),  # 剩 2G
+                self.item("a-unknown", "active", total_gb=0, completed_gb=0),  # 未知
+            ],
+            waiting=[],
+        )
+
+        self.assertIn("a-unknown", manager.aria2.force_paused)
+        self.assertNotIn("a-small", manager.aria2.force_paused)
+        self.assertFalse(manager._disk_protection_info["stalled"])
 
     # ── 恢复（滞回） ──
 

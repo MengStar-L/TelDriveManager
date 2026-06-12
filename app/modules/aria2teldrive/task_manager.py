@@ -970,6 +970,7 @@ class TaskManager:
         projected_free = free_bytes - pending_write_bytes
 
         paused_now = 0
+        disk_gate_stalled = False
 
         # 第一级：预算不足 → 暂停等待中的任务（挡新增）
         if projected_free < threshold_bytes and ungated_waiting:
@@ -977,14 +978,39 @@ class TaskManager:
                 if await self._force_pause_for_disk_gate(item, was_active=False):
                     paused_now += 1
 
-        # 第二级：实际剩余跌破阈值 → 暂停活跃下载（停写盘）
+        # 第二级：实际剩余跌破阈值 → 不再无差别全停，而是保留一个"能在当前可用
+        # 空间内下完"的最小活跃子集继续写盘（按接近完成度优先），其余暂停。这样
+        # 始终有任务能下完去触发上传、删本地文件释放空间，打破"并行任务全停且
+        # 互相等待"的死锁；保留子集的剩余写入量受可用空间约束，绝不会写穿磁盘。
         if free_bytes < threshold_bytes:
-            for item in active:
-                gid = item.get("gid", "")
-                if self._is_serial_gate_held(gid):
+            gated_active = [
+                item for item in active
+                if item.get("gid") and not self._is_serial_gate_held(item.get("gid", ""))
+            ]
+            # 仅已知大小（remaining>0）的任务可作"续跑"候选：未知大小无法核算写入
+            # 预算，紧急状态下一律暂停，避免无界写盘撑爆磁盘。
+            candidates = sorted(
+                (item for item in gated_active if self._item_remaining_bytes(item) > 0),
+                key=self._item_remaining_bytes,
+            )
+            keep_running: set[str] = set()
+            budget = free_bytes
+            for item in candidates:
+                remaining = self._item_remaining_bytes(item)
+                if remaining <= budget:
+                    keep_running.add(item.get("gid", ""))
+                    budget -= remaining
+                else:
+                    break  # 升序排列：当前放不下，后续更放不下
+            for item in gated_active:
+                if item.get("gid") in keep_running:
                     continue
                 if await self._force_pause_for_disk_gate(item, was_active=True):
                     paused_now += 1
+            # 物理极限：连剩余最小的活跃任务都塞不进当前可用空间，无法靠"下完任一
+            # 任务"自救。已全部暂停以保护系统盘，此时只能等在传任务上传释放空间；
+            # 若无在传任务，需用户介入（扩容 / 降并发 / 取消大任务）。
+            disk_gate_stalled = bool(gated_active) and not keep_running
 
         # 恢复（滞回）：剩余空间回到 resume 线之上
         resumed_now = 0
@@ -1013,12 +1039,20 @@ class TaskManager:
         should_protect = held_count > 0 or free_bytes < threshold_bytes
         configured_max = self._get_user_max_concurrent_downloads()
         self._disk_protection_active = should_protect
+        if disk_gate_stalled:
+            message = (
+                f"磁盘空间严重不足，已暂停全部 {held_count} 个下载："
+                "单个任务体积超过当前可用空间，无法靠下载完成自行释放。"
+                "请等待在传任务上传完毕，或扩容磁盘 / 降低并发 / 取消超大任务。"
+            )
+        elif should_protect:
+            message = f"磁盘空间不足，已暂停 {held_count} 个下载，等待上传释放空间"
+        else:
+            message = ""
         self._disk_protection_info = {
             "active": should_protect,
-            "message": (
-                f"磁盘空间不足，已暂停 {held_count} 个下载，等待上传释放空间"
-                if should_protect else ""
-            ),
+            "message": message,
+            "stalled": disk_gate_stalled,
             "free_bytes": free_bytes,
             "projected_free_bytes": projected_free,
             "threshold_bytes": threshold_bytes,
@@ -1033,6 +1067,12 @@ class TaskManager:
                 f"磁盘闸门已暂停 {paused_now} 个下载: free={free_bytes}, "
                 f"projected_free={projected_free}, threshold={threshold_bytes}, "
                 f"held={held_count}"
+            )
+        if disk_gate_stalled:
+            logger.error(
+                f"磁盘闸门停滞：单任务体积超过可用空间，已全部暂停。"
+                f"free={free_bytes}, threshold={threshold_bytes}, held={held_count}。"
+                f"需等待在传任务释放空间，或扩容 / 降并发 / 取消超大任务"
             )
         if resumed_now:
             logger.info(
