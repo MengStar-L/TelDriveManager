@@ -101,7 +101,8 @@ def _join_teldrive_path(base_path: str, sub_path: str = "") -> str:
 
 
 async def _register_aria2_task(gid: str, url: str, filename: str, teldrive_path: str,
-                               aria2_options: Optional[dict] = None):
+                               aria2_options: Optional[dict] = None,
+                               source_size_bytes: int = 0):
     await task_manager.register_external_task(
         gid,
         url,
@@ -109,6 +110,7 @@ async def _register_aria2_task(gid: str, url: str, filename: str, teldrive_path:
         teldrive_path=_normalize_teldrive_path(teldrive_path),
         status="pending",
         aria2_options=aria2_options,
+        source_size_bytes=source_size_bytes,
     )
 
 
@@ -991,6 +993,7 @@ async def _aria2_push_only(files: List[dict], index: int, delete_pikpak_ids: Lis
                     task_ctx["url"], task_ctx["name"],
                     teldrive_path=task_ctx["teldrive_path"],
                     aria2_options=opts,
+                    source_size_bytes=int(file_info.get("size", 0) or 0),
                 )
                 success_count += 1
                 await _broadcast_link_pushed(index, file_info, sequence, len(files), push_target)
@@ -1013,6 +1016,7 @@ async def _aria2_push_only(files: List[dict], index: int, delete_pikpak_ids: Lis
                 await _register_aria2_task(
                     gid, task_ctx["url"], task_ctx["name"], task_ctx["teldrive_path"],
                     aria2_options=opts,
+                    source_size_bytes=int(file_info.get("size", 0) or 0),
                 )
                 success_count += 1
                 await _broadcast_link_pushed(index, file_info, sequence, len(files), push_target)
@@ -1317,12 +1321,14 @@ async def _process_share_download(share_id: str, file_ids: List[str], pass_code_
                 if keep_structure:
                     task_teldrive_path = _join_teldrive_path(base_teldrive_path, subdir)
 
+                source_size = int(display_info.get("size") or url_info.get("size") or 0)
                 if cfg.get("upload", {}).get("serial_transfer_mode", False):
                     await task_manager.enqueue_serial_task(
                         url_info["url"],
                         display_info.get("name") or url_info.get("name") or "",
                         teldrive_path=task_teldrive_path,
                         aria2_options=opts,
+                        source_size_bytes=source_size,
                     )
                     success_count += 1
                     await _broadcast_link_pushed(1, display_info, sequence, len(all_urls), push_target)
@@ -1340,6 +1346,7 @@ async def _process_share_download(share_id: str, file_ids: List[str], pass_code_
                         display_info.get("name") or url_info.get("name") or "",
                         task_teldrive_path,
                         aria2_options=opts,
+                        source_size_bytes=source_size,
                     )
                     success_count += 1
                     await _broadcast_link_pushed(1, display_info, sequence, len(all_urls), push_target)

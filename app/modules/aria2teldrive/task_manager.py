@@ -13,7 +13,7 @@ from typing import Optional, Set
 from pathlib import Path
 
 from app.config import load_config
-from app.aria2_client import Aria2Client
+from app.aria2_client import Aria2Client, _format_size
 from app.modules.aria2teldrive.teldrive_client import TelDriveClient
 from app import database as db
 
@@ -99,6 +99,8 @@ class TaskManager:
         self._serial_gate_paused_gids: Set[str] = set()
         self._serial_gate_releasing_gids: Set[str] = set()
         self._serial_dispatch_lock = asyncio.Lock()
+        # 并行模式：应用层排队任务派发锁
+        self._parallel_dispatch_lock = asyncio.Lock()
 
 
 
@@ -413,7 +415,8 @@ class TaskManager:
 
     async def enqueue_serial_task(self, url: str, filename: Optional[str] = None,
                                   teldrive_path: str = "/", aria2_options: Optional[dict] = None,
-                                  task_id: Optional[str] = None) -> dict:
+                                  task_id: Optional[str] = None,
+                                  source_size_bytes: int = 0) -> dict:
         normalized_path = self._normalize_teldrive_path(teldrive_path)
         options = self._deserialize_aria2_options(aria2_options)
         if filename and not options.get("out"):
@@ -423,21 +426,25 @@ class TaskManager:
 
         task_id = task_id or f"queued-{uuid.uuid4().hex}"
         options_json = self._serialize_aria2_options(options)
-        await db.add_task(task_id, url, filename, normalized_path, options_json)
-        await db.update_task(
-            task_id,
-            status="pending",
-            aria2_gid=None,
-            aria2_options_json=options_json,
-            teldrive_path=normalized_path,
-            download_progress=0.0,
-            upload_progress=0.0,
-            download_speed="",
-            upload_speed="",
-            file_size="",
-            error=None,
-            local_path=None,
-        )
+        source_size_bytes = self._coerce_source_size_bytes(source_size_bytes)
+        # 与并行派发器互斥，避免 INSERT→UPDATE 中间态被扫描提交后又被覆盖
+        async with self._parallel_dispatch_lock:
+            await db.add_task(task_id, url, filename, normalized_path, options_json)
+            await db.update_task(
+                task_id,
+                status="pending",
+                aria2_gid=None,
+                aria2_options_json=options_json,
+                teldrive_path=normalized_path,
+                download_progress=0.0,
+                upload_progress=0.0,
+                download_speed="",
+                upload_speed="",
+                file_size=self._format_source_size(source_size_bytes),
+                source_size_bytes=source_size_bytes,
+                error=None,
+                local_path=None,
+            )
         self._clear_runtime_task_fields(task_id)
         await self._broadcast_task_update(task_id)
         task = self._merge_runtime_task_fields(await db.get_task(task_id))
@@ -494,7 +501,9 @@ class TaskManager:
                 local_path=None,
                 download_progress=0.0,
                 download_speed="",
-                file_size="",
+                file_size=self._format_source_size(
+                    self._coerce_source_size_bytes(task.get("source_size_bytes"))
+                ),
                 error=None,
             )
             self._known_gids.discard(gid)
@@ -567,7 +576,9 @@ class TaskManager:
                 upload_progress=0.0,
                 download_speed="",
                 upload_speed="",
-                file_size="",
+                file_size=self._format_source_size(
+                    self._coerce_source_size_bytes(task.get("source_size_bytes"))
+                ),
                 error=None,
                 local_path=None,
             )
@@ -578,6 +589,66 @@ class TaskManager:
             await self._broadcast_task_update(task["task_id"])
             logger.info(f"serial dispatcher released task {task['task_id']} to aria2 gid={gid}")
             return True
+
+    async def _dispatch_queued_parallel_downloads(self) -> int:
+        """并行模式：把应用层排队任务（pending 且未提交 aria2）全部交给 aria2。
+
+        串行模式排队的任务只存在于 DB（aria2_gid 为空），由串行调度器逐个放行；
+        切回并行模式后串行调度器停转，这些任务若无人接手会永远停在"等待中"。
+        这里统一把它们提交给 aria2，并发由 aria2 的 max-concurrent-downloads
+        控制；磁盘保护激活时以暂停态进入并登记磁盘闸门，待空间恢复后放行。
+        """
+        if self._is_serial_transfer_mode_enabled() or not self.aria2:
+            return 0
+        if self._parallel_dispatch_lock.locked():
+            return 0
+
+        async with self._parallel_dispatch_lock:
+            try:
+                queued = await db.get_pending_queued_tasks()
+            except Exception as e:
+                logger.debug(f"parallel dispatcher cannot read queued tasks: {e}")
+                return 0
+            if not queued:
+                return 0
+
+            aria2 = self._require_aria2()
+            defer = self.should_defer_new_downloads()
+            released = 0
+            for task in queued:
+                task_id = task["task_id"]
+                url = str(task.get("url") or "").strip()
+                if not url:
+                    await db.update_task(task_id, status="failed", error="missing download URL")
+                    await self._broadcast_task_update(task_id)
+                    continue
+
+                options = self._prepare_aria2_options(task)
+                submit_options = dict(options, pause="true") if defer else options
+                try:
+                    gid = await aria2.add_uri(url, submit_options)
+                except Exception as e:
+                    logger.warning(f"parallel dispatcher failed to add aria2 task {task_id}: {e}")
+                    await db.update_task(task_id, status="pending", download_speed="", error=str(e))
+                    await self._broadcast_task_update(task_id)
+                    continue
+
+                if defer:
+                    self._hold_gid_for_disk_gate(gid)
+                await db.update_task(
+                    task_id,
+                    status="pending" if defer else "downloading",
+                    aria2_gid=gid,
+                    aria2_options_json=self._serialize_aria2_options(options),
+                    error=None,
+                )
+                self._known_gids.add(gid)
+                self._terminal_gids.discard(gid)
+                await self._broadcast_task_update(task_id)
+                released += 1
+                logger.info(f"parallel dispatcher released task {task_id} to aria2 gid={gid}")
+
+            return released
 
     async def _has_serial_resume_blockers(self, stopped: Optional[list] = None) -> bool:
         if self._has_active_upload_work():
@@ -742,6 +813,17 @@ class TaskManager:
             await aria2.change_global_option(options)
         except Exception:
             pass
+
+    @staticmethod
+    def _coerce_source_size_bytes(value) -> int:
+        try:
+            return max(0, int(value or 0))
+        except (TypeError, ValueError):
+            return 0
+
+    @staticmethod
+    def _format_source_size(size_bytes: int) -> str:
+        return _format_size(size_bytes) if size_bytes > 0 else ""
 
     @staticmethod
     def _item_remaining_bytes(item: dict) -> int:
@@ -1694,10 +1776,12 @@ class TaskManager:
             downloaded_bytes = min(downloaded_bytes, total_bytes)
         current_connections = max(0, int(parsed.get("connections") or 0))
         max_connections = max(current_connections, self._get_configured_connection_limit())
+        # aria2 未报出大小时置空，让前端回退显示任务记录里的来源大小
+        total_text = (parsed.get("total_text") or parsed.get("file_size") or "") if total_bytes > 0 else ""
         return {
             "downloaded_text": parsed.get("downloaded_text") or "0 B",
             "downloaded_bytes": downloaded_bytes,
-            "total_text": parsed.get("total_text") or parsed.get("file_size") or "0 B",
+            "total_text": total_text,
             "total_bytes": total_bytes,
             "eta_text": parsed.get("eta_text") or "" if task_status == "downloading" else "",
             "connections": current_connections if task_status in ("downloading", "paused") else 0,
@@ -1950,7 +2034,7 @@ class TaskManager:
                         aria2_gid=gid,
                         download_progress=100.0 if aria2_status == "complete" else parsed["progress"],
                         download_speed=parsed["speed_str"] if initial_status == "downloading" else "",
-                        file_size=parsed["file_size"],
+                        file_size=parsed["file_size"] if int(parsed.get("total_length") or 0) > 0 else "",
                         local_path=parsed["file_path"]
                     )
                     self._set_runtime_task_fields(
@@ -2005,8 +2089,10 @@ class TaskManager:
             update_data = {
                 "download_progress": parsed["progress"],
                 "download_speed": parsed["speed_str"],
-                "file_size": parsed["file_size"],
             }
+            # aria2 未探测到大小时不覆盖已有值（可能是来源预填的大小）
+            if int(parsed.get("total_length") or 0) > 0:
+                update_data["file_size"] = parsed["file_size"]
             if parsed["filename"]:
                 update_data["filename"] = parsed["filename"]
             if parsed["file_path"]:
@@ -2059,6 +2145,11 @@ class TaskManager:
             await self._dispatch_next_serial_download(active, waiting, stopped)
         except Exception as e:
             logger.debug(f"serial dispatcher failed: {e}")
+
+        try:
+            await self._dispatch_queued_parallel_downloads()
+        except Exception as e:
+            logger.debug(f"parallel dispatcher failed: {e}")
 
         self._last_download_speed = tracked_download_speed
 
@@ -2952,7 +3043,8 @@ class TaskManager:
 
     async def register_external_task(self, gid: str, url: str, filename: Optional[str] = None,
                                      teldrive_path: str = "/", status: str = "pending",
-                                     aria2_options: Optional[dict] = None) -> Optional[dict]:
+                                     aria2_options: Optional[dict] = None,
+                                     source_size_bytes: int = 0) -> Optional[dict]:
         """为外部提交到 aria2 的任务注册 TelDrive 目标目录。"""
         gid = str(gid or "").strip()
         if not gid:
@@ -2960,14 +3052,23 @@ class TaskManager:
 
         normalized_path = self._normalize_teldrive_path(teldrive_path)
         options_json = self._serialize_aria2_options(aria2_options)
-        await db.add_task(gid, url, filename, normalized_path, options_json)
-        await db.update_task(
-            gid,
+        source_size_bytes = self._coerce_source_size_bytes(source_size_bytes)
+        update_fields = dict(
             status=status,
             aria2_gid=gid,
             teldrive_path=normalized_path,
             aria2_options_json=options_json,
         )
+        if source_size_bytes > 0:
+            update_fields["source_size_bytes"] = source_size_bytes
+            # 仅在尚未开始下载时用来源大小预填显示，避免覆盖 aria2 实测值
+            if status != "downloading":
+                update_fields["file_size"] = self._format_source_size(source_size_bytes)
+        # 与并行派发器互斥：INSERT（pending 无 gid）到 UPDATE（写入 gid）之间
+        # 存在 await 边界，避免派发器扫到中间态把同一任务重复提交给 aria2
+        async with self._parallel_dispatch_lock:
+            await db.add_task(gid, url, filename, normalized_path, options_json)
+            await db.update_task(gid, **update_fields)
         self._known_gids.add(gid)
         await self._broadcast_task_update(gid)
         return self._merge_runtime_task_fields(await db.get_task(gid))

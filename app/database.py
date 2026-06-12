@@ -22,6 +22,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     download_speed TEXT DEFAULT '',
     upload_speed TEXT DEFAULT '',
     file_size TEXT DEFAULT '',
+    source_size_bytes INTEGER DEFAULT 0,
     error TEXT,
     teldrive_path TEXT DEFAULT '/',
     aria2_gid TEXT,
@@ -112,6 +113,7 @@ async def init_db():
     await _ensure_column(conn, "tasks", "upload_started_at", "TIMESTAMP")
     await _ensure_column(conn, "tasks", "upload_finished_at", "TIMESTAMP")
     await _ensure_column(conn, "tasks", "upload_source_fingerprint", "TEXT")
+    await _ensure_column(conn, "tasks", "source_size_bytes", "INTEGER DEFAULT 0")
     await conn.execute(CREATE_PROGRESS_LOGS_TABLE_SQL)
     await conn.execute(CREATE_PARSE_JOBS_TABLE_SQL)
     await conn.execute(
@@ -193,6 +195,23 @@ async def get_next_pending_queued_task() -> Optional[dict]:
     ) as cursor:
         row = await cursor.fetchone()
         return dict(row) if row else None
+
+
+async def get_pending_queued_tasks(limit: int = 50) -> list:
+    """Return app-queued downloads (oldest first) not yet submitted to aria2."""
+    conn = await _get_conn()
+    async with conn.execute(
+        """
+        SELECT * FROM tasks
+        WHERE status = 'pending'
+          AND (aria2_gid IS NULL OR aria2_gid = '')
+        ORDER BY created_at ASC, rowid ASC
+        LIMIT ?
+        """,
+        (max(1, int(limit)),),
+    ) as cursor:
+        rows = await cursor.fetchall()
+        return [dict(row) for row in rows]
 
 
 async def update_task(task_id: str, **kwargs) -> None:
