@@ -1673,6 +1673,9 @@ function setParseButtonsState(job = activeParseJob) {
 function renderMagnetParseResult(result = {}) {
     if (!result || typeof result !== 'object') return;
     magnetCurrentFileId = result.file_id || null;
+    magnetRoots = Array.isArray(result.roots) && result.roots.length
+        ? result.roots.filter(Boolean)
+        : (result.file_id ? [result.file_id] : []);
     magnetFileData = sortPickerItemsByName(result.files || []);
     const titleEl = document.getElementById('magnetFileName');
     const metaEl = document.getElementById('magnetPanelMeta');
@@ -3206,6 +3209,7 @@ async function loadTelDriveFolderTree(force = false) {
 // ==========================================
 
 let magnetCurrentFileId = null;
+let magnetRoots = [];
 let magnetFileData = [];
 let magnetDownloadSubmitting = false;
 
@@ -3217,15 +3221,17 @@ async function parseMagnet() {
     if (activeParseJob) return alert('当前已有解析任务正在执行，请等待完成后再试');
 
     magnetCurrentFileId = null;
+    magnetRoots = [];
     magnetFileData = [];
     document.getElementById('magnetFileArea').style.display = 'none';
     setParseButtonsState({ job_type: 'magnet', status: 'running' });
 
     try {
+        const magnets = input.split('\n').map(s => s.trim()).filter(Boolean);
         const resp = await fetch('/api/pikpak/magnet/parse', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ magnet: input.split('\n')[0] })
+            body: JSON.stringify({ magnets })
         });
         const data = await readJsonSafe(resp);
         if (resp.status === 409 && data.active_job) {
@@ -3279,7 +3285,10 @@ function toggleMagnetSelectAll() {
 
 
 async function downloadMagnetFiles() {
-    if (!magnetCurrentFileId || magnetDownloadSubmitting) return;
+    const roots = (Array.isArray(magnetRoots) && magnetRoots.length)
+        ? magnetRoots
+        : (magnetCurrentFileId ? [magnetCurrentFileId] : []);
+    if (!roots.length || magnetDownloadSubmitting) return;
 
     const checkboxes = document.querySelectorAll('#magnetFileList input[data-role="file"]:checked');
     const selectedIds = Array.from(checkboxes).map(cb => cb.value);
@@ -3303,7 +3312,8 @@ async function downloadMagnetFiles() {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
-                file_id: magnetCurrentFileId,
+                roots: roots,
+                file_id: roots[0],
                 selected_ids: selectedIds,
                 keep_structure: keepStructure,
                 teldrive_path: teldrivePath

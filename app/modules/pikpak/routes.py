@@ -305,7 +305,13 @@ def _is_parse_job_active(job: Optional[dict]) -> bool:
 def _summarize_parse_request(job_type: str, request_payload: dict | None = None) -> str:
     payload = request_payload or {}
     if job_type == "magnet":
-        source = str(payload.get("magnet") or "").strip()
+        magnets = payload.get("magnets")
+        if isinstance(magnets, list) and magnets:
+            count = len(magnets)
+            first = str(magnets[0] or "").strip()
+            source = first if count == 1 else f"{first}（共 {count} 个磁链）"
+        else:
+            source = str(payload.get("magnet") or "").strip()
     elif job_type == "share":
         source = str(payload.get("share_link") or "").strip()
     else:
@@ -397,83 +403,126 @@ async def _build_parse_snapshot() -> dict:
     }
 
 
-async def _run_magnet_parse_job(job_id: str, magnet: str):
+async def _parse_single_magnet(pikpak, magnet: str, index: int, total: int, job_id: str,
+                               poll_interval: float, max_wait_time: float) -> dict:
+    """解析单个磁链，返回 {file_id, file_name, files}。失败时抛出异常。"""
     from pikpakapi.enums import DownloadStatus
     import time
 
     magnet_summary = magnet[:80] + ("..." if len(magnet) > 80 else "")
-    cfg = load_config()
-    poll_interval = cfg.get("pikpak", {}).get("poll_interval", 3)
-    max_wait_time = cfg.get("pikpak", {}).get("max_wait_time", 3600)
-
     await _broadcast({
         "type": "task_start",
-        "index": 1,
-        "total": 1,
+        "index": index,
+        "total": total,
         "magnet": magnet_summary,
         "parse_job_id": job_id,
         "workflow": "parse",
     })
+
+    task_info = await pikpak.add_offline_task(magnet)
+    task_id = task_info["task_id"]
+    file_id = task_info["file_id"]
+    file_name = task_info["file_name"]
+    if not task_id:
+        raise RuntimeError("添加离线任务失败")
+
+    await _broadcast({
+        "type": "task_added",
+        "index": index,
+        "file_name": file_name,
+        "task_id": task_id,
+        "parse_job_id": job_id,
+    })
+    await _broadcast({
+        "type": "task_status",
+        "index": index,
+        "status": f"PikPak 离线任务已创建 [{index}/{total}]，等待云端完成缓存...",
+        "parse_job_id": job_id,
+    })
+
+    start_time = time.time()
+    while True:
+        if time.time() - start_time > max_wait_time:
+            raise TimeoutError(f"等待超时 ({max_wait_time}s)")
+        try:
+            status = await pikpak.client.get_task_status(task_id, file_id)
+        except Exception:
+            await asyncio.sleep(poll_interval)
+            continue
+        if status == DownloadStatus.done:
+            break
+        if status in (DownloadStatus.error, DownloadStatus.not_found):
+            raise RuntimeError(f"离线失败 ({status.value})")
+        await asyncio.sleep(poll_interval)
+
+    file_tree = await pikpak.list_file_tree(file_id)
+    for item in file_tree:
+        item["size_str"] = _format_size(item.get("size", 0))
+        item["root_file_id"] = file_id
+    await _broadcast({
+        "type": "files_found",
+        "index": index,
+        "files": [item.get("name", "未知文件") for item in file_tree],
+        "parse_job_id": job_id,
+    })
+    await _broadcast_resolved_files(index, file_tree, {"parse_job_id": job_id})
+    await _broadcast({
+        "type": "task_done",
+        "index": index,
+        "file_name": file_name,
+        "parse_job_id": job_id,
+    })
+    return {"file_id": file_id, "file_name": file_name, "files": file_tree}
+
+
+async def _run_magnet_parse_job(job_id: str, magnets: List[str]):
+    cfg = load_config()
+    poll_interval = cfg.get("pikpak", {}).get("poll_interval", 3)
+    max_wait_time = cfg.get("pikpak", {}).get("max_wait_time", 3600)
+
+    total = len(magnets)
     try:
         pikpak, _ = await _ensure_clients()
-        task_info = await pikpak.add_offline_task(magnet)
-        task_id = task_info["task_id"]
-        file_id = task_info["file_id"]
-        file_name = task_info["file_name"]
-        if not task_id:
-            raise RuntimeError("添加离线任务失败")
+        roots: List[str] = []
+        merged_files: List[dict] = []
+        names: List[str] = []
+        errors: List[str] = []
 
-        await _broadcast({
-            "type": "task_added",
-            "index": 1,
-            "file_name": file_name,
-            "task_id": task_id,
-            "parse_job_id": job_id,
-        })
-        await _broadcast({
-            "type": "task_status",
-            "index": 1,
-            "status": "PikPak 离线任务已创建，等待云端完成缓存...",
-            "parse_job_id": job_id,
-        })
-
-        start_time = time.time()
-        while True:
-            if time.time() - start_time > max_wait_time:
-                raise TimeoutError(f"等待超时 ({max_wait_time}s)")
+        for i, magnet in enumerate(magnets, 1):
             try:
-                status = await pikpak.client.get_task_status(task_id, file_id)
-            except Exception:
-                await asyncio.sleep(poll_interval)
+                result = await _parse_single_magnet(
+                    pikpak, magnet, i, total, job_id, poll_interval, max_wait_time
+                )
+            except Exception as e:
+                errors.append(f"第 {i} 个磁链解析失败: {e}")
+                await _broadcast({
+                    "type": "task_error",
+                    "index": i,
+                    "message": f"第 {i} 个磁链解析失败: {e}",
+                    "parse_job_id": job_id,
+                })
                 continue
-            if status == DownloadStatus.done:
-                break
-            if status in (DownloadStatus.error, DownloadStatus.not_found):
-                raise RuntimeError(f"离线失败 ({status.value})")
-            await asyncio.sleep(poll_interval)
+            roots.append(result["file_id"])
+            names.append(result["file_name"])
+            merged_files.extend(result["files"])
 
-        file_tree = await pikpak.list_file_tree(file_id)
-        for item in file_tree:
-            item["size_str"] = _format_size(item.get("size", 0))
-        file_tree = _sort_file_entries_by_name(file_tree)
-        await _broadcast({
-            "type": "files_found",
-            "index": 1,
-            "files": [item.get("name", "未知文件") for item in file_tree],
-            "parse_job_id": job_id,
-        })
-        await _broadcast_resolved_files(1, file_tree, {"parse_job_id": job_id})
-        await _broadcast({
-            "type": "task_done",
-            "index": 1,
-            "file_name": file_name,
-            "parse_job_id": job_id,
-        })
-        await _broadcast({"type": "all_done", "total": 1, "parse_job_id": job_id})
+        if not merged_files:
+            detail = "；".join(errors) if errors else "未解析到任何文件"
+            raise RuntimeError(detail)
+
+        merged_files = _sort_file_entries_by_name(merged_files)
+        file_name = names[0] if len(names) == 1 else f"{len(names)} 个磁链（共 {len(merged_files)} 个文件）"
+
+        await _broadcast({"type": "all_done", "total": total, "parse_job_id": job_id})
         await _finish_parse_job(
             job_id,
             "completed",
-            result_payload={"file_id": file_id, "file_name": file_name, "files": file_tree},
+            result_payload={
+                "file_id": roots[0] if roots else "",
+                "roots": roots,
+                "file_name": file_name,
+                "files": merged_files,
+            },
         )
     except Exception as e:
         await _broadcast({"type": "error", "message": f"磁链解析失败: {e}", "parse_job_id": job_id})
@@ -648,21 +697,29 @@ async def api_add(request: Request):
 @router.post("/magnet/parse")
 async def api_magnet_parse(request: Request):
     body = await request.json()
-    magnet = body.get("magnet", "").strip()
-    if not magnet:
+    raw_magnets = body.get("magnets")
+    if isinstance(raw_magnets, list):
+        magnets = [str(m or "").strip() for m in raw_magnets]
+    else:
+        magnets = str(body.get("magnet") or "").splitlines()
+    magnets = [m.strip() for m in magnets if str(m or "").strip()]
+    # 去重并保持顺序
+    seen: set[str] = set()
+    magnets = [m for m in magnets if not (m in seen or seen.add(m))]
+    if not magnets:
         return JSONResponse({"error": "请输入磁力链接"}, status_code=400)
 
-    job, active_job = await _create_parse_job("magnet", {"magnet": magnet})
+    job, active_job = await _create_parse_job("magnet", {"magnets": magnets})
     if not job:
         return JSONResponse({
             "error": "当前已有解析任务正在执行，请等待完成后再发起新的解析",
             "active_job": _serialize_parse_job(active_job),
         }, status_code=409)
 
-    asyncio.create_task(_run_magnet_parse_job(job["job_id"], magnet))
+    asyncio.create_task(_run_magnet_parse_job(job["job_id"], magnets))
     return JSONResponse({
         "success": True,
-        "message": "磁链解析任务已提交，正在后台执行",
+        "message": f"磁链解析任务已提交（{len(magnets)} 个），正在后台执行",
         "job": _serialize_parse_job(job),
     }, status_code=202)
 
@@ -671,13 +728,21 @@ async def api_magnet_parse(request: Request):
 async def api_magnet_download(request: Request):
     try:
         body = await request.json()
-        file_id = body.get("file_id", "")
+        roots = body.get("roots")
+        if isinstance(roots, list):
+            root_ids = [str(r or "").strip() for r in roots if str(r or "").strip()]
+        else:
+            root_ids = []
+        if not root_ids:
+            single = str(body.get("file_id") or "").strip()
+            if single:
+                root_ids = [single]
         selected_ids = body.get("selected_ids", [])
         keep_structure = body.get("keep_structure", True)
         teldrive_path = body.get("teldrive_path", "/")
-        if not file_id:
+        if not root_ids:
             return JSONResponse({"error": "缺少 file_id"}, status_code=400)
-        asyncio.create_task(_process_magnet_selected(file_id, selected_ids, keep_structure, teldrive_path))
+        asyncio.create_task(_process_magnet_selected(root_ids, selected_ids, keep_structure, teldrive_path))
         return {"message": f"开始下载 {len(selected_ids)} 个文件"}
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
@@ -1068,18 +1133,32 @@ async def _process_magnets(magnets: List[str], teldrive_path: Optional[str] = No
     await _broadcast({"type": "all_done", "total": total})
 
 
-async def _process_magnet_selected(root_file_id: str, selected_ids: List[str],
+async def _process_magnet_selected(root_file_ids: List[str], selected_ids: List[str],
                                     keep_structure: bool = True, teldrive_path: Optional[str] = None):
     try:
         pikpak, _ = await _ensure_clients()
         cfg = load_config()
         delete_after = cfg.get("pikpak", {}).get("delete_after_download", False)
 
+        roots = [str(r).strip() for r in (root_file_ids or []) if str(r).strip()]
+        if not roots:
+            await _broadcast({"type": "task_error", "index": 1, "message": "缺少磁链根目录"})
+            return
+
         await _broadcast({"type": "task_start", "index": 1, "total": 1,
                           "magnet": f"磁链选择下载 ({len(selected_ids)} 个文件)"})
         await _broadcast({"type": "task_status", "index": 1,
                           "status": "开始解析所选文件的下载链接..."})
-        all_files = await pikpak.get_download_urls(root_file_id)
+
+        all_files: List[dict] = []
+        for root_file_id in roots:
+            try:
+                root_files = await pikpak.get_download_urls(root_file_id)
+            except Exception as e:
+                logger.warning(f"磁链根目录直链获取失败: root={root_file_id}, error={e}")
+                continue
+            all_files.extend(root_files or [])
+
         if not all_files:
             await _broadcast({"type": "task_error", "index": 1, "message": "未找到可下载的文件"})
             return
@@ -1097,7 +1176,7 @@ async def _process_magnet_selected(root_file_id: str, selected_ids: List[str],
         await _broadcast({"type": "task_status", "index": 1,
                           "status": f"解析完成，共 {len(files)} 个文件，开始推送下载链接到{push_target}..."})
 
-        delete_ids = [root_file_id] if delete_after else None
+        delete_ids = list(roots) if delete_after else None
         resolved_teldrive_path = _normalize_teldrive_path(
             cfg.get("teldrive", {}).get("target_path", "/") if teldrive_path is None else teldrive_path
         )
