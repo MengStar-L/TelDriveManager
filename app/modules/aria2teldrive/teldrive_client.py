@@ -9,6 +9,7 @@ import aiohttp
 import uuid
 import hashlib
 import math
+import re
 import logging
 import json
 from pathlib import Path
@@ -16,14 +17,38 @@ from typing import Optional, Callable, List, Dict, Any
 
 logger = logging.getLogger(__name__)
 
-# TelDrive 上传分块大小映射
+# TelDrive 上传分块大小映射（已知预设的快速路径）
 CHUNK_SIZE_MAP = {
     "100M": 100 * 1024 * 1024,
     "200M": 200 * 1024 * 1024,
+    "250M": 250 * 1024 * 1024,
     "500M": 500 * 1024 * 1024,
     "1G": 1024 * 1024 * 1024,
     "2G": 2 * 1024 * 1024 * 1024,
 }
+
+_CHUNK_SIZE_RE = re.compile(r"^\s*(\d+(?:\.\d+)?)\s*([KMGT]?)B?\s*$", re.IGNORECASE)
+_CHUNK_UNIT_MULT = {"": 1, "K": 1024, "M": 1024 ** 2, "G": 1024 ** 3, "T": 1024 ** 4}
+DEFAULT_CHUNK_SIZE = 500 * 1024 * 1024
+
+
+def parse_chunk_size(value, default: int = DEFAULT_CHUNK_SIZE) -> int:
+    """将分块大小（如 "250M" / "1G" / 整数字节）解析为字节数。
+
+    优先命中已知预设；否则按 "<数字><单位>" 通用解析（K/M/G/T，可省略单位=字节）。
+    无法解析时回退 default，并记录告警——避免像旧版那样把未登记的 "250M" 静默当成 500M。
+    """
+    if isinstance(value, (int, float)):
+        return int(value) if value > 0 else default
+    key = str(value or "").strip()
+    if key in CHUNK_SIZE_MAP:
+        return CHUNK_SIZE_MAP[key]
+    match = _CHUNK_SIZE_RE.match(key)
+    if not match:
+        logger.warning(f"无法解析上传分块大小 {value!r}，回退默认 {default} 字节")
+        return default
+    size = int(float(match.group(1)) * _CHUNK_UNIT_MULT[match.group(2).upper()])
+    return size if size > 0 else default
 
 
 class ChunkSourceReadError(IOError):
@@ -60,7 +85,7 @@ class TelDriveClient:
         self.access_token = access_token
         self.channel_id = channel_id
         self.chunk_size_str = chunk_size
-        self.chunk_size = CHUNK_SIZE_MAP.get(chunk_size, 500 * 1024 * 1024)
+        self.chunk_size = parse_chunk_size(chunk_size)
         self.upload_concurrency = upload_concurrency
         self.random_chunk_name = random_chunk_name
         self.max_retries = max_retries
