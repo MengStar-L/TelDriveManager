@@ -927,32 +927,6 @@ async function testSingle(type) {
     }
 }
 
-async function testRemoteAria2() {
-    const el = document.getElementById('remoteAria2Status');
-    if (!el) return;
-    const payload = {
-        rpc_url: document.getElementById('cfgRemoteAria2Url').value.trim() || 'http://127.0.0.1',
-        rpc_port: Math.max(1, parseInt(document.getElementById('cfgRemoteAria2Port').value, 10) || 6800),
-        rpc_secret: document.getElementById('cfgRemoteAria2Secret').value.trim(),
-    };
-    el.textContent = '测试中...'; el.className = 'wizard-note';
-    try {
-        const resp = await fetch('/api/settings/test/remote-aria2', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(payload),
-        });
-        const data = await readJsonSafe(resp);
-        const ok = data.success || data.ok;
-        const msg = data.message || (ok ? '正常' : '失败');
-        el.textContent = ok ? `✓ ${msg}` : `✗ ${msg}`;
-        el.className = ok ? 'ok' : 'fail';
-    } catch (e) {
-        el.textContent = '✗ 网络错误';
-        el.className = 'fail';
-    }
-}
-
 async function testConnection() {
     const btn = document.getElementById('testBtn');
     if (!btn) return;
@@ -963,7 +937,8 @@ async function testConnection() {
         { ep: '/api/settings/test/aria2', el: document.getElementById('aria2Status') },
         { ep: '/api/settings/test/teldrive', el: document.getElementById('teldriveStatus') },
         { ep: '/api/settings/test/telegram', el: document.getElementById('telegramStatus') },
-        { ep: '/api/settings/test/database', el: document.getElementById('databaseStatus') }
+        { ep: '/api/settings/test/database', el: document.getElementById('databaseStatus') },
+        { ep: '/api/settings/test/remote-aria2', el: document.getElementById('remote-aria2Status') }
     ];
     
     for (const t of tests) {
@@ -2380,6 +2355,24 @@ async function toggleMonitorParallelMode(checked) {
     }
 }
 
+async function toggleMonitorRemotePush(checked) {
+    // 远程推送开关：本地下载任务同步镜像一份到远程 aria2（仅下载，不上传）。
+    // 仅发送增量补丁，避免全量保存覆盖其它配置
+    const patch = { remote_aria2: { enabled: !!checked } };
+    try {
+        const resp = await fetch('/api/settings', {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(patch)
+        });
+        if (resp.ok && window.currentConfig) {
+            window.currentConfig.remote_aria2 = { ...(window.currentConfig.remote_aria2 || {}), enabled: !!checked };
+        }
+    } catch (e) {
+        console.error('远程推送开关保存失败:', e);
+    }
+}
+
 function togglePikpakLoginMode() {
     const mode = normalizePikpakLoginMode(document.getElementById('cfgPikpakLoginMode')?.value || 'password');
     const passwordFields = document.getElementById('cfgPikpakPasswordFields');
@@ -2425,7 +2418,7 @@ function collectSettingsConfig() {
         },
 
         remote_aria2: {
-            enabled: !!document.getElementById('cfgRemoteAria2Enabled')?.checked,
+            enabled: !!(window.currentConfig?.remote_aria2?.enabled),
             rpc_url: document.getElementById('cfgRemoteAria2Url').value.trim() || 'http://127.0.0.1',
             rpc_port: Math.max(1, parseInt(document.getElementById('cfgRemoteAria2Port').value, 10) || 6800),
             rpc_secret: document.getElementById('cfgRemoteAria2Secret').value.trim(),
@@ -2498,7 +2491,6 @@ async function loadConfig() {
 
         document.getElementById('cfgAria2DownloadDirText').textContent = cfg.aria2?.download_dir || '--';
 
-        document.getElementById('cfgRemoteAria2Enabled').checked = !!cfg.remote_aria2?.enabled;
         document.getElementById('cfgRemoteAria2Url').value = cfg.remote_aria2?.rpc_url || 'http://127.0.0.1';
         document.getElementById('cfgRemoteAria2Port').value = cfg.remote_aria2?.rpc_port || 6800;
         document.getElementById('cfgRemoteAria2Secret').value = cfg.remote_aria2?.rpc_secret || '';
@@ -2515,6 +2507,8 @@ async function loadConfig() {
         if (monitorToggle) monitorToggle.checked = !!cfg.upload?.serial_transfer_mode;
         const monitorParallelToggle = document.getElementById('monitorParallelChunkUpload');
         if (monitorParallelToggle) monitorParallelToggle.checked = !!cfg.upload?.parallel_chunk_upload;
+        const monitorRemotePushToggle = document.getElementById('monitorRemotePush');
+        if (monitorRemotePushToggle) monitorRemotePushToggle.checked = !!cfg.remote_aria2?.enabled;
 
         document.getElementById('cfgTelegramApiId').value = cfg.telegram?.api_id || '';
         document.getElementById('cfgTelegramApiHash').value = cfg.telegram?.api_hash || '';
@@ -2545,14 +2539,18 @@ async function syncMonitorSerialToggle() {
             }
         }
         
-        if (window.currentConfig && window.currentConfig.upload) {
+        if (window.currentConfig) {
             const monitorToggle = document.getElementById('monitorSerialTransferMode');
             if (monitorToggle) {
-                monitorToggle.checked = !!window.currentConfig.upload.serial_transfer_mode;
+                monitorToggle.checked = !!window.currentConfig.upload?.serial_transfer_mode;
             }
             const parallelToggle = document.getElementById('monitorParallelChunkUpload');
             if (parallelToggle) {
-                parallelToggle.checked = !!window.currentConfig.upload.parallel_chunk_upload;
+                parallelToggle.checked = !!window.currentConfig.upload?.parallel_chunk_upload;
+            }
+            const remotePushToggle = document.getElementById('monitorRemotePush');
+            if (remotePushToggle) {
+                remotePushToggle.checked = !!window.currentConfig.remote_aria2?.enabled;
             }
         }
     } catch (e) {

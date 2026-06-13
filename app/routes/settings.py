@@ -124,6 +124,9 @@ async def test_aria2(payload: dict | None = Body(None)):
 @router.post("/test/remote-aria2")
 async def test_remote_aria2(payload: dict | None = Body(None)):
     cfg = payload if payload else load_config(force_reload=True).get("remote_aria2", {})
+    # 全量自检/单项自检（无 payload）且未启用远程推送时直接跳过，避免误连默认 127.0.0.1
+    if not payload and not bool(cfg.get("enabled", False)):
+        return {"success": True, "ok": True, "message": "远程推送未启用，已跳过"}
     rpc_url = str(cfg.get("rpc_url") or "http://127.0.0.1").strip() or "http://127.0.0.1"
     client = Aria2Client(
         rpc_url=rpc_url,
