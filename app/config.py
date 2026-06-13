@@ -58,6 +58,12 @@ DEFAULTS: dict[str, Any] = {
         "disk_protection_threshold_gb": 5,
         "download_dir": FIXED_DOWNLOAD_DIR,
     },
+    "remote_aria2": {
+        "enabled": False,
+        "rpc_url": "http://127.0.0.1",
+        "rpc_port": 6800,
+        "rpc_secret": "",
+    },
     "teldrive": {
         "api_host": "", "access_token": "", "channel_id": 0,
         "chunk_size": "250M", "upload_concurrency": 4, "upload_dir": "",
@@ -182,6 +188,12 @@ def _normalize_config(merged: dict, raw: dict | None = None) -> dict:
 
     for deprecated_key in ("download_engine", "max_concurrent_downloads", "connections_per_task"):
         pikpak_cfg.pop(deprecated_key, None)
+
+    remote_aria2_cfg = merged.setdefault("remote_aria2", {})
+    remote_aria2_cfg["enabled"] = bool(remote_aria2_cfg.get("enabled", False))
+    remote_aria2_cfg["rpc_url"] = str(remote_aria2_cfg.get("rpc_url") or "http://127.0.0.1").strip() or "http://127.0.0.1"
+    remote_aria2_cfg["rpc_port"] = max(1, int(remote_aria2_cfg.get("rpc_port") or 6800))
+    remote_aria2_cfg["rpc_secret"] = str(remote_aria2_cfg.get("rpc_secret") or "").strip()
 
     upload_cfg["max_retries"] = max(1, int(upload_cfg.get("max_retries") or 3))
     upload_cfg["auto_delete"] = bool(upload_cfg.get("auto_delete", True))

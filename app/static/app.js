@@ -927,6 +927,32 @@ async function testSingle(type) {
     }
 }
 
+async function testRemoteAria2() {
+    const el = document.getElementById('remoteAria2Status');
+    if (!el) return;
+    const payload = {
+        rpc_url: document.getElementById('cfgRemoteAria2Url').value.trim() || 'http://127.0.0.1',
+        rpc_port: Math.max(1, parseInt(document.getElementById('cfgRemoteAria2Port').value, 10) || 6800),
+        rpc_secret: document.getElementById('cfgRemoteAria2Secret').value.trim(),
+    };
+    el.textContent = '测试中...'; el.className = 'wizard-note';
+    try {
+        const resp = await fetch('/api/settings/test/remote-aria2', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+        });
+        const data = await readJsonSafe(resp);
+        const ok = data.success || data.ok;
+        const msg = data.message || (ok ? '正常' : '失败');
+        el.textContent = ok ? `✓ ${msg}` : `✗ ${msg}`;
+        el.className = ok ? 'ok' : 'fail';
+    } catch (e) {
+        el.textContent = '✗ 网络错误';
+        el.className = 'fail';
+    }
+}
+
 async function testConnection() {
     const btn = document.getElementById('testBtn');
     if (!btn) return;
@@ -2398,6 +2424,12 @@ function collectSettingsConfig() {
             min_split_size_mb: Math.max(1, parseInt(document.getElementById('cfgAria2MinSplitSize').value, 10) || currentAria2.min_split_size_mb || 5),
         },
 
+        remote_aria2: {
+            enabled: !!document.getElementById('cfgRemoteAria2Enabled')?.checked,
+            rpc_url: document.getElementById('cfgRemoteAria2Url').value.trim() || 'http://127.0.0.1',
+            rpc_port: Math.max(1, parseInt(document.getElementById('cfgRemoteAria2Port').value, 10) || 6800),
+            rpc_secret: document.getElementById('cfgRemoteAria2Secret').value.trim(),
+        },
 
         teldrive: {
             api_host: document.getElementById('cfgTeldriveHost').value,
@@ -2465,6 +2497,11 @@ async function loadConfig() {
 
 
         document.getElementById('cfgAria2DownloadDirText').textContent = cfg.aria2?.download_dir || '--';
+
+        document.getElementById('cfgRemoteAria2Enabled').checked = !!cfg.remote_aria2?.enabled;
+        document.getElementById('cfgRemoteAria2Url').value = cfg.remote_aria2?.rpc_url || 'http://127.0.0.1';
+        document.getElementById('cfgRemoteAria2Port').value = cfg.remote_aria2?.rpc_port || 6800;
+        document.getElementById('cfgRemoteAria2Secret').value = cfg.remote_aria2?.rpc_secret || '';
 
         document.getElementById('cfgTeldriveHost').value = cfg.teldrive?.api_host || '';
         document.getElementById('cfgTeldriveToken').value = cfg.teldrive?.access_token || '';

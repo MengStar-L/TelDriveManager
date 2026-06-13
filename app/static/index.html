@@ -1527,7 +1527,29 @@
                             </div>
                         </div>
 
-                        
+                        <div class="card">
+                            <div class="card-header"><h3><i class="ph-fill ph-broadcast"></i> 远程 aria2 推送</h3></div>
+                            <div class="card-body">
+                                <div class="field-grid cols-1">
+                                    <label class="toggle-row" style="justify-content:space-between">
+                                        启用远程推送
+                                        <div class="toggle-switch"><input type="checkbox" id="cfgRemoteAria2Enabled"><span class="toggle-slider"></span></div>
+                                    </label>
+                                    <div class="wizard-note">开启后，本地下载任务推送到 aria2 时，会同步向下方填写的远程 aria2 下载器推送一份相同的下载链接（仅下载，不做 TelDrive 上传）。</div>
+                                </div>
+                                <div class="field-grid">
+                                    <div class="form-group"><label>远程 RPC 地址</label><input class="form-input" type="text" id="cfgRemoteAria2Url" placeholder="http://192.168.1.10"></div>
+                                    <div class="form-group"><label>远程 RPC 端口</label><input class="form-input" type="number" id="cfgRemoteAria2Port" min="1" max="65535" placeholder="6800"></div>
+                                    <div class="form-group"><label>远程 RPC 密码</label><input class="form-input" type="password" id="cfgRemoteAria2Secret" placeholder="远程 aria2 的 rpc-secret，可留空"></div>
+                                </div>
+                                <div style="display:flex; align-items:center; gap:10px; flex-wrap:wrap; margin-top:12px;">
+                                    <button type="button" class="btn btn-ghost btn-sm" onclick="testRemoteAria2()"><i class="ph ph-plugs-connected"></i> 测试远程连接</button>
+                                    <span id="remoteAria2Status" class="wizard-note"></span>
+                                </div>
+                            </div>
+                        </div>
+
+
                         <div class="card" style="grid-column: span 2/span 2">
                             <div class="card-header"><h3><i class="ph-fill ph-hard-drives"></i> TelDrive 持久化上传</h3></div>
                             <div class="card-body">

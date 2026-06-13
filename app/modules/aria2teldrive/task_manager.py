@@ -46,6 +46,8 @@ class TaskManager:
 
         self.aria2: Optional[Aria2Client] = None
         self.teldrive: Optional[TelDriveClient] = None
+        # 远程 aria2 推送客户端（按需创建，配置变更时重建）
+        self._remote_aria2: Optional[Aria2Client] = None
         self._ws_clients: Set = set()
         self._monitor_task: Optional[asyncio.Task] = None
         self._running = False
@@ -134,11 +136,60 @@ class TaskManager:
             raise RuntimeError("TelDrive client is not initialized")
         return self.teldrive
 
+    # ===========================================
+    # 远程 aria2 推送（可选）
+    # ===========================================
+
+    def _is_remote_push_enabled(self) -> bool:
+        return bool(self.config.get("remote_aria2", {}).get("enabled", False))
+
+    def _get_remote_aria2(self) -> Optional[Aria2Client]:
+        """按需创建远程 aria2 客户端；未启用则返回 None。"""
+        if not self._is_remote_push_enabled():
+            return None
+        if self._remote_aria2 is None:
+            remote_cfg = self.config.get("remote_aria2", {})
+            self._remote_aria2 = Aria2Client(
+                rpc_url=remote_cfg.get("rpc_url", "http://127.0.0.1"),
+                rpc_port=int(remote_cfg.get("rpc_port") or 6800),
+                rpc_secret=remote_cfg.get("rpc_secret", ""),
+            )
+        return self._remote_aria2
+
+    def mirror_to_remote_aria2(self, url: str, filename: Optional[str] = None):
+        """开启远程推送时，向远程 aria2 推送一份相同的下载链接（尽力而为，不阻塞本地下载）。
+
+        仅在本地真正新增一个下载任务时调用一次，失败只记录日志、不影响本地流程。
+        """
+        if not self._is_remote_push_enabled():
+            return
+        url = str(url or "").strip()
+        if not url:
+            return
+        asyncio.create_task(self._mirror_to_remote_aria2(url, filename))
+
+    async def _mirror_to_remote_aria2(self, url: str, filename: Optional[str] = None):
+        try:
+            remote = self._get_remote_aria2()
+            if remote is None:
+                return
+            options = {}
+            if filename:
+                options["out"] = filename
+            gid = await remote.add_uri(url, options)
+            logger.info(f"已向远程 aria2 推送下载链接: {filename or url} (remote gid={gid})")
+        except Exception as e:
+            logger.warning(f"向远程 aria2 推送下载链接失败: {filename or url}, {e}")
+
     async def _close_clients(self):
         old_aria2 = self.aria2
         self.aria2 = None
         if old_aria2 is not None:
             await old_aria2.close()
+        old_remote = self._remote_aria2
+        self._remote_aria2 = None
+        if old_remote is not None:
+            await old_remote.close()
 
     async def reload_config(self):
         """重新加载配置并重建客户端"""
@@ -448,6 +499,7 @@ class TaskManager:
             )
         self._clear_runtime_task_fields(task_id)
         await self._broadcast_task_update(task_id)
+        self.mirror_to_remote_aria2(url, options.get("out") or filename)
         task = self._merge_runtime_task_fields(await db.get_task(task_id))
         return task or {"task_id": task_id, "status": "pending"}
 
@@ -3126,6 +3178,7 @@ class TaskManager:
             await db.update_task(gid, **update_fields)
         self._known_gids.add(gid)
         await self._broadcast_task_update(gid)
+        self.mirror_to_remote_aria2(url, filename)
         return self._merge_runtime_task_fields(await db.get_task(gid))
 
     async def add_task(self, url: str, filename: Optional[str] = None,

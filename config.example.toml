@@ -41,6 +41,14 @@ min_split_size_mb = 5                # 最小分块大小（MB）
 disk_protection_threshold_gb = 5     # 剩余空间低于该值时自动保护并暂停 aria2 新下载
 download_dir = "./downloads"        # 固定由程序托管到项目 downloads 目录
 
+# ─── 远程 aria2 推送（可选） ───
+# 开启后，本地推送下载时会同步向远程 aria2 下载器推送一份相同的下载链接
+[remote_aria2]
+enabled = false                     # true 时启用远程推送
+rpc_url = "http://127.0.0.1"        # 远程 aria2 RPC 地址（如 http://192.168.1.10）
+rpc_port = 6800                     # 远程 aria2 RPC 端口
+rpc_secret = ""                     # 远程 aria2 RPC 密码（token）
+
 # ─── TelDrive 云盘（共享） ───
 [teldrive]
 api_host = ""

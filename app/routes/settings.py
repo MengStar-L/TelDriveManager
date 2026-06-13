@@ -121,6 +121,24 @@ async def test_aria2(payload: dict | None = Body(None)):
     return await _test_aria2_connection(payload)
 
 
+@router.post("/test/remote-aria2")
+async def test_remote_aria2(payload: dict | None = Body(None)):
+    cfg = payload if payload else load_config(force_reload=True).get("remote_aria2", {})
+    rpc_url = str(cfg.get("rpc_url") or "http://127.0.0.1").strip() or "http://127.0.0.1"
+    client = Aria2Client(
+        rpc_url=rpc_url,
+        rpc_port=int(cfg.get("rpc_port") or 6800),
+        rpc_secret=str(cfg.get("rpc_secret") or "").strip(),
+    )
+    try:
+        result = await client.test_connection()
+        if result.get("success"):
+            result["message"] = "远程 aria2 连接成功"
+        return result
+    finally:
+        await client.close()
+
+
 
 @router.post("/test/teldrive")
 async def test_teldrive(payload: dict = Body(None)):
