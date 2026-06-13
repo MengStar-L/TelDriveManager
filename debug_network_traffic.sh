@@ -55,8 +55,8 @@ monitor_proc_net() {
 
     # 读取初始值（所有接口的 RX/TX 字节累计）
     local rx0 tx0
-    rx0=$(awk 'NR>2 {rx+=$2} END {print rx+0}' "$net_dev")
-    tx0=$(awk 'NR>2 {tx+=$10} END {print tx+0}' "$net_dev")
+    rx0=$(awk 'NR>2 {rx+=$2} END {printf "%.0f", rx+0}' "$net_dev")
+    tx0=$(awk 'NR>2 {tx+=$10} END {printf "%.0f", tx+0}' "$net_dev")
 
     echo "$name (PID=$pid) 初始累计: RX=${rx0} bytes, TX=${tx0} bytes"
 
@@ -68,8 +68,8 @@ monitor_proc_net() {
         fi
 
         local rx1 tx1
-        rx1=$(awk 'NR>2 {rx+=$2} END {print rx+0}' "$net_dev")
-        tx1=$(awk 'NR>2 {tx+=$10} END {print tx+0}' "$net_dev")
+        rx1=$(awk 'NR>2 {rx+=$2} END {printf "%.0f", rx+0}' "$net_dev")
+        tx1=$(awk 'NR>2 {tx+=$10} END {printf "%.0f", tx+0}' "$net_dev")
 
         local rx_delta=$((rx1 - rx0))
         local tx_delta=$((tx1 - tx0))
