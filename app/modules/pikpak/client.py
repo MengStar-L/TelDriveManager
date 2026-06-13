@@ -313,6 +313,25 @@ class PikPakClient:
         result = await self.client.offline_list()
         return result.get("tasks", [])
 
+    async def get_task_progress(self, task_id: str) -> Optional[int]:
+        """返回指定离线任务的下载进度（0-100）；任务不在进行中列表里则返回 None。
+
+        包含 PENDING 阶段，以便在磁链尚未解析出元数据时也能观察是否有进展。
+        """
+        try:
+            result = await self.client.offline_list(
+                phase=["PHASE_TYPE_PENDING", "PHASE_TYPE_RUNNING", "PHASE_TYPE_ERROR"]
+            )
+        except Exception:
+            return None
+        for task in result.get("tasks", []) or []:
+            if task.get("id") == task_id:
+                try:
+                    return int(task.get("progress", 0) or 0)
+                except (TypeError, ValueError):
+                    return 0
+        return None
+
     # ── 分享链接相关 ──
 
     async def get_share_file_list(self, share_link: str, pass_code: str = "") -> Dict[str, Any]:

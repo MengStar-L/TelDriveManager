@@ -39,6 +39,7 @@ DEFAULTS: dict[str, Any] = {
     "pikpak": {
         "login_mode": "password", "username": "", "password": "", "session": "", "save_dir": "/",
         "delete_after_download": True, "poll_interval": 3, "max_wait_time": 3600,
+        "magnet_parse_timeout": 300,
         "share_parse_timeout": 45, "share_download_url_timeout": 60, "share_download_url_poll_interval": 3,
     },
     "aria2": {

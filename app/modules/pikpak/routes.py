@@ -406,8 +406,13 @@ async def _build_parse_snapshot() -> dict:
 
 
 async def _parse_single_magnet(pikpak, magnet: str, index: int, total: int, job_id: str,
-                               poll_interval: float, max_wait_time: float) -> dict:
-    """解析单个磁链，返回 {file_id, file_name, files}。失败时抛出异常。"""
+                               poll_interval: float, max_wait_time: float,
+                               parse_timeout: float = 0) -> dict:
+    """解析单个磁链，返回 {file_id, file_name, files}。失败时抛出异常。
+
+    parse_timeout: 解析阶段“无进展”超时（秒）。若云端在该时长内始终无下载进度
+    （磁链无法解析 / 无人做种），自动跳过该磁链；<=0 表示不启用。
+    """
     from pikpakapi.enums import DownloadStatus
     import time
 
@@ -443,6 +448,8 @@ async def _parse_single_magnet(pikpak, magnet: str, index: int, total: int, job_
     })
 
     start_time = time.time()
+    last_progress = 0
+    last_advance_time = start_time
     while True:
         if time.time() - start_time > max_wait_time:
             raise TimeoutError(f"等待超时 ({max_wait_time}s)")
@@ -455,6 +462,21 @@ async def _parse_single_magnet(pikpak, magnet: str, index: int, total: int, job_
             break
         if status in (DownloadStatus.error, DownloadStatus.not_found):
             raise RuntimeError(f"离线失败 ({status.value})")
+
+        # 解析阶段“无进展”超时：磁链无法解析（无人做种 / 死种）时，云端进度长期为 0，
+        # 超过 parse_timeout 仍无任何进展则自动跳过；一旦开始有进度即不再受此限制，
+        # 后续下载由 max_wait_time 兜底。注意：此处仅作用于解析阶段，不涉及获取直链。
+        if parse_timeout and parse_timeout > 0:
+            progress = await pikpak.get_task_progress(task_id)
+            now = time.time()
+            if progress is not None and progress > last_progress:
+                last_progress = progress
+                last_advance_time = now
+            elif now - last_advance_time > parse_timeout:
+                raise TimeoutError(
+                    f"解析超时：{int(parse_timeout)}s 内云端无任何进展"
+                    f"（进度 {last_progress}%），已自动跳过该磁链"
+                )
         await asyncio.sleep(poll_interval)
 
     file_tree = await pikpak.list_file_tree(file_id)
@@ -481,6 +503,7 @@ async def _run_magnet_parse_job(job_id: str, magnets: List[str]):
     cfg = load_config()
     poll_interval = cfg.get("pikpak", {}).get("poll_interval", 3)
     max_wait_time = cfg.get("pikpak", {}).get("max_wait_time", 3600)
+    parse_timeout = cfg.get("pikpak", {}).get("magnet_parse_timeout", 300)
 
     total = len(magnets)
     try:
@@ -493,7 +516,7 @@ async def _run_magnet_parse_job(job_id: str, magnets: List[str]):
         for i, magnet in enumerate(magnets, 1):
             try:
                 result = await _parse_single_magnet(
-                    pikpak, magnet, i, total, job_id, poll_interval, max_wait_time
+                    pikpak, magnet, i, total, job_id, poll_interval, max_wait_time, parse_timeout
                 )
             except Exception as e:
                 errors.append(f"第 {i} 个磁链解析失败: {e}")
@@ -1045,6 +1068,7 @@ async def _process_magnets(magnets: List[str], teldrive_path: Optional[str] = No
     pikpak_cfg = cfg.get("pikpak", {})
     poll_interval = pikpak_cfg.get("poll_interval", 3)
     max_wait_time = pikpak_cfg.get("max_wait_time", 3600)
+    parse_timeout = pikpak_cfg.get("magnet_parse_timeout", 300)
     delete_after = pikpak_cfg.get("delete_after_download", False)
     resolved_teldrive_path = _normalize_teldrive_path(
         cfg.get("teldrive", {}).get("target_path", "/") if teldrive_path is None else teldrive_path
@@ -1081,6 +1105,8 @@ async def _process_magnets(magnets: List[str], teldrive_path: Optional[str] = No
         start_time = time.time()
         offline_ok = False
         last_status = None
+        last_progress = 0
+        last_advance_time = start_time
         while True:
             if time.time() - start_time > max_wait_time:
                 await _broadcast({"type": "task_error", "index": i, "message": f"等待超时 ({max_wait_time}s)"})
@@ -1102,6 +1128,19 @@ async def _process_magnets(magnets: List[str], teldrive_path: Optional[str] = No
             elif status in (DownloadStatus.error, DownloadStatus.not_found):
                 await _broadcast({"type": "task_error", "index": i, "message": f"离线失败 ({status.value})"})
                 break
+
+            # 解析阶段“无进展”超时：磁链无法解析时云端进度长期为 0，超时自动跳过（仅作用于解析阶段）
+            if parse_timeout and parse_timeout > 0:
+                progress = await pikpak.get_task_progress(task_id)
+                now = time.time()
+                if progress is not None and progress > last_progress:
+                    last_progress = progress
+                    last_advance_time = now
+                elif now - last_advance_time > parse_timeout:
+                    await _broadcast({"type": "task_error", "index": i,
+                                      "message": f"解析超时：{int(parse_timeout)}s 内云端无任何进展"
+                                                 f"（进度 {last_progress}%），已自动跳过该磁链"})
+                    break
             await asyncio.sleep(poll_interval)
 
         if not offline_ok:
