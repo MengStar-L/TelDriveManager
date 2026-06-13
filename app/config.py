@@ -59,7 +59,7 @@ DEFAULTS: dict[str, Any] = {
     },
     "teldrive": {
         "api_host": "", "access_token": "", "channel_id": 0,
-        "chunk_size": "500M", "upload_concurrency": 4, "upload_dir": "",
+        "chunk_size": "250M", "upload_concurrency": 4, "upload_dir": "",
         "random_chunk_name": True, "target_path": "/",
     },
     "upload": {

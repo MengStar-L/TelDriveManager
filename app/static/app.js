@@ -2382,7 +2382,7 @@ function collectSettingsConfig() {
             access_token: document.getElementById('cfgTeldriveToken').value,
             channel_id: parseInt(document.getElementById('cfgTeldriveChannel').value, 10) || 0,
             upload_concurrency: parseInt(document.getElementById('cfgTeldriveConcurrency').value, 10) || 4,
-            chunk_size: '500M'
+            chunk_size: document.getElementById('cfgTeldriveChunkSize')?.value || currentConfig?.teldrive?.chunk_size || '250M'
         },
         upload: {
             auto_delete: document.getElementById('cfgUploadAutoDelete').checked,
@@ -2447,6 +2447,7 @@ async function loadConfig() {
         document.getElementById('cfgTeldriveToken').value = cfg.teldrive?.access_token || '';
         document.getElementById('cfgTeldriveChannel').value = cfg.teldrive?.channel_id || 0;
         document.getElementById('cfgTeldriveConcurrency').value = cfg.teldrive?.upload_concurrency || 4;
+        document.getElementById('cfgTeldriveChunkSize').value = cfg.teldrive?.chunk_size || '250M';
         document.getElementById('cfgUploadAutoDelete').checked = !!cfg.upload?.auto_delete;
         document.getElementById('cfgUploadSerialTransferMode').checked = !!cfg.upload?.serial_transfer_mode;
         const monitorToggle = document.getElementById('monitorSerialTransferMode');
@@ -2564,7 +2565,7 @@ function showFieldCheck(input) {
     check.className = 'auto-save-check';
     check.innerHTML = '<i class="ph-fill ph-check-circle"></i>';
     check.style.cssText = 'color:var(--success); font-size:16px; margin-left:6px; opacity:0; transition:opacity 0.3s; display:inline-flex; align-items:center;';
-    
+
     // 对 checkbox toggle 特殊处理位置
     if (input.type === 'checkbox') {
         parent.appendChild(check);
@@ -2580,6 +2581,16 @@ function showFieldCheck(input) {
         check.style.opacity = '0';
         setTimeout(() => check.remove(), 300);
     }, 2000);
+}
+
+// 上传分块大小变更处理（即时生效）
+function handleChunkSizeChange() {
+    const select = document.getElementById('cfgTeldriveChunkSize');
+    if (!select) return;
+
+    // 触发自动保存
+    if (_autoSaveTimer) clearTimeout(_autoSaveTimer);
+    _autoSaveTimer = setTimeout(() => doAutoSave(select), 500);
 }
 
 // ── Startup ──

@@ -1413,6 +1413,20 @@
                                     <div class="form-group"><label>应用 Token</label><input class="form-input" type="password" id="cfgTeldriveToken" placeholder="获取于 Cookie"></div>
                                     <div class="form-group"><label>同步频道 ID</label><input class="form-input" type="number" id="cfgTeldriveChannel" placeholder="0"></div>
                                     <div class="form-group"><label>并发上传策略</label><input class="form-input" type="number" id="cfgTeldriveConcurrency" placeholder="4"></div>
+                                    <div class="form-group">
+                                        <label>上传分块大小</label>
+                                        <select class="form-input" id="cfgTeldriveChunkSize" onchange="handleChunkSizeChange()">
+                                            <option value="100M">100 MB（网络极不稳定）</option>
+                                            <option value="200M">200 MB（网络较差）</option>
+                                            <option value="250M" selected>250 MB（推荐）</option>
+                                            <option value="500M">500 MB（网络稳定）</option>
+                                            <option value="1G">1 GB（高速网络）</option>
+                                            <option value="2G">2 GB（极速网络）</option>
+                                        </select>
+                                    </div>
+                                </div>
+                                <div class="wizard-note" style="margin-top:10px;">
+                                    <i class="ph ph-info"></i> 分块大小影响重传成本：更小的分块在网络不稳定时更容易完成，但会增加API调用次数和Telegram消息数量。网络稳定建议500M，不稳定建议250M或更小。
                                 </div>
                                 <div style="margin-top:20px; padding-top:20px; border-top:1px solid var(--border)">
                                     <label class="toggle-row" style="justify-content:space-between">
