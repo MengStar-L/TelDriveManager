@@ -121,6 +121,7 @@ class TaskManager:
             random_chunk_name=cfg["teldrive"].get("random_chunk_name", True),
             max_retries=cfg.get("upload", {}).get("max_retries", 3),
             min_throughput_kbps=cfg.get("upload", {}).get("min_throughput_kbps", 100),
+            parallel_chunk_upload=cfg.get("upload", {}).get("parallel_chunk_upload", False),
         )
 
     def _require_aria2(self) -> Aria2Client:
@@ -1236,6 +1237,18 @@ class TaskManager:
             self._runtime_task_state[task_id] = state
         else:
             self._runtime_task_state.pop(task_id, None)
+
+    def _make_concurrency_callback(self, task_id: str):
+        """生成上报“当前并行上传分块数”的回调；仅在 >1 时显示，结束(0)时清除。"""
+        def _cb(active_workers: int):
+            try:
+                n = int(active_workers or 0)
+            except (TypeError, ValueError):
+                n = 0
+            self._set_runtime_task_fields(
+                task_id, upload_active_workers=(n if n > 1 else None)
+            )
+        return _cb
 
     def _clear_runtime_task_fields(self, task_id: str, *keys: str):
         task_id = str(task_id or "")
@@ -2812,6 +2825,7 @@ class TaskManager:
                         confirmed_part_numbers=persisted_confirmed_part_numbers,
                         remote_parts=persisted_remote_parts,
                         part_confirm_callback=part_confirm_callback,
+                        concurrency_callback=self._make_concurrency_callback(task_id),
                     ),
                     timeout=self._calc_upload_timeout(file_size),
                 )
@@ -2997,6 +3011,7 @@ class TaskManager:
                 confirmed_part_numbers=confirmed_part_numbers,
                 remote_parts=persisted_remote_parts,
                 part_confirm_callback=part_confirm_callback,
+                concurrency_callback=self._make_concurrency_callback(task_id),
             ),
             timeout=self._calc_upload_timeout(file_size_on_disk),
         )

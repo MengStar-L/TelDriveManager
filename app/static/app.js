@@ -1263,7 +1263,8 @@ const A2TD_SERVER_VOLATILE_FIELDS = [
     'upload_note',
     'upload_note_level',
     'upload_chunk_done',
-    'upload_chunk_total'
+    'upload_chunk_total',
+    'upload_active_workers'
 ];
 
 function clearA2TDAuthoritativeVolatileFields(targetTask, sourceTask = {}) {
@@ -2082,6 +2083,10 @@ function buildA2TDTaskCardContent(task) {
             uploadChunkTotal > 0 ? `${uploadChunkDone}/${uploadChunkTotal} 块` : '等待上传',
             'primary upload'
         );
+        const parallelWorkers = Math.max(0, getA2TDNumber(task.upload_active_workers));
+        if (parallelWorkers > 1) {
+            pushMetaItem(`<i class="ph-fill ph-lightning"></i> ${parallelWorkers} 路并行`, 'parallel');
+        }
         if (uploadChunkTotal > 0 && uploadChunkDone >= uploadChunkTotal && task.status !== 'completed') {
             pushMetaItem('正在封装最终文件', 'secondary');
         }
@@ -2332,6 +2337,23 @@ async function toggleMonitorSerialMode(checked) {
     }
 }
 
+async function toggleMonitorParallelMode(checked) {
+    // 试验功能：单文件多分块并行上传。仅发送增量补丁，避免全量覆盖
+    const patch = { upload: { parallel_chunk_upload: !!checked } };
+    try {
+        const resp = await fetch('/api/settings', {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(patch)
+        });
+        if (resp.ok && window.currentConfig) {
+            window.currentConfig.upload = { ...(window.currentConfig.upload || {}), parallel_chunk_upload: !!checked };
+        }
+    } catch (e) {
+        console.error('并行上传开关保存失败:', e);
+    }
+}
+
 function togglePikpakLoginMode() {
     const mode = normalizePikpakLoginMode(document.getElementById('cfgPikpakLoginMode')?.value || 'password');
     const passwordFields = document.getElementById('cfgPikpakPasswordFields');
@@ -2387,6 +2409,7 @@ function collectSettingsConfig() {
         upload: {
             auto_delete: document.getElementById('cfgUploadAutoDelete').checked,
             serial_transfer_mode: !!document.getElementById('cfgUploadSerialTransferMode')?.checked,
+            parallel_chunk_upload: !!(window.currentConfig?.upload?.parallel_chunk_upload),
             max_retries: 3
         },
         telegram: {
@@ -2453,6 +2476,8 @@ async function loadConfig() {
         document.getElementById('cfgUploadSerialTransferMode').checked = !!cfg.upload?.serial_transfer_mode;
         const monitorToggle = document.getElementById('monitorSerialTransferMode');
         if (monitorToggle) monitorToggle.checked = !!cfg.upload?.serial_transfer_mode;
+        const monitorParallelToggle = document.getElementById('monitorParallelChunkUpload');
+        if (monitorParallelToggle) monitorParallelToggle.checked = !!cfg.upload?.parallel_chunk_upload;
 
         document.getElementById('cfgTelegramApiId').value = cfg.telegram?.api_id || '';
         document.getElementById('cfgTelegramApiHash').value = cfg.telegram?.api_hash || '';
@@ -2487,6 +2512,10 @@ async function syncMonitorSerialToggle() {
             const monitorToggle = document.getElementById('monitorSerialTransferMode');
             if (monitorToggle) {
                 monitorToggle.checked = !!window.currentConfig.upload.serial_transfer_mode;
+            }
+            const parallelToggle = document.getElementById('monitorParallelChunkUpload');
+            if (parallelToggle) {
+                parallelToggle.checked = !!window.currentConfig.upload.parallel_chunk_upload;
             }
         }
     } catch (e) {

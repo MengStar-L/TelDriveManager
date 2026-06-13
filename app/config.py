@@ -65,7 +65,7 @@ DEFAULTS: dict[str, Any] = {
     },
     "upload": {
         "max_retries": 3, "auto_delete": True, "serial_transfer_mode": False,
-        "min_throughput_kbps": 100,
+        "min_throughput_kbps": 100, "parallel_chunk_upload": False,
     },
     "telegram": {
         "api_id": 0, "api_hash": "", "channel_id": 0,
@@ -186,6 +186,7 @@ def _normalize_config(merged: dict, raw: dict | None = None) -> dict:
     upload_cfg["max_retries"] = max(1, int(upload_cfg.get("max_retries") or 3))
     upload_cfg["auto_delete"] = bool(upload_cfg.get("auto_delete", True))
     upload_cfg["serial_transfer_mode"] = bool(upload_cfg.get("serial_transfer_mode", False))
+    upload_cfg["parallel_chunk_upload"] = bool(upload_cfg.get("parallel_chunk_upload", False))
     upload_cfg["min_throughput_kbps"] = max(16, int(upload_cfg.get("min_throughput_kbps") or 100))
 
     log_cfg["buffer_size"] = max(50, int(log_cfg.get("buffer_size") or 400))

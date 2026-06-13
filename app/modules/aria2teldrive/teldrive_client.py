@@ -80,7 +80,8 @@ class TelDriveClient:
                  access_token: str = "", channel_id: int = 0,
                  chunk_size: str = "500M", upload_concurrency: int = 4,
                  random_chunk_name: bool = True, max_retries: int = 3,
-                 min_throughput_kbps: int = 100):
+                 min_throughput_kbps: int = 100,
+                 parallel_chunk_upload: bool = False):
         self.api_host = api_host.rstrip("/")
         self.access_token = access_token
         self.channel_id = channel_id
@@ -89,6 +90,8 @@ class TelDriveClient:
         self.upload_concurrency = upload_concurrency
         self.random_chunk_name = random_chunk_name
         self.max_retries = max_retries
+        # 试验功能：单文件多分块并行上传（默认关闭，关闭时走串行 _do_single_upload）
+        self.parallel_chunk_upload = bool(parallel_chunk_upload)
         # 超时计算假设的最低可接受吞吐（KB/s）；低于该速度判定为链路异常
         self.min_throughput_kbps = max(16, int(min_throughput_kbps or 100))
 
@@ -901,19 +904,46 @@ class TelDriveClient:
                                 file_path: Path, upload_id: str,
                                 filename: str, file_size: int,
                                 total_parts: int,
-                                progress_callback: Optional[Callable]) -> List[Dict]:
-        """并发分块上传，按 TelDrive 已确认的 part 累计进度。
+                                progress_callback: Optional[Callable],
+                                confirmed_part_numbers: Optional[List[int]] = None,
+                                remote_parts: Optional[List[Dict[str, Any]]] = None,
+                                part_confirm_callback: Optional[Callable] = None,
+                                concurrency_callback: Optional[Callable] = None) -> List[Dict]:
+        """并发分块上传（试验功能）。与 _do_single_upload 行为等价，仅把“缺失块”的
+        上传并行化，其余护栏（续传跳过已确认块、尺寸复核、逐块确认落库、错误即停）保持一致。
 
-        内存占用: upload_concurrency × STREAM_BLOCK(1MB) ≈ 4MB（而非旧版 ~2GB）
+        关键约束：所有簿记与回调（progress_callback / part_confirm_callback）都在同一把锁内
+        串行执行，且传入的是累计快照——因此并发乱序到达也能保证 confirmed 集合单调增长、
+        checkpoint 落库与串行路径语义完全一致。真正耗时的 _upload_single_chunk 在锁外并发。
+
+        内存占用: upload_concurrency × STREAM_BLOCK(1MB)（流式上传，不整块入内存）。
         """
-        sem = asyncio.Semaphore(self.upload_concurrency)
-        results: Dict[int, Dict] = {}
-        lock = asyncio.Lock()
-        confirmed_bytes = 0
-        confirmed_parts = 0
+        confirmed_set = set(self._normalize_confirmed_part_numbers(confirmed_part_numbers, total_parts))
+        remote_parts_map = self._build_remote_parts_map(remote_parts, total_parts)
 
-        # 构建 chunk 描述表（仅偏移量+大小，不读文件）
+        # 复核已确认分块：尺寸不符（chunk_size 变更/污染）的从复用集合剔除，强制重传
+        # —— 与 _do_single_upload 顶部逻辑一致，串行执行（快速，且需在并发前定稿）
+        for confirmed_no in list(confirmed_set):
+            expected_size = self._expected_part_size(file_size, confirmed_no, total_parts)
+            cached = remote_parts_map.get(confirmed_no)
+            if cached is not None and not self._part_size_matches(cached, expected_size):
+                logger.warning(
+                    f"  已确认块 {confirmed_no} 尺寸与当前分块方案不符 "
+                    f"(expected={expected_size}, actual={self._get_part_size(cached)})，将重新上传"
+                )
+                remote_parts_map.pop(confirmed_no, None)
+                confirmed_set.discard(confirmed_no)
+                continue
+            if confirmed_no not in remote_parts_map:
+                existing = await self._check_part_exists(
+                    session, upload_id, confirmed_no, remote_parts_map, expected_size
+                )
+                if existing and self._get_part_message_id(existing) is not None:
+                    remote_parts_map[confirmed_no] = dict(existing)
+                else:
+                    confirmed_set.discard(confirmed_no)
 
+        # 构建全部块描述表（partNo/offset/size），并挑出尚未确认的“缺失块”
         chunks_info = []
         offset = 0
         part_no = 1
@@ -923,45 +953,92 @@ class TelDriveClient:
             offset += cur_chunk_size
             part_no += 1
 
-        async def upload_chunk(p_no: int, p_offset: int, p_size: int):
-            nonlocal confirmed_bytes, confirmed_parts
-            async with sem:
-
-                logger.info(f"  并发上传块 {p_no}/{total_parts} ({p_size} bytes)")
-                part_result = await self._upload_single_chunk(
-                    session, upload_id, file_path,
-                    chunk_offset=p_offset,
-                    chunk_size=p_size,
-                    part_no=p_no, filename=filename, total_parts=total_parts,
-                )
-                async with lock:
-                    results[p_no] = part_result
-                    confirmed_bytes += p_size
-                    confirmed_parts += 1
-                    if progress_callback:
-                        await progress_callback(min(confirmed_bytes, file_size), file_size, confirmed_parts, total_parts)
-
-
-        # 创建所有上传任务
-        tasks = [
-            asyncio.create_task(upload_chunk(p_no, p_offset, p_size))
-            for p_no, p_offset, p_size in chunks_info
+        missing = [
+            (p_no, p_off, p_sz) for (p_no, p_off, p_sz) in chunks_info
+            if not (p_no in confirmed_set and p_no in remote_parts_map)
         ]
 
-        # 等待所有任务完成（任一失败则抛出异常）
-        done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_EXCEPTION)
+        # 已确认块的字节计入进度基线
+        confirmed_bytes = sum(
+            self._expected_part_size(file_size, p_no, total_parts)
+            for (p_no, _off, _sz) in chunks_info
+            if p_no in confirmed_set and p_no in remote_parts_map
+        )
 
-        # 检查是否有异常
-        for task in done:
-            if task.exception():
-                # 取消剩余任务
-                for p in pending:
-                    p.cancel()
-                raise task.exception()
+        concurrency = max(1, int(self.upload_concurrency or 1))
+        sem = asyncio.Semaphore(concurrency)
+        lock = asyncio.Lock()
+        active = 0
 
-        # 按 part_no 排序返回
-        sorted_parts = [results[k] for k in sorted(results.keys())]
-        return sorted_parts
+        def _report_active(delta: int):
+            nonlocal active
+            active += delta
+            if concurrency_callback:
+                try:
+                    concurrency_callback(active)
+                except Exception:
+                    pass
+
+        async def _emit_callbacks(p_no: int, part_result: dict, p_size: int):
+            # 在锁内串行执行：保证 confirmed 集合快照单调、回调顺序一致
+            nonlocal confirmed_bytes
+            remote_parts_map[p_no] = dict(part_result)
+            confirmed_set.add(p_no)
+            confirmed_bytes += p_size
+            if progress_callback:
+                await progress_callback(
+                    min(confirmed_bytes, file_size), file_size, len(confirmed_set), total_parts
+                )
+            if part_confirm_callback:
+                await part_confirm_callback(
+                    p_no,
+                    dict(part_result),
+                    self._normalize_confirmed_part_numbers(confirmed_set, total_parts),
+                    [dict(remote_parts_map[n]) for n in sorted(remote_parts_map.keys())],
+                    total_parts,
+                )
+
+        async def upload_chunk(p_no: int, p_offset: int, p_size: int):
+            async with sem:
+                async with lock:
+                    _report_active(1)
+                try:
+                    logger.info(f"  并发上传块 {p_no}/{total_parts} ({p_size} bytes)")
+                    part_result = await self._upload_single_chunk(
+                        session, upload_id, file_path,
+                        chunk_offset=p_offset,
+                        chunk_size=p_size,
+                        part_no=p_no, filename=filename, total_parts=total_parts,
+                    )
+                finally:
+                    async with lock:
+                        _report_active(-1)
+                async with lock:
+                    await _emit_callbacks(p_no, part_result, p_size)
+
+        if missing:
+            tasks = [
+                asyncio.create_task(upload_chunk(p_no, p_off, p_sz))
+                for (p_no, p_off, p_sz) in missing
+            ]
+            try:
+                done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_EXCEPTION)
+                for task in done:
+                    if task.exception():
+                        for p in pending:
+                            p.cancel()
+                        if pending:
+                            await asyncio.wait(pending)
+                        raise task.exception()
+            finally:
+                if concurrency_callback:
+                    try:
+                        concurrency_callback(0)
+                    except Exception:
+                        pass
+
+        # 按 partNo 排序返回（已确认块 + 新上传块）
+        return [dict(remote_parts_map[n]) for n in sorted(remote_parts_map.keys())]
 
 
     # ===========================================
@@ -974,7 +1051,8 @@ class TelDriveClient:
                                    upload_id: Optional[str] = None,
                                    confirmed_part_numbers: Optional[List[int]] = None,
                                    remote_parts: Optional[List[Dict[str, Any]]] = None,
-                                   part_confirm_callback: Optional[Callable] = None) -> dict:
+                                   part_confirm_callback: Optional[Callable] = None,
+                                   concurrency_callback: Optional[Callable] = None) -> dict:
         """上传文件到 TelDrive（完整流程）
 
         流程（参考 OpenList driver.go 的 Put 方法）：
@@ -1092,14 +1170,32 @@ class TelDriveClient:
                 )
                 upload_meta["confirmed_part_numbers"] = all_confirmed_numbers
 
-                # 步骤 4: 上传分块（保守正确策略：统一串行补缺块）
-                uploaded_parts = await self._do_single_upload(
-                    session, file_path, upload_id, filename,
-                    file_size, total_parts, progress_callback,
-                    confirmed_part_numbers=all_confirmed_numbers,
-                    remote_parts=remote_parts_live,
-                    part_confirm_callback=part_confirm_callback,
+                # 步骤 4: 上传分块
+                #  - 默认走串行补缺块（保守正确策略）
+                #  - 试验功能开启且为多块文件时，走并行补缺块（护栏一致）
+                use_parallel = (
+                    self.parallel_chunk_upload
+                    and total_parts > 1
+                    and int(self.upload_concurrency or 1) > 1
                 )
+                if use_parallel:
+                    logger.info(f"  使用并行上传（试验功能, 并发={self.upload_concurrency}）")
+                    uploaded_parts = await self._do_multi_upload(
+                        session, file_path, upload_id, filename,
+                        file_size, total_parts, progress_callback,
+                        confirmed_part_numbers=all_confirmed_numbers,
+                        remote_parts=remote_parts_live,
+                        part_confirm_callback=part_confirm_callback,
+                        concurrency_callback=concurrency_callback,
+                    )
+                else:
+                    uploaded_parts = await self._do_single_upload(
+                        session, file_path, upload_id, filename,
+                        file_size, total_parts, progress_callback,
+                        confirmed_part_numbers=all_confirmed_numbers,
+                        remote_parts=remote_parts_live,
+                        part_confirm_callback=part_confirm_callback,
+                    )
                 upload_meta["confirmed_part_numbers"] = self._extract_confirmed_part_numbers(uploaded_parts)
                 upload_meta["uploaded_parts"] = uploaded_parts
 

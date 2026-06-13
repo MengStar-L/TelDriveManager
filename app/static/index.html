@@ -758,6 +758,11 @@
             border-color: rgba(139,92,246,0.18);
         }
         .task-inline-item.status { color: #475569; }
+        .task-inline-item.parallel {
+            color: #9333ea;
+            background: rgba(168,85,247,0.1);
+            border-color: rgba(168,85,247,0.2);
+        }
         .task-inline-item.muted {
             font-weight: 500;
             color: var(--text-secondary);
@@ -1259,6 +1264,13 @@
                                     <i class="ph-fill ph-queue"></i> 串行模式
                                     <div class="toggle-switch">
                                         <input type="checkbox" id="monitorSerialTransferMode" onchange="toggleMonitorSerialMode(this.checked)">
+                                        <span class="toggle-slider"></span>
+                                    </div>
+                                </label>
+                                <label class="toggle-row" data-tooltip="试验功能：单个文件的多个分块并行上传（并发数 = 并发上传策略），可显著提速；网络/Telegram 限流时可能触发 flood-wait" style="margin-left: 8px; padding: 6px 12px; border-radius: 999px; background: rgba(168, 85, 247, 0.08); color: #9333ea; border: 1px solid rgba(168,85,247,0.18); font-size:13px; font-weight:600;">
+                                    <i class="ph-fill ph-lightning"></i> 并行上传
+                                    <div class="toggle-switch">
+                                        <input type="checkbox" id="monitorParallelChunkUpload" onchange="toggleMonitorParallelMode(this.checked)">
                                         <span class="toggle-slider"></span>
                                     </div>
                                 </label>
