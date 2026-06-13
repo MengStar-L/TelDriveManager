@@ -2448,6 +2448,7 @@ async function loadConfig() {
         document.getElementById('cfgTeldriveChannel').value = cfg.teldrive?.channel_id || 0;
         document.getElementById('cfgTeldriveConcurrency').value = cfg.teldrive?.upload_concurrency || 4;
         document.getElementById('cfgTeldriveChunkSize').value = cfg.teldrive?.chunk_size || '250M';
+        document.getElementById('cfgTeldriveChunkSize').closest('.custom-select')?._sync?.();
         document.getElementById('cfgUploadAutoDelete').checked = !!cfg.upload?.auto_delete;
         document.getElementById('cfgUploadSerialTransferMode').checked = !!cfg.upload?.serial_transfer_mode;
         const monitorToggle = document.getElementById('monitorSerialTransferMode');
@@ -2593,6 +2594,106 @@ function handleChunkSizeChange() {
     _autoSaveTimer = setTimeout(() => doAutoSave(select), 500);
 }
 
+// ── 自定义下拉栏：基于隐藏 <select> 同步值，支持展开/收回动画与键盘操作 ──
+function initCustomSelects(root = document) {
+    root.querySelectorAll('.custom-select').forEach(sel => {
+        if (sel._csInit) return;
+        sel._csInit = true;
+
+        const trigger = sel.querySelector('.custom-select__trigger');
+        const labelEl = sel.querySelector('.custom-select__label');
+        const native = sel.querySelector('select');
+        const options = Array.from(sel.querySelectorAll('.custom-select__option'));
+        if (!trigger || !labelEl || !native || !options.length) return;
+
+        // 用隐藏 option 的“主文本”刷新触发器与高亮选中项
+        const sync = () => {
+            const val = native.value;
+            const cur = options.find(o => o.dataset.value === val) || options[0];
+            options.forEach(o => o.classList.toggle('is-selected', o === cur));
+            if (cur) {
+                // 只取主文本与提示，不带选中勾（勾由 CSS 渲染在菜单内）
+                labelEl.innerHTML = cur.innerHTML;
+            }
+        };
+        sel._sync = sync;
+
+        const open = () => {
+            // 关闭其它已展开的下拉栏
+            document.querySelectorAll('.custom-select.open').forEach(o => { if (o !== sel) closeOne(o); });
+            sel.classList.add('open');
+            trigger.setAttribute('aria-expanded', 'true');
+            const cur = options.find(o => o.classList.contains('is-selected')) || options[0];
+            options.forEach(o => o.classList.toggle('is-active', o === cur));
+            if (cur) cur.scrollIntoView({ block: 'nearest' });
+        };
+        const close = () => closeOne(sel);
+
+        const choose = (opt) => {
+            const val = opt.dataset.value;
+            if (native.value !== val) {
+                native.value = val;
+                native.dispatchEvent(new Event('change', { bubbles: true }));
+            }
+            sync();
+            close();
+            trigger.focus();
+        };
+
+        trigger.addEventListener('click', (e) => {
+            e.stopPropagation();
+            sel.classList.contains('open') ? close() : open();
+        });
+
+        options.forEach(opt => {
+            opt.addEventListener('click', (e) => { e.stopPropagation(); choose(opt); });
+            opt.addEventListener('mousemove', () => {
+                options.forEach(o => o.classList.toggle('is-active', o === opt));
+            });
+        });
+
+        // 键盘操作：上下移动、回车选择、Esc 关闭
+        trigger.addEventListener('keydown', (e) => {
+            const isOpen = sel.classList.contains('open');
+            if (['ArrowDown', 'ArrowUp', 'Enter', ' '].includes(e.key)) {
+                e.preventDefault();
+                if (!isOpen) { open(); return; }
+            } else if (e.key === 'Escape') {
+                if (isOpen) { e.preventDefault(); close(); }
+                return;
+            } else {
+                return;
+            }
+
+            let idx = options.findIndex(o => o.classList.contains('is-active'));
+            if (e.key === 'ArrowDown') idx = Math.min(options.length - 1, idx + 1);
+            else if (e.key === 'ArrowUp') idx = Math.max(0, idx - 1);
+            else if (e.key === 'Enter' || e.key === ' ') { if (idx >= 0) choose(options[idx]); return; }
+
+            options.forEach((o, i) => o.classList.toggle('is-active', i === idx));
+            if (options[idx]) options[idx].scrollIntoView({ block: 'nearest' });
+        });
+
+        sync();
+    });
+
+    // 全局：点击外部或按 Esc 关闭所有下拉栏（只绑定一次）
+    if (!window._csGlobalBound) {
+        window._csGlobalBound = true;
+        document.addEventListener('click', () => {
+            document.querySelectorAll('.custom-select.open').forEach(closeOne);
+        });
+        document.addEventListener('keydown', (e) => {
+            if (e.key === 'Escape') document.querySelectorAll('.custom-select.open').forEach(closeOne);
+        });
+    }
+}
+
+function closeOne(sel) {
+    sel.classList.remove('open');
+    sel.querySelector('.custom-select__trigger')?.setAttribute('aria-expanded', 'false');
+}
+
 // ── Startup ──
 window.onload = async () => {
     const authReady = await waitForFrontendAuthReady();
@@ -2618,6 +2719,7 @@ window.onload = async () => {
         if (!document.hidden) refreshA2TDMonitorIfNeeded(true);
     });
     initAutoSave();
+    initCustomSelects();
     // 监听 Tel2TelDrive SSE 事件
     const es = new EventSource('/api/t2td/stream');
     es.onmessage = (e) => {
