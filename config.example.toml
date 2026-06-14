@@ -48,6 +48,9 @@ enabled = false                     # true 时启用远程推送
 rpc_url = "http://127.0.0.1"        # 远程 aria2 RPC 地址（如 http://192.168.1.10）
 rpc_port = 6800                     # 远程 aria2 RPC 端口
 rpc_secret = ""                     # 远程 aria2 RPC 密码（token）
+split = 0                           # 推送时的单任务分块数/线程数；0=不覆盖，沿用远程 aria2 自身配置
+max_connection_per_server = 0       # 推送时的单服务器最大连接数；0=不覆盖
+min_split_size_mb = 0               # 推送时的最小分块大小（MB）；0=不覆盖
 
 # ─── TelDrive 云盘（共享） ───
 [teldrive]

@@ -156,6 +156,24 @@ class TaskManager:
             )
         return self._remote_aria2
 
+    def _build_remote_push_options(self) -> dict:
+        """根据 remote_aria2 配置构造推送给远程 aria2 的 per-task 下载参数。
+
+        各参数为 0（或未配置）时不下发，沿用远程 aria2 自身的全局配置。
+        """
+        remote_cfg = self.config.get("remote_aria2", {})
+        options: dict = {}
+        split = max(0, int(remote_cfg.get("split") or 0))
+        if split > 0:
+            options["split"] = str(split)
+        max_conn = max(0, int(remote_cfg.get("max_connection_per_server") or 0))
+        if max_conn > 0:
+            options["max-connection-per-server"] = str(max_conn)
+        min_split_mb = max(0, int(remote_cfg.get("min_split_size_mb") or 0))
+        if min_split_mb > 0:
+            options["min-split-size"] = f"{min_split_mb}M"
+        return options
+
     def mirror_to_remote_aria2(self, url: str, filename: Optional[str] = None):
         """开启远程推送时，向远程 aria2 推送一份相同的下载链接（尽力而为，不阻塞本地下载）。
 
@@ -173,7 +191,7 @@ class TaskManager:
             remote = self._get_remote_aria2()
             if remote is None:
                 return
-            options = {}
+            options = self._build_remote_push_options()
             if filename:
                 options["out"] = filename
             gid = await remote.add_uri(url, options)

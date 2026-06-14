@@ -785,6 +785,7 @@ function runPageSideEffects(name) {
         loadA2TDTasks();
         syncMonitorSerialToggle();
     }
+    if (name === 'magnet' || name === 'share' || name === 'rss') syncRemotePushToggles();
     if (name === 'tel2teldrive') loadT2TDState();
     if (name === 'teldrivefolders') loadTelDriveFolderTree();
     if (name === 'settings') loadConfig();
@@ -2355,10 +2356,23 @@ async function toggleMonitorParallelMode(checked) {
     }
 }
 
-async function toggleMonitorRemotePush(checked) {
+// 远程推送开关出现在磁链解析、PikPak 分享、RSS 订阅三处工具栏，共享同一状态
+const REMOTE_PUSH_TOGGLE_IDS = ['magnetRemotePush', 'shareRemotePush', 'rssRemotePush'];
+
+function applyRemotePushToggleState(enabled) {
+    // 把三处开关的勾选状态统一刷新为 enabled
+    REMOTE_PUSH_TOGGLE_IDS.forEach(id => {
+        const el = document.getElementById(id);
+        if (el) el.checked = !!enabled;
+    });
+}
+
+async function toggleRemotePush(checked) {
     // 远程推送开关：本地下载任务同步镜像一份到远程 aria2（仅下载，不上传）。
     // 仅发送增量补丁，避免全量保存覆盖其它配置
-    const patch = { remote_aria2: { enabled: !!checked } };
+    const enabled = !!checked;
+    applyRemotePushToggleState(enabled); // 立即同步三处开关，避免页面间状态不一致
+    const patch = { remote_aria2: { enabled } };
     try {
         const resp = await fetch('/api/settings', {
             method: 'PUT',
@@ -2366,10 +2380,27 @@ async function toggleMonitorRemotePush(checked) {
             body: JSON.stringify(patch)
         });
         if (resp.ok && window.currentConfig) {
-            window.currentConfig.remote_aria2 = { ...(window.currentConfig.remote_aria2 || {}), enabled: !!checked };
+            window.currentConfig.remote_aria2 = { ...(window.currentConfig.remote_aria2 || {}), enabled };
         }
     } catch (e) {
         console.error('远程推送开关保存失败:', e);
+    }
+}
+
+async function syncRemotePushToggles() {
+    // 切换到三处解析页（或启动时）按当前配置刷新远程推送开关
+    try {
+        if (!window.currentConfig) {
+            const resp = await fetch('/api/settings');
+            if (resp.ok) {
+                window.currentConfig = await readJsonSafe(resp);
+            }
+        }
+        if (window.currentConfig) {
+            applyRemotePushToggleState(!!window.currentConfig.remote_aria2?.enabled);
+        }
+    } catch (e) {
+        console.error('远程推送开关同步失败:', e);
     }
 }
 
@@ -2422,6 +2453,9 @@ function collectSettingsConfig() {
             rpc_url: document.getElementById('cfgRemoteAria2Url').value.trim() || 'http://127.0.0.1',
             rpc_port: Math.max(1, parseInt(document.getElementById('cfgRemoteAria2Port').value, 10) || 6800),
             rpc_secret: document.getElementById('cfgRemoteAria2Secret').value.trim(),
+            split: Math.max(0, parseInt(document.getElementById('cfgRemoteAria2Split').value, 10) || 0),
+            max_connection_per_server: Math.max(0, parseInt(document.getElementById('cfgRemoteAria2MaxConnPerServer').value, 10) || 0),
+            min_split_size_mb: Math.max(0, parseInt(document.getElementById('cfgRemoteAria2MinSplitSize').value, 10) || 0),
         },
 
         teldrive: {
@@ -2494,6 +2528,9 @@ async function loadConfig() {
         document.getElementById('cfgRemoteAria2Url').value = cfg.remote_aria2?.rpc_url || 'http://127.0.0.1';
         document.getElementById('cfgRemoteAria2Port').value = cfg.remote_aria2?.rpc_port || 6800;
         document.getElementById('cfgRemoteAria2Secret').value = cfg.remote_aria2?.rpc_secret || '';
+        document.getElementById('cfgRemoteAria2Split').value = cfg.remote_aria2?.split || 0;
+        document.getElementById('cfgRemoteAria2MaxConnPerServer').value = cfg.remote_aria2?.max_connection_per_server || 0;
+        document.getElementById('cfgRemoteAria2MinSplitSize').value = cfg.remote_aria2?.min_split_size_mb || 0;
 
         document.getElementById('cfgTeldriveHost').value = cfg.teldrive?.api_host || '';
         document.getElementById('cfgTeldriveToken').value = cfg.teldrive?.access_token || '';
@@ -2507,8 +2544,7 @@ async function loadConfig() {
         if (monitorToggle) monitorToggle.checked = !!cfg.upload?.serial_transfer_mode;
         const monitorParallelToggle = document.getElementById('monitorParallelChunkUpload');
         if (monitorParallelToggle) monitorParallelToggle.checked = !!cfg.upload?.parallel_chunk_upload;
-        const monitorRemotePushToggle = document.getElementById('monitorRemotePush');
-        if (monitorRemotePushToggle) monitorRemotePushToggle.checked = !!cfg.remote_aria2?.enabled;
+        applyRemotePushToggleState(!!cfg.remote_aria2?.enabled);
 
         document.getElementById('cfgTelegramApiId').value = cfg.telegram?.api_id || '';
         document.getElementById('cfgTelegramApiHash').value = cfg.telegram?.api_hash || '';
@@ -2547,10 +2583,6 @@ async function syncMonitorSerialToggle() {
             const parallelToggle = document.getElementById('monitorParallelChunkUpload');
             if (parallelToggle) {
                 parallelToggle.checked = !!window.currentConfig.upload?.parallel_chunk_upload;
-            }
-            const remotePushToggle = document.getElementById('monitorRemotePush');
-            if (remotePushToggle) {
-                remotePushToggle.checked = !!window.currentConfig.remote_aria2?.enabled;
             }
         }
     } catch (e) {
@@ -2776,6 +2808,7 @@ window.onload = async () => {
         }
     }
     connectWS();
+    syncRemotePushToggles(); // 启动时初始化三处解析页的远程推送开关（含默认磁链页）
     checkServicesStatus();
     setInterval(checkServicesStatus, 30000);
     setInterval(() => refreshA2TDMonitorIfNeeded(), 4000);

@@ -63,6 +63,9 @@ DEFAULTS: dict[str, Any] = {
         "rpc_url": "http://127.0.0.1",
         "rpc_port": 6800,
         "rpc_secret": "",
+        "split": 0,
+        "max_connection_per_server": 0,
+        "min_split_size_mb": 0,
     },
     "teldrive": {
         "api_host": "", "access_token": "", "channel_id": 0,
@@ -194,6 +197,10 @@ def _normalize_config(merged: dict, raw: dict | None = None) -> dict:
     remote_aria2_cfg["rpc_url"] = str(remote_aria2_cfg.get("rpc_url") or "http://127.0.0.1").strip() or "http://127.0.0.1"
     remote_aria2_cfg["rpc_port"] = max(1, int(remote_aria2_cfg.get("rpc_port") or 6800))
     remote_aria2_cfg["rpc_secret"] = str(remote_aria2_cfg.get("rpc_secret") or "").strip()
+    # 推送给远程 aria2 的 per-task 下载参数；0 表示不覆盖，沿用远程自身配置
+    remote_aria2_cfg["split"] = max(0, int(remote_aria2_cfg.get("split") or 0))
+    remote_aria2_cfg["max_connection_per_server"] = max(0, int(remote_aria2_cfg.get("max_connection_per_server") or 0))
+    remote_aria2_cfg["min_split_size_mb"] = max(0, int(remote_aria2_cfg.get("min_split_size_mb") or 0))
 
     upload_cfg["max_retries"] = max(1, int(upload_cfg.get("max_retries") or 3))
     upload_cfg["auto_delete"] = bool(upload_cfg.get("auto_delete", True))

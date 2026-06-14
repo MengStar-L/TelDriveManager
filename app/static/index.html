@@ -487,6 +487,8 @@
         .form-group label { font-size: 13px; font-weight: 600; color: var(--text-secondary); }
         
         .toggle-row { display: flex; align-items: center; gap: 12px; font-size: 14px; font-weight: 500; color: var(--text-secondary); cursor: pointer; user-select: none; }
+        /* 远程推送药丸开关：复用于磁链解析、PikPak 分享、RSS 订阅三处工具栏 */
+        .remote-push-pill { align-self: center; gap: 8px; padding: 6px 12px; border-radius: 999px; background: rgba(16, 185, 129, 0.08); color: #059669; border: 1px solid rgba(16, 185, 129, 0.18); font-size: 13px; font-weight: 600; flex-shrink: 0; white-space: nowrap; }
         .toggle-switch { position: relative; width: 44px; height: 24px; flex-shrink: 0; }
         .toggle-switch input { opacity: 0; width: 0; height: 0; }
         .toggle-slider { position: absolute; inset: 0; background: #cbd5e1; border-radius: 24px; transition: 0.3s; box-shadow: inset 0 1px 3px rgba(0,0,0,0.1); }
@@ -1059,7 +1061,14 @@
                             <textarea class="magnet-input" id="magnetInput" placeholder="输入磁力链接，支持粘贴多行..."></textarea>
                             <div class="input-footer">
                                 <span class="input-hint"><i class="ph-fill ph-info"></i> 单链可以解析选择文件，多行直接全量并行下载。</span>
-                                <div style="display:flex; gap:12px;">
+                                <div style="display:flex; gap:12px; align-items:center;">
+                                    <label class="toggle-row remote-push-pill" data-tooltip="开启后，本地下载任务会同步向设置页配置的远程 aria2 推送一份相同下载链接（仅下载，不上传），即时生效">
+                                        <i class="ph-fill ph-broadcast"></i> 远程推送
+                                        <div class="toggle-switch">
+                                            <input type="checkbox" id="magnetRemotePush" onchange="toggleRemotePush(this.checked)">
+                                            <span class="toggle-slider"></span>
+                                        </div>
+                                    </label>
                                     <button class="btn btn-ghost" id="magnetParseBtn" onclick="parseMagnet()"><i class="ph ph-magnifying-glass"></i> 解析后选择</button>
                                     <button class="btn btn-primary" id="submitBtn" onclick="submitMagnets()"><i class="ph ph-rocket-launch"></i> 一键推送</button>
                                 </div>
@@ -1109,6 +1118,13 @@
                                 <input class="form-input toolbar-input-primary" type="text" id="shareLink" placeholder="输入 PikPak 分享链接...">
                                 <input class="form-input toolbar-input-secondary" type="text" id="sharePassCode" placeholder="提取码">
                                 <button class="btn btn-primary toolbar-action" id="shareParseBtn" onclick="parseShareLink()"><i class="ph ph-magnifying-glass"></i> 解析</button>
+                                <label class="toggle-row remote-push-pill" data-tooltip="开启后，本地下载任务会同步向设置页配置的远程 aria2 推送一份相同下载链接（仅下载，不上传），即时生效">
+                                    <i class="ph-fill ph-broadcast"></i> 远程推送
+                                    <div class="toggle-switch">
+                                        <input type="checkbox" id="shareRemotePush" onchange="toggleRemotePush(this.checked)">
+                                        <span class="toggle-slider"></span>
+                                    </div>
+                                </label>
                             </div>
                             
                             <div id="shareFileArea" class="share-file-panel">
@@ -1157,6 +1173,13 @@
                             <div class="rss-toolbar">
                                 <input class="form-input toolbar-input-primary" type="text" id="rssUrl" placeholder="输入目标 RSS 订阅源...">
                                 <button class="btn btn-primary toolbar-action" id="rssParseBtn" onclick="parseRSS()"><i class="ph ph-radar"></i> 扫描提取</button>
+                                <label class="toggle-row remote-push-pill" data-tooltip="开启后，本地下载任务会同步向设置页配置的远程 aria2 推送一份相同下载链接（仅下载，不上传），即时生效">
+                                    <i class="ph-fill ph-broadcast"></i> 远程推送
+                                    <div class="toggle-switch">
+                                        <input type="checkbox" id="rssRemotePush" onchange="toggleRemotePush(this.checked)">
+                                        <span class="toggle-slider"></span>
+                                    </div>
+                                </label>
                             </div>
                             
                             <div id="rssResultArea" class="rss-result-panel">
@@ -1271,13 +1294,6 @@
                                     <i class="ph-fill ph-lightning"></i> 并行上传
                                     <div class="toggle-switch">
                                         <input type="checkbox" id="monitorParallelChunkUpload" onchange="toggleMonitorParallelMode(this.checked)">
-                                        <span class="toggle-slider"></span>
-                                    </div>
-                                </label>
-                                <label class="toggle-row" data-tooltip="开启后，本地下载任务会同步向设置页配置的远程 aria2 推送一份相同下载链接（仅下载，不上传），即时生效" style="margin-left: 8px; padding: 6px 12px; border-radius: 999px; background: rgba(16, 185, 129, 0.08); color: #059669; border: 1px solid rgba(16,185,129,0.18); font-size:13px; font-weight:600;">
-                                    <i class="ph-fill ph-broadcast"></i> 远程推送
-                                    <div class="toggle-switch">
-                                        <input type="checkbox" id="monitorRemotePush" onchange="toggleMonitorRemotePush(this.checked)">
                                         <span class="toggle-slider"></span>
                                     </div>
                                 </label>
@@ -1551,7 +1567,11 @@
                                     <div class="form-group"><label>远程 RPC 地址</label><input class="form-input" type="text" id="cfgRemoteAria2Url" placeholder="http://192.168.1.10"></div>
                                     <div class="form-group"><label>远程 RPC 端口</label><input class="form-input" type="number" id="cfgRemoteAria2Port" min="1" max="65535" placeholder="6800"></div>
                                     <div class="form-group"><label>远程 RPC 密码</label><input class="form-input" type="password" id="cfgRemoteAria2Secret" placeholder="远程 aria2 的 rpc-secret，可留空"></div>
+                                    <div class="form-group"><label>单任务分块数</label><input class="form-input" type="number" id="cfgRemoteAria2Split" min="0" max="64" placeholder="0=不覆盖"></div>
+                                    <div class="form-group"><label>单服务器最大连接数</label><input class="form-input" type="number" id="cfgRemoteAria2MaxConnPerServer" min="0" max="64" placeholder="0=不覆盖"></div>
+                                    <div class="form-group"><label>最小分块大小 (MB)</label><input class="form-input" type="number" id="cfgRemoteAria2MinSplitSize" min="0" max="1024" placeholder="0=不覆盖"></div>
                                 </div>
+                                <div class="wizard-note" style="margin-top:12px;">以上三个下载参数仅在推送链接到远程 aria2 时随链接下发；留空或填 0 表示不覆盖，由远程 aria2 按自身配置下载。</div>
                             </div>
                         </div>
 
