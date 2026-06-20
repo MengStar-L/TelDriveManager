@@ -110,11 +110,19 @@ function getNextWizardStep(step) {
 
 function getWizardPendingSteps(data = {}, healthDetails = {}) {
     const pikpakMode = normalizePikpakLoginMode(data.pikpak?.login_mode || 'password');
+    const configuredAccounts = Array.isArray(data.pikpak?.accounts) ? data.pikpak.accounts : [];
+    const hasConfiguredAccount = configuredAccounts.some(account => {
+        if (!account || account.enabled === false) return false;
+        const mode = normalizePikpakLoginMode(account.login_mode || 'password');
+        return mode === 'token'
+            ? !!account.session
+            : !!(account.username && account.password);
+    });
     const pikpakReady = typeof healthDetails?.pikpak === 'boolean'
         ? healthDetails.pikpak
-        : (pikpakMode === 'token'
+        : (hasConfiguredAccount || (pikpakMode === 'token'
             ? !!data.pikpak?.session
-            : !!(data.pikpak?.username && data.pikpak?.password));
+            : !!(data.pikpak?.username && data.pikpak?.password)));
 
     const aria2Ready = typeof healthDetails?.aria2 === 'boolean'
         ? healthDetails.aria2
@@ -228,6 +236,10 @@ function updatePikpakLoginMode(inputId, groupId, mode, autoSave = false) {
         toggleWizardPikpakLoginMode();
         return;
     }
+    if (inputId === 'pikpakAccountLoginMode') {
+        togglePikpakAccountLoginMode();
+        return;
+    }
 
     togglePikpakLoginMode();
     if (autoSave && input) {
@@ -248,11 +260,15 @@ function toggleWizardPikpakLoginMode() {
 
 function fillWizardInputs(data = {}) {
     try {
-        const pikpakMode = normalizePikpakLoginMode(data.pikpak?.login_mode || 'password');
+        const firstPikpakAccount = Array.isArray(data.pikpak?.accounts)
+            ? data.pikpak.accounts.find(account => account && account.enabled !== false) || data.pikpak.accounts[0]
+            : null;
+        const pikpakSource = firstPikpakAccount || data.pikpak || {};
+        const pikpakMode = normalizePikpakLoginMode(pikpakSource.login_mode || 'password');
         document.getElementById('wPikLoginMode').value = pikpakMode;
-        document.getElementById('wPikUser').value = data.pikpak?.username || '';
-        document.getElementById('wPikPass').value = data.pikpak?.password || '';
-        document.getElementById('wPikToken').value = data.pikpak?.session || '';
+        document.getElementById('wPikUser').value = pikpakSource.username || '';
+        document.getElementById('wPikPass').value = pikpakSource.password || '';
+        document.getElementById('wPikToken').value = pikpakSource.session || '';
         toggleWizardPikpakLoginMode();
         document.getElementById('wTdUrl').value = data.teldrive?.api_host || '';
         document.getElementById('wTdToken').value = data.teldrive?.access_token || '';
@@ -788,6 +804,7 @@ function runPageSideEffects(name) {
     if (name === 'magnet' || name === 'share' || name === 'rss') syncRemotePushToggles();
     if (name === 'tel2teldrive') loadT2TDState();
     if (name === 'teldrivefolders') loadTelDriveFolderTree();
+    if (name === 'pikpakAccounts') loadPikpakAccountsPage();
     if (name === 'settings') loadConfig();
     if (name === 'progress') loadParseWorkspaceSnapshot();
 }
@@ -1561,6 +1578,11 @@ function buildProgressLogEntry(msg) {
         }
     }
 
+    if (text && msg.account_name) {
+        text += renderProgressLogMeta([
+            `账号：<span class="log-path">${escapeA2TDHtml(msg.account_name)}</span>`
+        ]);
+    }
     return text ? { icon, text } : null;
 }
 
@@ -1666,9 +1688,10 @@ function setParseButtonsState(job = activeParseJob) {
     Object.entries(PARSE_BUTTON_CONFIG).forEach(([jobType, cfg]) => {
         const btn = document.getElementById(cfg.buttonId);
         if (!btn) return;
-        btn.disabled = hasActive;
+        btn.disabled = false;
         btn.innerHTML = hasActive && jobType === activeType ? cfg.busyHtml : cfg.idleHtml;
         btn.title = hasActive && jobType !== activeType ? '当前已有解析任务正在执行' : '';
+        btn.title = '';
         btn.classList.toggle('is-loading', hasActive && jobType === activeType);
     });
 }
@@ -1679,6 +1702,12 @@ function renderMagnetParseResult(result = {}) {
     magnetRoots = Array.isArray(result.roots) && result.roots.length
         ? result.roots.filter(Boolean)
         : (result.file_id ? [result.file_id] : []);
+    magnetRootAccounts = (result.root_accounts && typeof result.root_accounts === 'object') ? { ...result.root_accounts } : {};
+    if (!Object.keys(magnetRootAccounts).length && Array.isArray(result.files)) {
+        result.files.forEach(item => {
+            if (item?.root_file_id && item?.account_id) magnetRootAccounts[item.root_file_id] = item.account_id;
+        });
+    }
     magnetFileData = sortPickerItemsByName(result.files || []);
     const titleEl = document.getElementById('magnetFileName');
     const metaEl = document.getElementById('magnetPanelMeta');
@@ -1884,6 +1913,14 @@ function escapeA2TDHtml(value) {
         .replace(/>/g, '&gt;')
         .replace(/"/g, '&quot;')
         .replace(/'/g, '&#39;');
+}
+
+function escapeA2TDAttr(value) {
+    return escapeA2TDHtml(value).replace(/`/g, '&#96;');
+}
+
+function escapeA2TDJsArg(value) {
+    return JSON.stringify(String(value ?? '')).replace(/"/g, '&quot;');
 }
 
 function getA2TDTaskStatusLabel(status) {
@@ -2411,6 +2448,321 @@ function togglePikpakLoginMode() {
     syncPikpakLoginModeButtons('cfgPikpakLoginModeSwitch', mode);
     if (passwordFields) passwordFields.style.display = mode === 'token' ? 'none' : 'grid';
     if (tokenFields) tokenFields.style.display = mode === 'token' ? 'grid' : 'none';
+}
+
+let pikpakAccountsState = {
+    accounts: [],
+    parseConcurrency: 1,
+    activeErrorAccountId: '',
+};
+
+function togglePikpakAccountLoginMode() {
+    const mode = normalizePikpakLoginMode(document.getElementById('pikpakAccountLoginMode')?.value || 'password');
+    syncPikpakLoginModeButtons('pikpakAccountLoginModeSwitch', mode);
+    const passwordFields = document.getElementById('pikpakAccountPasswordFields');
+    const tokenFields = document.getElementById('pikpakAccountTokenFields');
+    if (passwordFields) passwordFields.style.display = mode === 'token' ? 'none' : 'grid';
+    if (tokenFields) tokenFields.style.display = mode === 'token' ? 'grid' : 'none';
+}
+
+async function loadPikpakAccountsPage(showToast = false) {
+    try {
+        const resp = await fetch('/api/pikpak/accounts', { cache: 'no-store' });
+        const data = await readJsonSafe(resp);
+        if (!resp.ok || data.success === false) throw new Error(data.message || data.error || '读取 PikPak 账号失败');
+        pikpakAccountsState.accounts = Array.isArray(data.accounts) ? data.accounts : [];
+        pikpakAccountsState.parseConcurrency = Math.max(1, Math.min(16, parseInt(data.parse_concurrency, 10) || 1));
+        const concurrencyInput = document.getElementById('pikpakParseConcurrency');
+        if (concurrencyInput) concurrencyInput.value = pikpakAccountsState.parseConcurrency;
+        togglePikpakAccountLoginMode();
+        renderPikpakAccountCards();
+        if (showToast && typeof showA2TDToast === 'function') showA2TDToast('PikPak 账号已刷新', 'success');
+    } catch (e) {
+        renderPikpakAccountCards(e.message || '读取 PikPak 账号失败');
+        if (typeof showA2TDToast === 'function') showA2TDToast(e.message || '读取 PikPak 账号失败', 'error');
+    }
+}
+
+function formatPikpakAccountDate(value, withTime = false) {
+    if (!value) return '';
+    const raw = String(value).trim();
+    if (!raw) return '';
+    const numeric = Number(raw);
+    let date = null;
+    if (Number.isFinite(numeric) && numeric > 0) {
+        date = new Date(numeric > 100000000000 ? numeric : numeric * 1000);
+    } else {
+        date = new Date(raw);
+    }
+    if (Number.isNaN(date.getTime())) return raw;
+    const options = withTime
+        ? { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }
+        : { year: 'numeric', month: '2-digit', day: '2-digit' };
+    return date.toLocaleString('zh-CN', options);
+}
+
+function getPikpakAccountVipView(account) {
+    const vip = account?.vip && typeof account.vip === 'object' ? account.vip : {};
+    const expire = vip.expire || vip.expire_time || '';
+    const formattedExpire = formatPikpakAccountDate(expire);
+    if (vip.error) {
+        return {
+            className: 'is-error',
+            icon: 'ph-warning-circle',
+            title: '获取失败',
+        };
+    }
+    if (vip.is_vip) {
+        return {
+            className: 'is-vip',
+            icon: 'ph-crown-simple',
+            title: formattedExpire || '会员有效',
+        };
+    }
+    if (expire) {
+        return {
+            className: 'is-normal',
+            icon: 'ph-clock-countdown',
+            title: formattedExpire || String(expire),
+        };
+    }
+    return {
+        className: 'is-normal',
+        icon: 'ph-clock-countdown',
+        title: '待获取',
+    };
+}
+
+function renderPikpakAccountCards(errorMessage = '') {
+    const list = document.getElementById('pikpakAccountList');
+    if (!list) return;
+    if (errorMessage) {
+        list.innerHTML = `<div class="log-empty"><i class="ph ph-warning-circle"></i> ${escapeA2TDHtml(errorMessage)}</div>`;
+        return;
+    }
+    const accounts = pikpakAccountsState.accounts || [];
+    if (!accounts.length) {
+        list.innerHTML = '<div class="log-empty"><i class="ph ph-cloud-slash"></i> 暂无 PikPak 账号</div>';
+        return;
+    }
+    list.innerHTML = accounts.map(account => {
+        const enabled = account.enabled !== false;
+        const errorCount = Number(account.error_count || 0) || 0;
+        const vipView = getPikpakAccountVipView(account);
+        const errorButton = errorCount > 0
+            ? `<button class="btn btn-ghost btn-sm pikpak-error-chip" onclick="openPikpakAccountErrorsModal(${escapeA2TDJsArg(account.id)})"><i class="ph ph-warning-circle"></i> 出现 ${errorCount} 个错误</button>`
+            : '';
+        return `
+            <div class="pikpak-account-card ${enabled ? 'is-enabled' : 'is-disabled'} ${errorCount > 0 ? 'has-errors' : ''}">
+                <div class="pikpak-account-head">
+                    <div class="pikpak-account-title">
+                        <i class="ph ${enabled ? 'ph-cloud-check' : 'ph-cloud-slash'}"></i>
+                        <span class="pikpak-account-name">${escapeA2TDHtml(account.name || 'PikPak 账号')}</span>
+                        <span class="pikpak-vip-pill ${escapeA2TDHtml(vipView.className)}"><i class="ph ${escapeA2TDHtml(vipView.icon)}"></i> ${escapeA2TDHtml(vipView.title)}</span>
+                    </div>
+                    <span class="wizard-status-badge ${enabled ? 'success' : 'info'}">${enabled ? '启用' : '停用'}</span>
+                </div>
+                <div class="pikpak-account-actions">
+                    <button class="btn btn-ghost btn-sm" onclick="testPikpakAccount(${escapeA2TDJsArg(account.id)})"><i class="ph ph-plugs-connected"></i> 测试</button>
+                    <button class="btn btn-ghost btn-sm" onclick="refreshPikpakAccountLogin(${escapeA2TDJsArg(account.id)}, this)"><i class="ph ph-arrows-clockwise"></i> 重新获取登录信息</button>
+                    <button class="btn btn-ghost btn-sm" onclick="togglePikpakAccountEnabled(${escapeA2TDJsArg(account.id)}, ${enabled ? 'false' : 'true'})"><i class="ph ${enabled ? 'ph-pause-circle' : 'ph-play-circle'}"></i> ${enabled ? '停用' : '启用'}</button>
+                    <button class="btn btn-ghost btn-sm" onclick="renamePikpakAccount(${escapeA2TDJsArg(account.id)})"><i class="ph ph-pencil-simple"></i> 重命名</button>
+                    ${errorButton}
+                    <button class="btn btn-ghost btn-sm btn-action-danger" onclick="deletePikpakAccount(${escapeA2TDJsArg(account.id)})"><i class="ph ph-trash"></i> 删除</button>
+                </div>
+            </div>`;
+    }).join('');
+}
+
+function getPikpakAccountById(accountId) {
+    return (pikpakAccountsState.accounts || []).find(account => String(account.id) === String(accountId)) || null;
+}
+
+async function savePikpakSchedulerConfig() {
+    const value = Math.max(1, Math.min(16, parseInt(document.getElementById('pikpakParseConcurrency')?.value, 10) || 1));
+    try {
+        const resp = await fetch('/api/pikpak/scheduler/config', {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ parse_concurrency: value }),
+        });
+        const data = await readJsonSafe(resp);
+        if (!resp.ok || data.success === false) throw new Error(data.message || '保存并发数失败');
+        pikpakAccountsState.parseConcurrency = data.parse_concurrency || value;
+        if (typeof showA2TDToast === 'function') showA2TDToast('解析并发数已保存', 'success');
+    } catch (e) {
+        if (typeof showA2TDToast === 'function') showA2TDToast(e.message || '保存并发数失败', 'error');
+    }
+}
+
+async function addPikpakAccount() {
+    const btn = document.getElementById('pikpakAddAccountBtn');
+    const mode = normalizePikpakLoginMode(document.getElementById('pikpakAccountLoginMode')?.value || 'password');
+    const payload = {
+        name: document.getElementById('pikpakAccountName')?.value.trim() || '',
+        login_mode: mode,
+        enabled: true,
+    };
+    if (mode === 'token') {
+        payload.session = document.getElementById('pikpakAccountToken')?.value.trim() || '';
+    } else {
+        payload.username = document.getElementById('pikpakAccountUsername')?.value.trim() || '';
+        payload.password = document.getElementById('pikpakAccountPassword')?.value || '';
+    }
+    try {
+        if (btn) { btn.disabled = true; btn.innerHTML = '<span class="spinner"></span> 验证中...'; }
+        const resp = await fetch('/api/pikpak/accounts', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+        });
+        const data = await readJsonSafe(resp);
+        if (!resp.ok || data.success === false) throw new Error(data.message || '添加账号失败');
+        ['pikpakAccountName', 'pikpakAccountUsername', 'pikpakAccountPassword', 'pikpakAccountToken'].forEach(id => {
+            const el = document.getElementById(id);
+            if (el) el.value = '';
+        });
+        await loadPikpakAccountsPage();
+        if (typeof showA2TDToast === 'function') showA2TDToast(data.message || 'PikPak 账号已添加', 'success');
+    } catch (e) {
+        alert(e.message || '添加账号失败');
+    } finally {
+        if (btn) { btn.disabled = false; btn.innerHTML = '<i class="ph ph-plus"></i> 添加账号'; }
+    }
+}
+
+async function updatePikpakAccount(accountId, patch) {
+    const resp = await fetch(`/api/pikpak/accounts/${encodeURIComponent(accountId)}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(patch || {}),
+    });
+    const data = await readJsonSafe(resp);
+    if (!resp.ok || data.success === false) throw new Error(data.message || '更新账号失败');
+    await loadPikpakAccountsPage();
+    return data;
+}
+
+async function togglePikpakAccountEnabled(accountId, enabled) {
+    try {
+        await updatePikpakAccount(accountId, { enabled: !!enabled });
+    } catch (e) {
+        if (typeof showA2TDToast === 'function') showA2TDToast(e.message || '更新账号失败', 'error');
+    }
+}
+
+async function renamePikpakAccount(accountId) {
+    const account = getPikpakAccountById(accountId);
+    if (!account) return;
+    const name = window.prompt('账号名称', account.name || '');
+    if (name === null) return;
+    try {
+        await updatePikpakAccount(accountId, { name: String(name).trim() || account.name || 'PikPak 账号' });
+    } catch (e) {
+        if (typeof showA2TDToast === 'function') showA2TDToast(e.message || '更新账号失败', 'error');
+    }
+}
+
+async function testPikpakAccount(accountId) {
+    try {
+        const resp = await fetch(`/api/pikpak/accounts/${encodeURIComponent(accountId)}/test`, { method: 'POST' });
+        const data = await readJsonSafe(resp);
+        if (!resp.ok || data.success === false) throw new Error(data.message || '账号测试失败');
+        if (typeof showA2TDToast === 'function') showA2TDToast(data.message || '账号测试成功', 'success');
+    } catch (e) {
+        if (typeof showA2TDToast === 'function') showA2TDToast(e.message || '账号测试失败', 'error');
+    }
+}
+
+async function refreshPikpakAccountLogin(accountId, button) {
+    const oldHtml = button?.innerHTML || '';
+    try {
+        if (button) {
+            button.disabled = true;
+            button.innerHTML = '<span class="spinner"></span> 刷新中...';
+        }
+        const resp = await fetch(`/api/pikpak/accounts/${encodeURIComponent(accountId)}/refresh`, { method: 'POST' });
+        const data = await readJsonSafe(resp);
+        if (!resp.ok || data.success === false) throw new Error(data.message || '重新获取登录信息失败');
+        if (data.account) {
+            pikpakAccountsState.accounts = (pikpakAccountsState.accounts || []).map(account =>
+                String(account.id) === String(accountId) ? data.account : account
+            );
+            renderPikpakAccountCards();
+        } else {
+            await loadPikpakAccountsPage();
+        }
+        if (typeof showA2TDToast === 'function') showA2TDToast(data.message || '登录信息已刷新', 'success');
+    } catch (e) {
+        if (button && button.isConnected) {
+            button.disabled = false;
+            button.innerHTML = oldHtml;
+        }
+        if (typeof showA2TDToast === 'function') showA2TDToast(e.message || '重新获取登录信息失败', 'error');
+    }
+}
+
+async function deletePikpakAccount(accountId) {
+    if (!confirm('删除此 PikPak 账号？')) return;
+    try {
+        const resp = await fetch(`/api/pikpak/accounts/${encodeURIComponent(accountId)}`, { method: 'DELETE' });
+        const data = await readJsonSafe(resp);
+        if (!resp.ok || data.success === false) throw new Error(data.message || '删除账号失败');
+        await loadPikpakAccountsPage();
+    } catch (e) {
+        if (typeof showA2TDToast === 'function') showA2TDToast(e.message || '删除账号失败', 'error');
+    }
+}
+
+async function openPikpakAccountErrorsModal(accountId, accountName = '') {
+    pikpakAccountsState.activeErrorAccountId = accountId;
+    const account = getPikpakAccountById(accountId);
+    accountName = accountName || account?.name || '';
+    const modal = document.getElementById('pikpakErrorsModal');
+    const title = document.getElementById('pikpakErrorsTitle');
+    const list = document.getElementById('pikpakErrorsList');
+    if (title) title.innerHTML = `<i class="ph ph-warning-circle"></i> ${escapeA2TDHtml(accountName || 'PikPak 账号')} 错误`;
+    if (list) list.innerHTML = '<div class="log-empty"><span class="spinner"></span> 加载中...</div>';
+    modal?.classList.add('show');
+    try {
+        const resp = await fetch(`/api/pikpak/accounts/${encodeURIComponent(accountId)}/errors`, { cache: 'no-store' });
+        const data = await readJsonSafe(resp);
+        if (!resp.ok || data.success === false) throw new Error(data.message || '读取错误失败');
+        const errors = Array.isArray(data.errors) ? data.errors : [];
+        if (!list) return;
+        if (!errors.length) {
+            list.innerHTML = '<div class="log-empty"><i class="ph ph-check-circle"></i> 暂无错误</div>';
+            return;
+        }
+        list.innerHTML = errors.map(item => `
+            <div class="pikpak-error-row">
+                <strong>${escapeA2TDHtml(item.stage || 'parse')} · ${escapeA2TDHtml(formatProgressLogTime(item.created_at))}</strong>
+                <p>${escapeA2TDHtml(item.message || '')}</p>
+                ${item.link ? `<p>${escapeA2TDHtml(item.link)}</p>` : ''}
+            </div>
+        `).join('');
+    } catch (e) {
+        if (list) list.innerHTML = `<div class="log-empty"><i class="ph ph-warning-circle"></i> ${escapeA2TDHtml(e.message || '读取错误失败')}</div>`;
+    }
+}
+
+function closePikpakAccountErrorsModal(event) {
+    if (event && event.target && event.currentTarget && event.target !== event.currentTarget) return;
+    document.getElementById('pikpakErrorsModal')?.classList.remove('show');
+}
+
+async function clearPikpakAccountErrors() {
+    const accountId = pikpakAccountsState.activeErrorAccountId;
+    if (!accountId) return;
+    try {
+        const resp = await fetch(`/api/pikpak/accounts/${encodeURIComponent(accountId)}/errors`, { method: 'DELETE' });
+        const data = await readJsonSafe(resp);
+        if (!resp.ok || data.success === false) throw new Error(data.message || '清空错误失败');
+        await openPikpakAccountErrorsModal(accountId, document.getElementById('pikpakErrorsTitle')?.textContent?.replace('错误', '').trim() || '');
+        await loadPikpakAccountsPage();
+    } catch (e) {
+        if (typeof showA2TDToast === 'function') showA2TDToast(e.message || '清空错误失败', 'error');
+    }
 }
 
 
@@ -3420,6 +3772,7 @@ async function loadTelDriveFolderTree(force = false) {
 
 let magnetCurrentFileId = null;
 let magnetRoots = [];
+let magnetRootAccounts = {};
 let magnetFileData = [];
 let magnetDownloadSubmitting = false;
 
@@ -3428,10 +3781,10 @@ let magnetDownloadSubmitting = false;
 async function parseMagnet() {
     const input = document.getElementById('magnetInput').value.trim();
     if (!input) return alert('请输入磁力链接');
-    if (activeParseJob) return alert('当前已有解析任务正在执行，请等待完成后再试');
 
     magnetCurrentFileId = null;
     magnetRoots = [];
+    magnetRootAccounts = {};
     magnetFileData = [];
     document.getElementById('magnetFileArea').style.display = 'none';
     setParseButtonsState({ job_type: 'magnet', status: 'running' });
@@ -3524,6 +3877,7 @@ async function downloadMagnetFiles() {
             body: JSON.stringify({
                 roots: roots,
                 file_id: roots[0],
+                root_accounts: magnetRootAccounts,
                 selected_ids: selectedIds,
                 keep_structure: keepStructure,
                 teldrive_path: teldrivePath
@@ -3590,7 +3944,6 @@ async function parseShareLink() {
     const shareLink = document.getElementById('shareLink').value.trim();
     const passCode = document.getElementById('sharePassCode').value.trim();
     if (!shareLink) return alert('请输入分享链接');
-    if (activeParseJob) return alert('当前已有解析任务正在执行，请等待完成后再试');
 
     shareCurrentData = null;
     shareFileData = [];
@@ -3691,7 +4044,6 @@ let rssDownloadSubmitting = false;
 async function parseRSS() {
     const url = document.getElementById('rssUrl').value.trim();
     if (!url) return alert('请输入 RSS 地址');
-    if (activeParseJob) return alert('当前已有解析任务正在执行，请等待完成后再试');
 
     rssFileData = [];
     document.getElementById('rssResultArea')?.classList.remove('visible');

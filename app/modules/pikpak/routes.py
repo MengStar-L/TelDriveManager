@@ -6,6 +6,7 @@ import posixpath
 import re
 import uuid
 import logging
+from datetime import datetime, timezone
 from typing import Dict, List, Optional, Set
 
 import feedparser
@@ -13,9 +14,10 @@ import httpx
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Request
 from fastapi.responses import JSONResponse
 
-from app.config import load_config
+from app.config import load_config, reload_config, save_config
 from app import database as db
-from app.modules.pikpak.client import PikPakClient
+from app.modules.pikpak.account_pool import PikPakAccountContext, pikpak_account_pool
+from app.modules.pikpak.scheduler import MagnetParseScheduler
 from app.aria2_client import Aria2Client
 from app.modules.aria2teldrive.task_manager import task_manager
 
@@ -24,8 +26,8 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/pikpak")
 
 # ── 共享状态 ──
-_pikpak: Optional[PikPakClient] = None
 _aria2: Optional[Aria2Client] = None
+_magnet_scheduler = MagnetParseScheduler(pikpak_account_pool)
 _ws_clients: Set[WebSocket] = set()
 _active_share_download_jobs: Set[str] = set()
 _share_download_jobs_lock = asyncio.Lock()
@@ -114,41 +116,42 @@ async def _register_aria2_task(gid: str, url: str, filename: str, teldrive_path:
     )
 
 
-def _create_clients():
+def _create_aria2_client():
     cfg = load_config()
-    pikpak_cfg = cfg.get("pikpak", {})
     aria2_cfg = cfg.get("aria2", {})
-    pikpak = PikPakClient(
-        username=pikpak_cfg.get("username", ""),
-        password=pikpak_cfg.get("password", ""),
-        session=pikpak_cfg.get("session", ""),
-        login_mode=pikpak_cfg.get("login_mode", "password"),
-        save_dir=pikpak_cfg.get("save_dir", "/"),
-    )
     aria2 = Aria2Client(
         rpc_url=aria2_cfg.get("rpc_url", "http://localhost"),
         rpc_port=aria2_cfg.get("rpc_port", 6800),
         rpc_secret=aria2_cfg.get("rpc_secret", ""),
     )
-    return pikpak, aria2
+    return aria2
 
 
 async def _ensure_clients():
-    global _pikpak, _aria2
-    if _pikpak is None:
-        _pikpak, _aria2 = _create_clients()
-        await _pikpak.login()
-    return _pikpak, _aria2
+    global _aria2
+    _account, pikpak = await pikpak_account_pool.next_client()
+    if _aria2 is None:
+        _aria2 = _create_aria2_client()
+    return pikpak, _aria2
+
+
+async def _ensure_aria2_client():
+    global _aria2
+    if _aria2 is None:
+        _aria2 = _create_aria2_client()
+    return _aria2
+
+
+async def _next_pikpak_client() -> tuple[PikPakAccountContext, object]:
+    return await pikpak_account_pool.next_client()
 
 
 async def reset_clients():
     """配置变更后重置客户端"""
-    global _pikpak, _aria2
-    old_pikpak, old_aria2 = _pikpak, _aria2
-    _pikpak = None
+    global _aria2
+    old_aria2 = _aria2
     _aria2 = None
-    if old_pikpak is not None:
-        await old_pikpak.close()
+    await pikpak_account_pool.reset()
     if old_aria2 is not None:
         await old_aria2.close()
 
@@ -383,9 +386,6 @@ async def _finish_parse_job(job_id: str, status: str, *, result_payload: dict | 
 async def _create_parse_job(job_type: str, request_payload: dict) -> tuple[Optional[dict], Optional[dict]]:
     global _active_parse_job_id
     async with _parse_job_lock:
-        active_job = await _get_active_parse_job()
-        if _is_parse_job_active(active_job):
-            return None, active_job
         job_id = uuid.uuid4().hex
         job = await db.create_parse_job(job_id, job_type, request_payload, status="running")
         _active_parse_job_id = job_id
@@ -407,7 +407,8 @@ async def _build_parse_snapshot() -> dict:
 
 async def _parse_single_magnet(pikpak, magnet: str, index: int, total: int, job_id: str,
                                poll_interval: float, max_wait_time: float,
-                               parse_timeout: float = 0) -> dict:
+                               parse_timeout: float = 0,
+                               account: PikPakAccountContext | None = None) -> dict:
     """解析单个磁链，返回 {file_id, file_name, files}。失败时抛出异常。
 
     parse_timeout: 解析阶段“无进展”超时（秒）。若云端在该时长内始终无下载进度
@@ -417,6 +418,10 @@ async def _parse_single_magnet(pikpak, magnet: str, index: int, total: int, job_
     import time
 
     magnet_summary = magnet[:80] + ("..." if len(magnet) > 80 else "")
+    account_payload = {
+        "account_id": account.id if account else "",
+        "account_name": account.name if account else "",
+    }
     await _broadcast({
         "type": "task_start",
         "index": index,
@@ -424,6 +429,7 @@ async def _parse_single_magnet(pikpak, magnet: str, index: int, total: int, job_
         "magnet": magnet_summary,
         "parse_job_id": job_id,
         "workflow": "parse",
+        **account_payload,
     })
 
     task_info = await pikpak.add_offline_task(magnet)
@@ -439,12 +445,14 @@ async def _parse_single_magnet(pikpak, magnet: str, index: int, total: int, job_
         "file_name": file_name,
         "task_id": task_id,
         "parse_job_id": job_id,
+        **account_payload,
     })
     await _broadcast({
         "type": "task_status",
         "index": index,
         "status": f"PikPak 离线任务已创建 [{index}/{total}]，等待云端完成缓存...",
         "parse_job_id": job_id,
+        **account_payload,
     })
 
     start_time = time.time()
@@ -483,23 +491,43 @@ async def _parse_single_magnet(pikpak, magnet: str, index: int, total: int, job_
     for item in file_tree:
         item["size_str"] = _format_size(item.get("size", 0))
         item["root_file_id"] = file_id
+        item["account_id"] = account.id if account else ""
+        item["account_name"] = account.name if account else ""
     await _broadcast({
         "type": "files_found",
         "index": index,
         "files": [item.get("name", "未知文件") for item in file_tree],
         "parse_job_id": job_id,
+        **account_payload,
     })
-    await _broadcast_resolved_files(index, file_tree, {"parse_job_id": job_id})
+    await _broadcast_resolved_files(index, file_tree, {"parse_job_id": job_id, **account_payload})
     await _broadcast({
         "type": "task_done",
         "index": index,
         "file_name": file_name,
         "parse_job_id": job_id,
+        **account_payload,
     })
-    return {"file_id": file_id, "file_name": file_name, "files": file_tree}
+    return {
+        "file_id": file_id,
+        "file_name": file_name,
+        "files": file_tree,
+        "account_id": account.id if account else "",
+        "account_name": account.name if account else "",
+    }
 
 
 async def _run_magnet_parse_job(job_id: str, magnets: List[str]):
+    await _magnet_scheduler.run(
+        job_id,
+        magnets,
+        parse_one=_parse_single_magnet,
+        broadcast=_broadcast,
+        finish_job=_finish_parse_job,
+        sort_files=_sort_file_entries_by_name,
+    )
+    return
+
     cfg = load_config()
     poll_interval = cfg.get("pikpak", {}).get("poll_interval", 3)
     max_wait_time = cfg.get("pikpak", {}).get("max_wait_time", 3600)
@@ -507,7 +535,8 @@ async def _run_magnet_parse_job(job_id: str, magnets: List[str]):
 
     total = len(magnets)
     try:
-        pikpak, _ = await _ensure_clients()
+        if not pikpak_account_pool.enabled_accounts():
+            raise RuntimeError("请先添加并启用至少一个 PikPak 账号")
         roots: List[str] = []
         merged_files: List[dict] = []
         names: List[str] = []
@@ -556,6 +585,7 @@ async def _run_magnet_parse_job(job_id: str, magnets: List[str]):
 
 async def _run_share_parse_job(job_id: str, share_link: str, pass_code: str):
     share_summary = share_link[:80] + ("..." if len(share_link) > 80 else "")
+    account: PikPakAccountContext | None = None
     await _broadcast({
         "type": "task_start",
         "index": 1,
@@ -568,15 +598,17 @@ async def _run_share_parse_job(job_id: str, share_link: str, pass_code: str):
         cfg = load_config()
         pikpak_cfg = cfg.get("pikpak", {})
         share_parse_timeout = max(float(pikpak_cfg.get("share_parse_timeout", pikpak_cfg.get("share_download_url_timeout", 60)) or 60), 5.0)
-        await _ensure_clients()
+        account, pikpak = await _next_pikpak_client()
+        account_payload = {"account_id": account.id, "account_name": account.name}
         await _broadcast({
             "type": "task_status",
             "index": 1,
             "status": "正在读取分享内容并递归解析文件列表...",
             "parse_job_id": job_id,
+            **account_payload,
         })
         try:
-            result = await asyncio.wait_for(_pikpak.get_share_file_list(share_link, pass_code), timeout=share_parse_timeout)
+            result = await asyncio.wait_for(pikpak.get_share_file_list(share_link, pass_code), timeout=share_parse_timeout)
         except asyncio.TimeoutError as exc:
             raise RuntimeError(_build_share_fallback_message(f"分享解析超时 ({int(share_parse_timeout)}s)")) from exc
         for item in result.get("files", []):
@@ -603,6 +635,8 @@ async def _run_share_parse_job(job_id: str, share_link: str, pass_code: str):
             "toast_message": _SHARE_FALLBACK_TOAST,
             "toast_type": "error",
         })
+        if account is not None:
+            await db.add_pikpak_account_error(account.id, job_id, share_link, "share_parse", message)
         await _finish_parse_job(job_id, "failed", error=message)
 
 
@@ -705,6 +739,287 @@ async def api_clear_progress_logs():
     return {"success": True, "count": cleared}
 
 
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def _public_account(account: dict, error_counts: dict[str, int] | None = None) -> dict:
+    account_id = str(account.get("id") or "").strip()
+    return {
+        "id": account_id,
+        "name": account.get("name") or account.get("username") or "PikPak 账号",
+        "login_mode": account.get("login_mode") or "password",
+        "username": account.get("username") or "",
+        "enabled": bool(account.get("enabled", True)),
+        "created_at": account.get("created_at") or "",
+        "updated_at": account.get("updated_at") or "",
+        "last_login_refresh_at": account.get("last_login_refresh_at") or "",
+        "vip": account.get("vip") if isinstance(account.get("vip"), dict) else {},
+        "error_count": int((error_counts or {}).get(account_id, 0) or 0),
+    }
+
+
+def _get_pikpak_accounts_config() -> list[dict]:
+    return [
+        account for account in load_config(force_reload=True).get("pikpak", {}).get("accounts", [])
+        if isinstance(account, dict)
+    ]
+
+
+def _build_account_config(payload: dict, existing: dict | None = None) -> dict:
+    existing = dict(existing or {})
+    mode = str(payload.get("login_mode", existing.get("login_mode", "password")) or "password").strip().lower()
+    mode = "token" if mode in {"token", "session"} else "password"
+    now = _now_iso()
+    account = {
+        "id": str(existing.get("id") or payload.get("id") or uuid.uuid4().hex).strip(),
+        "name": str(payload.get("name", existing.get("name", "")) or "").strip(),
+        "login_mode": mode,
+        "username": "",
+        "password": "",
+        "session": "",
+        "enabled": bool(payload.get("enabled", existing.get("enabled", True))),
+        "created_at": str(existing.get("created_at") or now),
+        "updated_at": now,
+    }
+    if isinstance(existing.get("vip"), dict):
+        account["vip"] = existing["vip"]
+    if existing.get("last_login_refresh_at"):
+        account["last_login_refresh_at"] = existing["last_login_refresh_at"]
+    if mode == "token":
+        session = str(payload.get("session", existing.get("session", "")) or "").strip()
+        if not session:
+            raise ValueError("PikPak Encoded Token 不能为空")
+        account["session"] = session
+        account["name"] = account["name"] or "Token 账号"
+    else:
+        username = str(payload.get("username", existing.get("username", "")) or "").strip()
+        password = str(payload.get("password", existing.get("password", "")) or "")
+        if not username or not password:
+            raise ValueError("PikPak 账号密码不能为空")
+        account["username"] = username
+        account["password"] = password
+        account["session"] = str(payload.get("session", existing.get("session", "")) or "").strip()
+        account["name"] = account["name"] or username
+    return account
+
+
+def _extract_vip_info(vip_result, quota_result=None) -> dict:
+    is_vip = False
+    vip_type = "unknown"
+    expire = ""
+    error_parts: list[str] = []
+    if isinstance(vip_result, Exception):
+        error_parts.append(str(vip_result))
+    elif isinstance(vip_result, dict):
+        data = vip_result.get("data", vip_result)
+        vip_type = data.get("type", "") or data.get("vip_type", "")
+        status = data.get("status", "")
+        expire = data.get("expire", "") or data.get("expire_time", "")
+        is_vip = bool(vip_type and str(vip_type).lower() not in ("novip", "none", ""))
+        if not is_vip and status:
+            is_vip = str(status).lower() in ("ok", "active", "valid")
+
+    quota_limit = 0
+    quota_usage = 0
+    if isinstance(quota_result, Exception):
+        error_parts.append(str(quota_result))
+    elif isinstance(quota_result, dict):
+        q = quota_result.get("quota", {})
+        try:
+            quota_limit = int(q.get("limit", 0))
+            quota_usage = int(q.get("usage", 0))
+        except Exception:
+            quota_limit = 0
+            quota_usage = 0
+
+    payload = {
+        "is_vip": is_vip,
+        "type": vip_type,
+        "expire": expire,
+        "quota_limit": quota_limit,
+        "quota_usage": quota_usage,
+        "refreshed_at": _now_iso(),
+    }
+    if error_parts:
+        payload["error"] = "; ".join(part for part in error_parts if part)
+    return payload
+
+
+async def _fetch_pikpak_vip_info(pikpak) -> dict:
+    vip_result, quota_result = await asyncio.gather(
+        pikpak.client.vip_info(),
+        pikpak.client.get_quota_info(),
+        return_exceptions=True,
+    )
+    return _extract_vip_info(vip_result, quota_result)
+
+
+async def _test_account_config(account: dict, include_runtime_info: bool = False) -> dict:
+    from app.modules.pikpak.client import PikPakClient
+
+    client = None
+    try:
+        client = PikPakClient(
+            username=account.get("username", ""),
+            password=account.get("password", ""),
+            session=account.get("session", ""),
+            login_mode=account.get("login_mode", "password"),
+            save_dir=load_config().get("pikpak", {}).get("save_dir", "/"),
+        )
+        await client.login()
+        result = {"success": True, "message": "PikPak 登录成功"}
+        if include_runtime_info:
+            result["vip"] = await _fetch_pikpak_vip_info(client)
+            result["session"] = getattr(client.client, "encoded_token", "") or ""
+            result["last_login_refresh_at"] = _now_iso()
+        return result
+    except Exception as exc:
+        return {"success": False, "message": f"PikPak 登录失败: {exc}"}
+    finally:
+        if client is not None:
+            await client.close()
+
+
+def _save_pikpak_accounts(accounts: list[dict], *, parse_concurrency: int | None = None) -> dict:
+    cfg = load_config(force_reload=True)
+    pikpak_cfg = dict(cfg.get("pikpak", {}))
+    pikpak_cfg["accounts"] = accounts
+    if parse_concurrency is not None:
+        pikpak_cfg["parse_concurrency"] = min(16, max(1, int(parse_concurrency or 1)))
+    save_config({"pikpak": pikpak_cfg})
+    return reload_config().get("pikpak", {})
+
+
+@router.get("/accounts")
+async def api_list_pikpak_accounts():
+    cfg = load_config(force_reload=True).get("pikpak", {})
+    error_counts = await db.get_pikpak_account_error_counts()
+    return {
+        "success": True,
+        "parse_concurrency": cfg.get("parse_concurrency", 1),
+        "accounts": [_public_account(account, error_counts) for account in cfg.get("accounts", [])],
+    }
+
+
+@router.post("/accounts")
+async def api_add_pikpak_account(request: Request):
+    try:
+        payload = await request.json()
+        account = _build_account_config(payload or {})
+        test_result = await _test_account_config(account, include_runtime_info=True)
+        if not test_result.get("success"):
+            return JSONResponse(test_result, status_code=400)
+        if isinstance(test_result.get("vip"), dict):
+            account["vip"] = test_result["vip"]
+        if test_result.get("session"):
+            account["session"] = str(test_result.get("session") or "")
+        if test_result.get("last_login_refresh_at"):
+            account["last_login_refresh_at"] = str(test_result.get("last_login_refresh_at") or "")
+        accounts = _get_pikpak_accounts_config()
+        accounts.append(account)
+        _save_pikpak_accounts(accounts)
+        await pikpak_account_pool.reset()
+        error_counts = await db.get_pikpak_account_error_counts()
+        return {"success": True, "account": _public_account(account, error_counts), "message": "PikPak 账号已添加"}
+    except ValueError as exc:
+        return JSONResponse({"success": False, "message": str(exc)}, status_code=400)
+    except Exception as exc:
+        return JSONResponse({"success": False, "message": str(exc)}, status_code=500)
+
+
+@router.put("/accounts/{account_id}")
+async def api_update_pikpak_account(account_id: str, request: Request):
+    try:
+        payload = await request.json()
+        accounts = _get_pikpak_accounts_config()
+        for index, existing in enumerate(accounts):
+            if str(existing.get("id") or "") == account_id:
+                account = _build_account_config(payload or {}, existing)
+                accounts[index] = account
+                _save_pikpak_accounts(accounts)
+                await pikpak_account_pool.close_account(account_id)
+                error_counts = await db.get_pikpak_account_error_counts()
+                return {"success": True, "account": _public_account(account, error_counts), "message": "PikPak 账号已更新"}
+        return JSONResponse({"success": False, "message": "PikPak 账号不存在"}, status_code=404)
+    except ValueError as exc:
+        return JSONResponse({"success": False, "message": str(exc)}, status_code=400)
+    except Exception as exc:
+        return JSONResponse({"success": False, "message": str(exc)}, status_code=500)
+
+
+@router.delete("/accounts/{account_id}")
+async def api_delete_pikpak_account(account_id: str):
+    accounts = [account for account in _get_pikpak_accounts_config() if str(account.get("id") or "") != account_id]
+    _save_pikpak_accounts(accounts)
+    await pikpak_account_pool.close_account(account_id)
+    cleared = await db.clear_pikpak_account_errors(account_id)
+    return {"success": True, "message": "PikPak 账号已删除", "cleared_errors": cleared}
+
+
+@router.post("/accounts/{account_id}/test")
+async def api_test_pikpak_account(account_id: str):
+    for account in _get_pikpak_accounts_config():
+        if str(account.get("id") or "") == account_id:
+            return await _test_account_config(account)
+    return JSONResponse({"success": False, "message": "PikPak 账号不存在"}, status_code=404)
+
+
+@router.post("/accounts/{account_id}/refresh")
+async def api_refresh_pikpak_account(account_id: str):
+    accounts = _get_pikpak_accounts_config()
+    account_index = next(
+        (index for index, account in enumerate(accounts) if str(account.get("id") or "") == account_id),
+        None,
+    )
+    if account_index is None:
+        return JSONResponse({"success": False, "message": "PikPak 账号不存在"}, status_code=404)
+    try:
+        await pikpak_account_pool.close_account(account_id)
+        _, pikpak = await pikpak_account_pool.client_for_account(account_id)
+        vip = await _fetch_pikpak_vip_info(pikpak)
+        account = dict(accounts[account_index])
+        account["vip"] = vip
+        account["last_login_refresh_at"] = _now_iso()
+        encoded_token = getattr(pikpak.client, "encoded_token", "") or ""
+        if encoded_token:
+            account["session"] = encoded_token
+        account["updated_at"] = _now_iso()
+        accounts[account_index] = account
+        _save_pikpak_accounts(accounts)
+        error_counts = await db.get_pikpak_account_error_counts()
+        return {
+            "success": True,
+            "message": "PikPak 登录信息已刷新",
+            "account": _public_account(account, error_counts),
+        }
+    except Exception as exc:
+        return JSONResponse({"success": False, "message": f"重新获取登录信息失败: {exc}"}, status_code=400)
+
+
+@router.get("/accounts/{account_id}/errors")
+async def api_get_pikpak_account_errors(account_id: str):
+    return {"success": True, "errors": await db.get_pikpak_account_errors(account_id)}
+
+
+@router.delete("/accounts/{account_id}/errors")
+async def api_clear_pikpak_account_errors(account_id: str):
+    return {"success": True, "count": await db.clear_pikpak_account_errors(account_id)}
+
+
+@router.put("/scheduler/config")
+async def api_update_pikpak_scheduler_config(request: Request):
+    try:
+        payload = await request.json()
+        pikpak_cfg = _save_pikpak_accounts(
+            _get_pikpak_accounts_config(),
+            parse_concurrency=int((payload or {}).get("parse_concurrency") or 1),
+        )
+        return {"success": True, "parse_concurrency": pikpak_cfg.get("parse_concurrency", 1)}
+    except Exception as exc:
+        return JSONResponse({"success": False, "message": str(exc)}, status_code=400)
+
+
 # ── 磁链 API ──
 
 @router.post("/add")
@@ -763,11 +1078,14 @@ async def api_magnet_download(request: Request):
             if single:
                 root_ids = [single]
         selected_ids = body.get("selected_ids", [])
+        root_accounts = body.get("root_accounts", {})
+        if not isinstance(root_accounts, dict):
+            root_accounts = {}
         keep_structure = body.get("keep_structure", True)
         teldrive_path = body.get("teldrive_path", "/")
         if not root_ids:
             return JSONResponse({"error": "缺少 file_id"}, status_code=400)
-        asyncio.create_task(_process_magnet_selected(root_ids, selected_ids, keep_structure, teldrive_path))
+        asyncio.create_task(_process_magnet_selected(root_ids, selected_ids, keep_structure, teldrive_path, root_accounts))
         return {"message": f"开始下载 {len(selected_ids)} 个文件"}
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
@@ -793,20 +1111,14 @@ async def api_status():
 @router.post("/test")
 async def api_test():
     results = {}
-    pikpak = None
     aria2 = None
     try:
-        pikpak, _ = _create_clients()
-        await pikpak.login()
+        account, _pikpak_client = await _next_pikpak_client()
         results["pikpak"] = {"ok": True, "message": "登录成功"}
     except Exception as e:
         results["pikpak"] = {"ok": False, "message": str(e)}
-    finally:
-        if pikpak is not None:
-            await pikpak.close()
-
     try:
-        _, aria2 = _create_clients()
+        aria2 = _create_aria2_client()
         test_result = await aria2.test_connection()
         results["aria2"] = {"ok": test_result["success"], "message": test_result["message"]}
     except Exception as e:
@@ -820,10 +1132,10 @@ async def api_test():
 @router.get("/vip")
 async def api_vip_info():
     try:
-        await _ensure_clients()
+        account, pikpak = await _next_pikpak_client()
         vip_result, quota_result = await asyncio.gather(
-            _pikpak.client.vip_info(),
-            _pikpak.client.get_quota_info(),
+            pikpak.client.vip_info(),
+            pikpak.client.get_quota_info(),
             return_exceptions=True,
         )
         is_vip = False
@@ -843,7 +1155,7 @@ async def api_vip_info():
             q = quota_result.get("quota", {})
             quota_limit = int(q.get("limit", 0))
             quota_usage = int(q.get("usage", 0))
-        return {"is_vip": is_vip, "type": vip_type, "expire": expire,
+        return {"is_vip": is_vip, "type": vip_type, "expire": expire, "account_name": account.name,
                 "quota_limit": quota_limit, "quota_usage": quota_usage}
     except Exception as e:
         return {"is_vip": False, "type": "unknown", "error": str(e)}
@@ -967,10 +1279,11 @@ def _maybe_rename_by_folder(url_info: dict, rename: bool, original_path: str = "
 
 
 async def _aria2_push_only(files: List[dict], index: int, delete_pikpak_ids: List[str] = None,
-                           keep_structure: bool = True, teldrive_path: str = "/"):
+                           keep_structure: bool = True, teldrive_path: str = "/",
+                           delete_account_id: str | None = None):
     """外部接收端模式：仅推送下载链接，不触发 TelDrive 上传"""
     try:
-        _, aria2 = await _ensure_clients()
+        aria2 = await _ensure_aria2_client()
         cfg = load_config()
         aria2_cfg = cfg.get("aria2", {})
         push_target = _get_push_target_label("aria2")
@@ -1052,7 +1365,10 @@ async def _aria2_push_only(files: List[dict], index: int, delete_pikpak_ids: Lis
 
     if delete_pikpak_ids:
         try:
-            pikpak, _ = await _ensure_clients()
+            if delete_account_id:
+                _account, pikpak = await pikpak_account_pool.client_for_account(delete_account_id)
+            else:
+                pikpak, _ = await _ensure_clients()
             cfg = load_config()
             if cfg.get("pikpak", {}).get("delete_after_download", False):
                 await pikpak.delete_files(delete_pikpak_ids)
@@ -1082,11 +1398,15 @@ async def _process_magnets(magnets: List[str], teldrive_path: Optional[str] = No
 
     total = len(magnets)
     for i, magnet in enumerate(magnets, 1):
+        account: PikPakAccountContext | None = None
         await _broadcast({"type": "task_start", "index": i, "total": total,
                           "magnet": magnet[:80] + ("..." if len(magnet) > 80 else "")})
         try:
+            account, pikpak = await _next_pikpak_client()
             task_info = await pikpak.add_offline_task(magnet)
         except Exception as e:
+            if account is not None:
+                await db.add_pikpak_account_error(account.id, "", magnet, "direct_add", str(e))
             await _broadcast({"type": "task_error", "index": i, "message": f"添加离线任务失败: {e}"})
             continue
 
@@ -1169,6 +1489,7 @@ async def _process_magnets(magnets: List[str], teldrive_path: Optional[str] = No
             delete_pikpak_ids=delete_ids,
             keep_structure=True,
             teldrive_path=resolved_teldrive_path,
+            delete_account_id=account.id if account else None,
         )
 
         await _broadcast({"type": "task_done", "index": i, "file_name": file_name})
@@ -1177,11 +1498,12 @@ async def _process_magnets(magnets: List[str], teldrive_path: Optional[str] = No
 
 
 async def _process_magnet_selected(root_file_ids: List[str], selected_ids: List[str],
-                                    keep_structure: bool = True, teldrive_path: Optional[str] = None):
+                                    keep_structure: bool = True, teldrive_path: Optional[str] = None,
+                                    root_accounts: Dict[str, str] | None = None):
     try:
-        pikpak, _ = await _ensure_clients()
         cfg = load_config()
         delete_after = cfg.get("pikpak", {}).get("delete_after_download", False)
+        root_accounts = root_accounts or {}
 
         roots = [str(r).strip() for r in (root_file_ids or []) if str(r).strip()]
         if not roots:
@@ -1194,9 +1516,17 @@ async def _process_magnet_selected(root_file_ids: List[str], selected_ids: List[
                           "status": "开始解析所选文件的下载链接..."})
 
         all_files: List[dict] = []
+        delete_by_account: Dict[str, List[str]] = {}
         for root_file_id in roots:
+            account_id = str(root_accounts.get(root_file_id) or "").strip()
             try:
+                if account_id:
+                    account, pikpak = await pikpak_account_pool.client_for_account(account_id)
+                else:
+                    account, pikpak = await _next_pikpak_client()
                 root_files = await pikpak.get_download_urls(root_file_id)
+                if delete_after:
+                    delete_by_account.setdefault(account.id, []).append(root_file_id)
             except Exception as e:
                 logger.warning(f"磁链根目录直链获取失败: root={root_file_id}, error={e}")
                 continue
@@ -1219,7 +1549,7 @@ async def _process_magnet_selected(root_file_ids: List[str], selected_ids: List[
         await _broadcast({"type": "task_status", "index": 1,
                           "status": f"解析完成，共 {len(files)} 个文件，开始推送下载链接到{push_target}..."})
 
-        delete_ids = list(roots) if delete_after else None
+        delete_ids = None
         resolved_teldrive_path = _normalize_teldrive_path(
             cfg.get("teldrive", {}).get("target_path", "/") if teldrive_path is None else teldrive_path
         )
@@ -1230,6 +1560,13 @@ async def _process_magnet_selected(root_file_ids: List[str], selected_ids: List[
             keep_structure=keep_structure,
             teldrive_path=resolved_teldrive_path,
         )
+        if delete_after:
+            for account_id, ids in delete_by_account.items():
+                try:
+                    _account, account_client = await pikpak_account_pool.client_for_account(account_id)
+                    await account_client.delete_files(ids)
+                except Exception as e:
+                    logger.warning(f"娓呯悊纾侀摼涓存椂鏂囦欢澶辫触: account={account_id}, error={e}")
 
         await _broadcast({"type": "all_done", "total": 1})
     except Exception as e:
@@ -1238,11 +1575,13 @@ async def _process_magnet_selected(root_file_ids: List[str], selected_ids: List[
 
 async def _process_share_download(share_id: str, file_ids: List[str], pass_code_token: str,
                                    keep_structure: bool = True, file_paths: Dict[str, str] = None,
-                                   rename_by_folder: bool = False, teldrive_path: Optional[str] = None,
-                                   job_key: str = ""):
+                                    rename_by_folder: bool = False, teldrive_path: Optional[str] = None,
+                                    job_key: str = ""):
     saved_ids: List[str] = []
+    account: PikPakAccountContext | None = None
+    pikpak = None
     try:
-        await _ensure_clients()
+        account, pikpak = await _next_pikpak_client()
         file_ids = _normalize_selected_ids(file_ids)
         total = len(file_ids)
         cfg = load_config()
@@ -1260,7 +1599,7 @@ async def _process_share_download(share_id: str, file_ids: List[str], pass_code_
                           "status": "正在保存分享内容到 PikPak 网盘..."})
         try:
             saved_ids = _normalize_selected_ids(await asyncio.wait_for(
-                _pikpak.save_share_files(share_id, file_ids, pass_code_token),
+                pikpak.save_share_files(share_id, file_ids, pass_code_token),
                 timeout=share_parse_timeout,
             ))
         except asyncio.TimeoutError as exc:
@@ -1286,7 +1625,7 @@ async def _process_share_download(share_id: str, file_ids: List[str], pass_code_
         for i, fid in enumerate(saved_ids, 1):
             await _broadcast({"type": "task_status", "index": i, "status": f"获取下载链接 [{i}/{len(saved_ids)}]"})
             try:
-                urls = await _pikpak.wait_for_download_urls(
+                urls = await pikpak.wait_for_download_urls(
                     fid,
                     timeout=share_url_timeout,
                     poll_interval=share_poll_interval,
@@ -1398,6 +1737,8 @@ async def _process_share_download(share_id: str, file_ids: List[str], pass_code_
                           "target": push_target})
         await _broadcast({"type": "all_done", "total": total})
     except Exception as e:
+        if account is not None:
+            await db.add_pikpak_account_error(account.id, "", share_id, "share_download", str(e))
         await _broadcast({
             "type": "error",
             "message": f"分享下载失败: {e}",
@@ -1407,7 +1748,7 @@ async def _process_share_download(share_id: str, file_ids: List[str], pass_code_
     finally:
         if saved_ids:
             try:
-                await _pikpak.delete_files(saved_ids)
+                await pikpak.delete_files(saved_ids)
             except Exception as e:
                 logger.warning(f"清理分享临时文件失败: {e}")
         await _release_share_download_job(job_key)

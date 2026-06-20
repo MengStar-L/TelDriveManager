@@ -69,6 +69,18 @@ CREATE TABLE IF NOT EXISTS parse_jobs (
 )
 """
 
+CREATE_PIKPAK_ACCOUNT_ERRORS_TABLE_SQL = """
+CREATE TABLE IF NOT EXISTS pikpak_account_errors (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    account_id TEXT NOT NULL,
+    job_id TEXT,
+    link TEXT,
+    stage TEXT NOT NULL DEFAULT 'parse',
+    message TEXT NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+)
+"""
+
 # 全局连接实例
 _db_conn: Optional[aiosqlite.Connection] = None
 
@@ -116,6 +128,7 @@ async def init_db():
     await _ensure_column(conn, "tasks", "source_size_bytes", "INTEGER DEFAULT 0")
     await conn.execute(CREATE_PROGRESS_LOGS_TABLE_SQL)
     await conn.execute(CREATE_PARSE_JOBS_TABLE_SQL)
+    await conn.execute(CREATE_PIKPAK_ACCOUNT_ERRORS_TABLE_SQL)
     await conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_tasks_gid ON tasks(aria2_gid)")
     await conn.execute(
@@ -124,6 +137,8 @@ async def init_db():
         "CREATE INDEX IF NOT EXISTS idx_parse_jobs_type_created ON parse_jobs(job_type, created_at DESC)")
     await conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_parse_jobs_status_updated ON parse_jobs(status, updated_at DESC)")
+    await conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_pikpak_account_errors_account_created ON pikpak_account_errors(account_id, created_at DESC)")
     await conn.commit()
 
 
@@ -604,6 +619,61 @@ async def prune_progress_logs(limit: int, stream: str | None = None) -> None:
             (normalized_limit,),
         )
     await conn.commit()
+
+
+async def add_pikpak_account_error(account_id: str, job_id: str | None, link: str,
+                                   stage: str, message: str) -> dict:
+    conn = await _get_conn()
+    cursor = await conn.execute(
+        """
+        INSERT INTO pikpak_account_errors (account_id, job_id, link, stage, message)
+        VALUES (?, ?, ?, ?, ?)
+        """,
+        (
+            str(account_id or "").strip(),
+            str(job_id or "").strip() or None,
+            str(link or ""),
+            str(stage or "parse").strip() or "parse",
+            str(message or "").strip() or "未知错误",
+        ),
+    )
+    await conn.commit()
+    row = await _fetchone_dict("SELECT * FROM pikpak_account_errors WHERE id = ?", (cursor.lastrowid,))
+    return row or {}
+
+
+async def get_pikpak_account_errors(account_id: str, limit: int = 100) -> list[dict]:
+    conn = await _get_conn()
+    async with conn.execute(
+        """
+        SELECT * FROM pikpak_account_errors
+        WHERE account_id = ?
+        ORDER BY id DESC
+        LIMIT ?
+        """,
+        (str(account_id or "").strip(), max(1, int(limit or 100))),
+    ) as cursor:
+        rows = await cursor.fetchall()
+        return [dict(row) for row in rows]
+
+
+async def get_pikpak_account_error_counts() -> dict[str, int]:
+    conn = await _get_conn()
+    async with conn.execute(
+        "SELECT account_id, COUNT(*) AS count FROM pikpak_account_errors GROUP BY account_id"
+    ) as cursor:
+        rows = await cursor.fetchall()
+        return {str(row["account_id"]): int(row["count"] or 0) for row in rows}
+
+
+async def clear_pikpak_account_errors(account_id: str) -> int:
+    conn = await _get_conn()
+    cursor = await conn.execute(
+        "DELETE FROM pikpak_account_errors WHERE account_id = ?",
+        (str(account_id or "").strip(),),
+    )
+    await conn.commit()
+    return cursor.rowcount or 0
 
 
 async def create_parse_job(job_id: str, job_type: str, request_payload: dict,

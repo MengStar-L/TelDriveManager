@@ -3,6 +3,7 @@
 import os
 import sys
 import copy
+import hashlib
 import logging
 from pathlib import Path
 from typing import Any
@@ -39,6 +40,8 @@ DEFAULTS: dict[str, Any] = {
     "pikpak": {
         "login_mode": "password", "username": "", "password": "", "session": "", "save_dir": "/",
         "delete_after_download": True, "poll_interval": 3, "max_wait_time": 3600,
+        "parse_concurrency": 1,
+        "accounts": [],
         "magnet_parse_timeout": 300,
         "share_parse_timeout": 45, "share_download_url_timeout": 60, "share_download_url_poll_interval": 3,
     },
@@ -150,6 +153,95 @@ def _cast_env(value: str, default: Any) -> Any:
     return value
 
 
+def _normalize_pikpak_login_mode(value: Any) -> str:
+    mode = str(value or "password").strip().lower()
+    return "token" if mode in ("token", "session") else "password"
+
+
+def _has_pikpak_account_auth(account: dict) -> bool:
+    mode = _normalize_pikpak_login_mode(account.get("login_mode"))
+    if mode == "token":
+        return bool(str(account.get("session") or "").strip())
+    return bool(str(account.get("username") or "").strip()) and bool(account.get("password"))
+
+
+def _make_legacy_pikpak_account(pikpak_cfg: dict) -> dict | None:
+    mode = _normalize_pikpak_login_mode(pikpak_cfg.get("login_mode"))
+    username = str(pikpak_cfg.get("username") or "").strip()
+    password = str(pikpak_cfg.get("password") or "")
+    session = str(pikpak_cfg.get("session") or "").strip()
+    if mode == "token":
+        if not session:
+            return None
+        identity = session[:32]
+        name = "Token 账号"
+    else:
+        if not username or not password:
+            return None
+        identity = username
+        name = username
+    digest = hashlib.sha1(f"{mode}:{identity}".encode("utf-8")).hexdigest()[:12]
+    return {
+        "id": f"legacy-{digest}",
+        "name": name,
+        "login_mode": mode,
+        "username": username if mode == "password" else "",
+        "password": password if mode == "password" else "",
+        "session": session if mode == "token" else "",
+        "enabled": True,
+        "created_at": "",
+        "updated_at": "",
+    }
+
+
+def _normalize_pikpak_account(raw_account: Any, fallback_index: int = 0) -> dict | None:
+    if not isinstance(raw_account, dict):
+        return None
+    mode = _normalize_pikpak_login_mode(raw_account.get("login_mode"))
+    username = str(raw_account.get("username") or "").strip()
+    password = str(raw_account.get("password") or "")
+    session = str(raw_account.get("session") or "").strip()
+    account_id = str(raw_account.get("id") or "").strip()
+    if not account_id:
+        identity = session[:32] if mode == "token" else username
+        digest = hashlib.sha1(f"{mode}:{identity}:{fallback_index}".encode("utf-8")).hexdigest()[:12]
+        account_id = f"pikpak-{digest}"
+    name = str(raw_account.get("name") or "").strip()
+    if not name:
+        name = username if mode == "password" and username else f"PikPak 账号 {fallback_index + 1}"
+    account = {
+        "id": account_id,
+        "name": name,
+        "login_mode": mode,
+        "username": username if mode == "password" else "",
+        "password": password if mode == "password" else "",
+        "session": session if mode == "token" else "",
+        "enabled": bool(raw_account.get("enabled", True)),
+        "created_at": str(raw_account.get("created_at") or ""),
+        "updated_at": str(raw_account.get("updated_at") or ""),
+    }
+    return account if _has_pikpak_account_auth(account) else None
+
+
+def _normalize_pikpak_accounts(pikpak_cfg: dict, raw_pikpak: dict) -> list[dict]:
+    raw_accounts = pikpak_cfg.get("accounts")
+    accounts: list[dict] = []
+    seen: set[str] = set()
+    if isinstance(raw_accounts, list):
+        for index, raw_account in enumerate(raw_accounts):
+            account = _normalize_pikpak_account(raw_account, index)
+            if not account or account["id"] in seen:
+                continue
+            seen.add(account["id"])
+            accounts.append(account)
+    if accounts:
+        return accounts
+
+    legacy_source = raw_pikpak if raw_pikpak else pikpak_cfg
+    legacy_account = _make_legacy_pikpak_account(legacy_source)
+    return [legacy_account] if legacy_account else []
+
+
 def _normalize_config(merged: dict, raw: dict | None = None) -> dict:
     raw = raw or {}
     pikpak_cfg = merged.setdefault("pikpak", {})
@@ -160,9 +252,14 @@ def _normalize_config(merged: dict, raw: dict | None = None) -> dict:
     raw_aria2 = raw.get("aria2") if isinstance(raw.get("aria2"), dict) else {}
     raw_pikpak = raw.get("pikpak") if isinstance(raw.get("pikpak"), dict) else {}
 
-    pikpak_mode = str(pikpak_cfg.get("login_mode", "password") or "password").strip().lower()
-    pikpak_cfg["login_mode"] = "token" if pikpak_mode in ("token", "session") else "password"
+    pikpak_cfg["login_mode"] = _normalize_pikpak_login_mode(pikpak_cfg.get("login_mode"))
     pikpak_cfg["session"] = str(pikpak_cfg.get("session") or "").strip()
+    try:
+        parse_concurrency = int(pikpak_cfg.get("parse_concurrency") or 1)
+    except (TypeError, ValueError):
+        parse_concurrency = 1
+    pikpak_cfg["parse_concurrency"] = min(16, max(1, parse_concurrency))
+    pikpak_cfg["accounts"] = _normalize_pikpak_accounts(pikpak_cfg, raw_pikpak)
 
     legacy_max = raw_pikpak.get("max_concurrent_downloads", pikpak_cfg.get("max_concurrent_downloads", 3))
     legacy_conn = raw_pikpak.get("connections_per_task", pikpak_cfg.get("connections_per_task", 8))
@@ -257,9 +354,10 @@ def needs_setup() -> bool:
 
     cfg = load_config()
     pikpak_cfg = cfg.get("pikpak", {})
-    pikpak_mode = str(pikpak_cfg.get("login_mode", "password") or "password").strip().lower()
-    has_pikpak_auth = bool(pikpak_cfg.get("session")) if pikpak_mode == "token" else (
-        bool(pikpak_cfg.get("username")) and bool(pikpak_cfg.get("password"))
+    has_pikpak_auth = any(
+        bool(account.get("enabled", True)) and _has_pikpak_account_auth(account)
+        for account in pikpak_cfg.get("accounts", [])
+        if isinstance(account, dict)
     )
 
     aria2_cfg = cfg.get("aria2", {})

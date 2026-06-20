@@ -686,6 +686,71 @@
         .app-toast.warning { background: rgba(146, 64, 14, 0.96); }
         .app-toast i { font-size: 18px; }
 
+        .pikpak-account-layout { display: grid; grid-template-columns: 1fr; gap: 18px; align-items: start; }
+        .pikpak-account-add-panel { overflow: hidden; border-color: rgba(37, 99, 235, 0.16); background: linear-gradient(180deg, #ffffff 0%, #f8fbff 100%); }
+        .pikpak-account-add-panel .card-header { background: linear-gradient(90deg, rgba(37, 99, 235, 0.09), rgba(20, 184, 166, 0.07)); }
+        .pikpak-account-add-panel .card-body { display: grid; grid-template-columns: minmax(260px, 0.55fr) minmax(520px, 1fr) auto; gap: 14px; align-items: center; }
+        .pikpak-account-add-panel .form-group { display: flex; flex-direction: row; align-items: center; gap: 10px; min-width: 0; }
+        .pikpak-account-add-panel .form-group label { flex: 0 0 auto; min-width: 74px; white-space: nowrap; }
+        .pikpak-account-add-panel .form-group .form-input,
+        .pikpak-account-add-panel .form-group .segmented-control { flex: 1 1 auto; min-width: 0; }
+        .pikpak-account-add-panel .field-grid { margin-top: 0 !important; }
+        .pikpak-account-add-panel .field-grid.cols-1 { grid-template-columns: repeat(2, minmax(180px, 1fr)); }
+        .pikpak-account-add-panel #pikpakAccountPasswordFields { grid-column: 1 / span 2; grid-template-columns: repeat(2, minmax(240px, 1fr)); }
+        .pikpak-account-add-panel #pikpakAccountTokenFields { grid-column: 1 / span 2; grid-template-columns: 1fr; }
+        .pikpak-account-add-panel #pikpakAddAccountBtn { min-width: 132px; height: 44px; align-self: end; }
+        .pikpak-account-pool-panel { display: grid; gap: 14px; padding: 6px 2px 0; }
+        .pikpak-account-pool-body { display: grid; gap: 14px; }
+        .pikpak-account-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(680px, 860px)); justify-content: start; gap: 14px; align-items: stretch; }
+        .pikpak-account-list .log-empty { grid-column: 1 / -1; }
+        .pikpak-account-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 0; padding: 0 2px; }
+        .pikpak-account-card { position: relative; display: flex; flex-direction: column; min-height: 116px; border: 1px solid rgba(148, 163, 184, 0.28); border-radius: 10px; background: linear-gradient(180deg, #ffffff 0%, #f9fbff 100%); padding: 16px; overflow: visible; transition: border-color 0.2s ease, box-shadow 0.2s ease, transform 0.2s ease; }
+        .pikpak-account-card::before { content: ""; position: absolute; inset: 0 0 auto; height: 4px; border-radius: 10px 10px 0 0; background: linear-gradient(90deg, #2563eb, #14b8a6); }
+        .pikpak-account-card.is-disabled { background: #f8fafc; opacity: 0.86; }
+        .pikpak-account-card.is-disabled::before { background: linear-gradient(90deg, #94a3b8, #cbd5e1); }
+        .pikpak-account-card.has-errors::before { background: linear-gradient(90deg, #ef4444, #f59e0b); }
+        .pikpak-account-card:hover { border-color: rgba(37, 99, 235, 0.34); box-shadow: 0 14px 32px rgba(15, 23, 42, 0.08); transform: translateY(-1px); }
+        .pikpak-account-head { position: relative; z-index: 1; display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; margin-bottom: 8px; padding-top: 2px; }
+        .pikpak-account-title { font-weight: 700; color: var(--text-primary); display: flex; align-items: center; gap: 10px; min-width: 0; flex-wrap: wrap; }
+        .pikpak-account-title > i { display: inline-flex; align-items: center; justify-content: center; width: 34px; height: 34px; border-radius: 10px; background: rgba(37, 99, 235, 0.1); color: #2563eb; font-size: 20px; flex: 0 0 auto; }
+        .pikpak-account-card.is-disabled .pikpak-account-title > i { background: rgba(148, 163, 184, 0.14); color: #64748b; }
+        .pikpak-account-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .pikpak-vip-pill { display: inline-flex; align-items: center; gap: 5px; padding: 5px 10px; border-radius: 999px; background: rgba(240, 253, 250, 0.9); border: 1px solid rgba(20, 184, 166, 0.22); color: #0f766e; font-size: 12px; font-weight: 700; line-height: 1; white-space: nowrap; }
+        .pikpak-vip-pill i { font-size: 13px; }
+        .pikpak-vip-pill.is-vip { background: #fff7ed; border-color: rgba(245, 158, 11, 0.28); color: #92400e; }
+        .pikpak-vip-pill.is-error { background: rgba(254, 242, 242, 0.9); border-color: rgba(239, 68, 68, 0.24); color: #b91c1c; }
+        .pikpak-account-actions { position: relative; z-index: 2; display: flex; gap: 8px; flex-wrap: nowrap; margin-top: 0; overflow: visible; scrollbar-width: none; }
+        .pikpak-account-actions::-webkit-scrollbar { display: none; }
+        .pikpak-account-actions .btn { cursor: pointer; z-index: 1; }
+        .pikpak-account-actions .btn:hover { z-index: 3; }
+        .pikpak-account-actions .btn::after { background: linear-gradient(110deg, transparent 0%, rgba(37, 99, 235, 0.12) 45%, transparent 100%); }
+        .pikpak-error-chip { color: #b91c1c; background: rgba(239, 68, 68, 0.1); border: 1px solid rgba(239, 68, 68, 0.22); }
+        .pikpak-errors-modal { position: fixed; inset: 0; z-index: 1250; display: none; align-items: center; justify-content: center; background: rgba(15, 23, 42, 0.28); backdrop-filter: blur(8px); padding: 24px; }
+        .pikpak-errors-modal.show { display: flex; }
+        .pikpak-errors-dialog { width: min(760px, 100%); max-height: min(720px, 90vh); display: flex; flex-direction: column; background: var(--card); border: 1px solid var(--border); border-radius: 8px; box-shadow: 0 24px 70px rgba(15, 23, 42, 0.2); overflow: hidden; }
+        .pikpak-errors-header { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 16px 18px; border-bottom: 1px solid var(--border); }
+        .pikpak-errors-list { overflow: auto; padding: 12px 18px 18px; display: grid; gap: 10px; }
+        .pikpak-error-row { border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; background: #fff; }
+        .pikpak-error-row strong { display: block; color: var(--text-primary); margin-bottom: 4px; }
+        .pikpak-error-row p { margin: 4px 0 0; color: var(--text-secondary); font-size: 12px; word-break: break-all; }
+        .legacy-pikpak-settings-card { display: none !important; }
+        @media (max-width: 1180px) {
+            .pikpak-account-add-panel .card-body { grid-template-columns: 1fr; }
+            .pikpak-account-add-panel #pikpakAccountPasswordFields,
+            .pikpak-account-add-panel #pikpakAccountTokenFields { grid-column: auto; }
+            .pikpak-account-add-panel #pikpakAddAccountBtn { width: 100%; }
+            .pikpak-account-list { grid-template-columns: minmax(0, 1fr); }
+            .pikpak-account-actions { flex-wrap: wrap; overflow-x: visible; }
+        }
+        @media (max-width: 720px) {
+            .pikpak-account-add-panel .field-grid.cols-1,
+            .pikpak-account-add-panel #pikpakAccountPasswordFields { grid-template-columns: 1fr; }
+            .pikpak-account-list { grid-template-columns: 1fr; }
+            .pikpak-account-toolbar { align-items: flex-start; flex-direction: column; }
+            .pikpak-account-add-panel .form-group { align-items: flex-start; flex-direction: column; }
+            .pikpak-account-add-panel .form-group label { min-width: 0; }
+        }
+
         .progress-card {
             position: relative;
             overflow: hidden;
@@ -1003,6 +1068,9 @@
             </div>
             <div class="nav-item" data-page="rss" data-tooltip="RSS订阅" onclick="switchPage('rss', { animated: true, source: 'user' })">
                 <i class="ph ph-rss"></i>
+            </div>
+            <div class="nav-item" data-page="pikpakAccounts" data-tooltip="PikPak 账号" onclick="switchPage('pikpakAccounts', { animated: true, source: 'user' })">
+                <i class="ph ph-cloud"></i>
             </div>
             <div class="nav-item" data-page="progress" data-tooltip="下载链接推送" onclick="switchPage('progress', { animated: true, source: 'user' })">
 
@@ -1448,6 +1516,58 @@
 
                 
                 <!-- Settings -->
+                <div class="page page-fill" id="page-pikpakAccounts">
+                    <div class="pikpak-account-layout">
+                        <div class="card pikpak-account-add-panel">
+                            <div class="card-header"><h3><i class="ph-fill ph-cloud-plus"></i> 添加 PikPak 账号</h3></div>
+                            <div class="card-body">
+                                <div class="form-group">
+                                    <label>任务并发数</label>
+                                    <div style="display:flex; gap:10px; align-items:center;">
+                                        <input class="form-input" type="number" id="pikpakParseConcurrency" min="1" max="16" value="1">
+                                        <button class="btn btn-ghost btn-sm" onclick="savePikpakSchedulerConfig()"><i class="ph ph-floppy-disk"></i> 保存</button>
+                                    </div>
+                                </div>
+                                <div class="field-grid cols-1" style="margin-top:18px;">
+                                    <div class="form-group">
+                                        <label>登录方式</label>
+                                        <input type="hidden" id="pikpakAccountLoginMode" value="password">
+                                        <div class="segmented-control" id="pikpakAccountLoginModeSwitch">
+                                            <button type="button" class="segmented-btn active" data-mode="password" onclick="updatePikpakLoginMode('pikpakAccountLoginMode', 'pikpakAccountLoginModeSwitch', 'password', true)">
+                                                <i class="ph ph-user"></i><span>账号密码登录</span>
+                                            </button>
+                                            <button type="button" class="segmented-btn" data-mode="token" onclick="updatePikpakLoginMode('pikpakAccountLoginMode', 'pikpakAccountLoginModeSwitch', 'token', true)">
+                                                <i class="ph ph-key"></i><span>Encoded Token 登录</span>
+                                            </button>
+                                        </div>
+                                    </div>
+                                    <div class="form-group"><label>账号名称</label><input class="form-input" type="text" id="pikpakAccountName" placeholder="例如：主账号"></div>
+                                </div>
+                                <div class="field-grid cols-1" id="pikpakAccountPasswordFields">
+                                    <div class="form-group"><label>Email / 账号</label><input class="form-input" type="text" id="pikpakAccountUsername" placeholder="email@example.com"></div>
+                                    <div class="form-group"><label>密码</label><input class="form-input" type="password" id="pikpakAccountPassword" placeholder="******"></div>
+                                </div>
+                                <div class="field-grid cols-1" id="pikpakAccountTokenFields" style="display:none;">
+                                    <div class="form-group"><label>Encoded Token</label><input class="form-input" type="password" id="pikpakAccountToken" placeholder="请直接粘贴 encoded_token" autocomplete="off"></div>
+                                </div>
+                                <button class="btn btn-primary" id="pikpakAddAccountBtn" onclick="addPikpakAccount()"><i class="ph ph-plus"></i> 添加账号</button>
+                            </div>
+                        </div>
+                        <div class="pikpak-account-pool-panel">
+                            <div class="pikpak-account-pool-body">
+                                <div class="pikpak-account-toolbar">
+                                    <div>
+                                        <h3 class="picker-panel-title"><i class="ph ph-identification-card"></i> 已添加账号</h3>
+                                        <p class="picker-panel-subtitle">解析任务会按启用账号轮询分配</p>
+                                    </div>
+                                    <button class="btn btn-ghost btn-sm" onclick="loadPikpakAccountsPage(true)"><i class="ph ph-arrows-clockwise"></i> 刷新</button>
+                                </div>
+                                <div class="pikpak-account-list" id="pikpakAccountList"></div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
                 <div class="page" id="page-settings">
                     <div class="settings-row">
                         <!-- System Authorization -->
@@ -1472,7 +1592,7 @@
                             </div>
                         </div>
                         
-                        <div class="card">
+                        <div class="card legacy-pikpak-settings-card">
                             <div class="card-header"><h3><i class="ph-fill ph-cloud"></i> PikPak 凭证与中转桥</h3></div>
                             <div class="card-body">
                                 <div class="field-grid cols-1">
@@ -1674,6 +1794,18 @@
     </div>
 
     <div id="a2tdToastContainer" class="app-toast-container"></div>
+    <div id="pikpakErrorsModal" class="pikpak-errors-modal" onclick="closePikpakAccountErrorsModal(event)">
+        <div class="pikpak-errors-dialog" onclick="event.stopPropagation()">
+            <div class="pikpak-errors-header">
+                <h3 class="picker-panel-title" id="pikpakErrorsTitle"><i class="ph ph-warning-circle"></i> 账号错误</h3>
+                <div style="display:flex; gap:8px; align-items:center;">
+                    <button class="btn btn-ghost btn-sm" id="pikpakClearErrorsBtn" onclick="clearPikpakAccountErrors()"><i class="ph ph-trash"></i> 清空</button>
+                    <button class="btn btn-ghost btn-sm" onclick="closePikpakAccountErrorsModal()"><i class="ph ph-x"></i></button>
+                </div>
+            </div>
+            <div class="pikpak-errors-list" id="pikpakErrorsList"></div>
+        </div>
+    </div>
 
     <script src="/static/app.js?v=20260413a"></script>
 

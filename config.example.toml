@@ -17,6 +17,8 @@ password = ""
 session = ""                        # 当 login_mode = "token" 时填写 encoded_token
 save_dir = "/"
 delete_after_download = true
+parse_concurrency = 1               # 磁链解析并发数，1-16
+accounts = []                        # Web 页面会维护多个 PikPak 账号；旧 username/password/session 会自动迁移
 poll_interval = 3
 max_wait_time = 3600
 magnet_parse_timeout = 300           # 磁链解析“无进展”超时（秒）：云端长时间无任何下载进度（死种/无人做种）时自动跳过；0 关闭

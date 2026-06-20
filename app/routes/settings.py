@@ -158,6 +158,16 @@ async def test_pikpak(payload: dict = Body(None)):
     from app.modules.pikpak.client import PikPakClient
 
     cfg = payload or load_config()["pikpak"]
+    if not payload and isinstance(cfg.get("accounts"), list):
+        enabled_accounts = [
+            account for account in cfg.get("accounts", [])
+            if isinstance(account, dict) and bool(account.get("enabled", True))
+        ]
+        if not enabled_accounts:
+            return {"success": False, "message": "请先添加并启用至少一个 PikPak 账号"}
+        account_cfg = dict(enabled_accounts[0])
+        account_cfg["save_dir"] = cfg.get("save_dir", "/")
+        cfg = account_cfg
     login_mode = str(cfg.get("login_mode", "password") or "password").strip().lower()
     login_mode = "token" if login_mode in ("token", "session") else "password"
     if login_mode == "token":
@@ -276,9 +286,14 @@ async def global_health_check():
     try:
         cfg = load_config(force_reload=True)
         pikpak_cfg = cfg.get("pikpak", {})
-        pikpak_mode = str(pikpak_cfg.get("login_mode", "password") or "password").strip().lower()
-        statuses["pikpak"] = bool(pikpak_cfg.get("session")) if pikpak_mode == "token" else (
-            bool(pikpak_cfg.get("username")) and bool(pikpak_cfg.get("password"))
+        statuses["pikpak"] = any(
+            bool(account.get("enabled", True)) and (
+                bool(str(account.get("session") or "").strip())
+                if str(account.get("login_mode", "password") or "password").strip().lower() in ("token", "session")
+                else bool(str(account.get("username") or "").strip()) and bool(account.get("password"))
+            )
+            for account in pikpak_cfg.get("accounts", [])
+            if isinstance(account, dict)
         )
 
 
