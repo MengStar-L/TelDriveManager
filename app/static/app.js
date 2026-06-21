@@ -811,6 +811,7 @@ function runPageSideEffects(name) {
 
 
 function switchPage(name, options = {}) {
+    if (name === 'share') name = 'magnet';
     const targetPage = document.getElementById('page-' + name);
     if (!targetPage) return;
 
@@ -1589,6 +1590,10 @@ function buildProgressLogEntry(msg) {
 const progressLogSeenIds = new Set();
 let progressSnapshotPending = false;
 let activeParseJob = null;
+let activeParseJobPollTimer = null;
+
+const ACTIVE_PARSE_JOB_STATUSES = new Set(['pending', 'running']);
+const TERMINAL_PARSE_JOB_STATUSES = new Set(['completed', 'failed', 'cancelled', 'canceled']);
 
 const PARSE_BUTTON_CONFIG = {
     magnet: {
@@ -1609,6 +1614,53 @@ const PARSE_BUTTON_CONFIG = {
 };
 
 let magnetParseSummaryState = null;
+
+function getParseJobStatus(job = {}) {
+    return String(job?.status || '').trim().toLowerCase();
+}
+
+function isActiveParseJob(job) {
+    return !!(job && typeof job === 'object' && ACTIVE_PARSE_JOB_STATUSES.has(getParseJobStatus(job)));
+}
+
+function isTerminalParseJob(job) {
+    return !!(job && typeof job === 'object' && TERMINAL_PARSE_JOB_STATUSES.has(getParseJobStatus(job)));
+}
+
+function getParseJobTimestamp(job = {}) {
+    const value = String(job?.updated_at || job?.created_at || '').trim();
+    if (!value) return 0;
+    const normalized = value.includes(' ') ? value.replace(' ', 'T') : value;
+    const parsed = Date.parse(normalized.endsWith('Z') || normalized.includes('+') ? normalized : `${normalized}Z`);
+    return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function getAuthoritativeSnapshotActiveJob(snapshot = {}) {
+    const activeJob = isActiveParseJob(snapshot.active_job) ? snapshot.active_job : null;
+    if (!activeJob) return null;
+    const latestJob = snapshot.latest_jobs?.[activeJob.job_type];
+    if (!isTerminalParseJob(latestJob)) return activeJob;
+    if (latestJob.job_id && latestJob.job_id === activeJob.job_id) return null;
+    return getParseJobTimestamp(latestJob) >= getParseJobTimestamp(activeJob) ? null : activeJob;
+}
+
+function updateActiveParseJobPolling() {
+    if (isActiveParseJob(activeParseJob)) {
+        if (activeParseJobPollTimer) return;
+        activeParseJobPollTimer = window.setInterval(() => {
+            if (!isActiveParseJob(activeParseJob)) {
+                updateActiveParseJobPolling();
+                return;
+            }
+            loadParseWorkspaceSnapshot();
+        }, 3000);
+        return;
+    }
+    if (activeParseJobPollTimer) {
+        window.clearInterval(activeParseJobPollTimer);
+        activeParseJobPollTimer = null;
+    }
+}
 
 function getMagnetJobPayload(job = {}) {
     return job && typeof job === 'object' && job.request_payload && typeof job.request_payload === 'object'
@@ -1742,10 +1794,10 @@ function syncMagnetParseSummaryFromJob(job) {
     const result = getMagnetJobResult(job);
     const magnets = normalizeMagnetLinks(payload.magnets);
     const total = getMagnetJobTotal(job, magnets);
-    const status = String(job.status || '').toLowerCase();
+    const status = getParseJobStatus(job);
     const state = ensureMagnetParseSummaryState({
         jobId: job.job_id,
-        status: ['pending', 'running'].includes(status) ? status : (status || 'completed'),
+        status: ACTIVE_PARSE_JOB_STATUSES.has(status) ? status : (status || 'completed'),
         total,
         concurrency: getMagnetJobConcurrency(job, null),
         magnets,
@@ -1755,11 +1807,18 @@ function syncMagnetParseSummaryFromJob(job) {
     if (result && Object.keys(result).length) {
         const errors = Array.isArray(result.errors) ? result.errors : [];
         const roots = Array.isArray(result.roots) ? result.roots.filter(Boolean) : [];
+        const successCount = roots.length || Math.max(0, (state.total || total || 0) - errors.length);
         state.failedLinks = [];
         state.failedLinkSet = new Set();
+        state.failedIndexes = new Set();
         errors.forEach((item, offset) => addFailedMagnetLink(item?.link || '', Number(item?.index || 0) || offset + 1));
+        errors.forEach((item, offset) => {
+            const index = Number(item?.index || 0) || offset + 1;
+            if (index > 0) state.failedIndexes.add(index);
+        });
+        state.successIndexes = new Set();
         state.failedCount = errors.length;
-        state.successCount = roots.length || Math.max(0, (state.total || total || 0) - state.failedCount);
+        state.successCount = successCount;
         state.status = status || state.status;
     }
     renderMagnetParseSummary();
@@ -1913,23 +1972,25 @@ function getParseButtonConfig(jobType = '') {
 }
 
 function setParseButtonsState(job = activeParseJob) {
-    activeParseJob = job && typeof job === 'object' ? job : null;
+    activeParseJob = isActiveParseJob(job) ? job : null;
     const activeType = String(activeParseJob?.job_type || '').trim().toLowerCase();
-    const hasActive = !!(activeParseJob && ['pending', 'running'].includes(String(activeParseJob.status || '').trim().toLowerCase()));
+    const hasActive = isActiveParseJob(activeParseJob);
+    const busyType = activeType === 'share' ? 'magnet' : activeType;
 
     Object.entries(PARSE_BUTTON_CONFIG).forEach(([jobType, cfg]) => {
         const btn = document.getElementById(cfg.buttonId);
         if (!btn) return;
-        btn.disabled = false;
-        btn.innerHTML = hasActive && jobType === activeType ? cfg.busyHtml : cfg.idleHtml;
+        btn.disabled = hasActive;
+        btn.innerHTML = hasActive && jobType === busyType ? cfg.busyHtml : cfg.idleHtml;
         btn.title = hasActive && jobType !== activeType ? '当前已有解析任务正在执行' : '';
-        btn.title = '';
-        btn.classList.toggle('is-loading', hasActive && jobType === activeType);
+        btn.classList.toggle('is-loading', hasActive && jobType === busyType);
     });
+    updateActiveParseJobPolling();
 }
 
 function renderMagnetParseResult(result = {}) {
     if (!result || typeof result !== 'object') return;
+    magnetResultMode = 'magnet';
     magnetCurrentFileId = result.file_id || null;
     magnetRoots = Array.isArray(result.roots) && result.roots.length
         ? result.roots.filter(Boolean)
@@ -1950,6 +2011,31 @@ function renderMagnetParseResult(result = {}) {
         metaEl.textContent = `已解析 ${magnetFileData.length} 项，可筛选节点并推送下载链接`;
     }
     renderPickerTree('magnetFileList', magnetFileData, 'magnet');
+    const area = document.getElementById('magnetFileArea');
+    if (area) area.style.display = 'flex';
+    const selectAll = document.getElementById('magnetSelectAll');
+    if (selectAll) selectAll.checked = true;
+    updatePickerSelection('magnet');
+}
+
+function renderUnifiedShareParseResult(result = {}) {
+    if (!result || typeof result !== 'object') return;
+    magnetResultMode = 'share';
+    magnetCurrentFileId = null;
+    magnetRoots = [];
+    magnetRootAccounts = {};
+    shareCurrentData = { ...(shareCurrentData || {}), ...result };
+    shareFileData = sortPickerItemsByName(result.files || []);
+    magnetFileData = shareFileData;
+    const titleEl = document.getElementById('magnetFileName');
+    const metaEl = document.getElementById('magnetPanelMeta');
+    if (titleEl) {
+        titleEl.innerHTML = '<i class="ph ph-share-network"></i> PikPak 分享文件列表';
+    }
+    if (metaEl) {
+        metaEl.textContent = `已解析 ${shareFileData.length} 项，可筛选节点并推送下载链接`;
+    }
+    renderPickerTree('magnetFileList', shareFileData, 'magnet');
     const area = document.getElementById('magnetFileArea');
     if (area) area.style.display = 'flex';
     const selectAll = document.getElementById('magnetSelectAll');
@@ -2010,9 +2096,21 @@ function restoreParseJobResult(job) {
 
 function restoreParseResultsFromSnapshot(snapshot = {}) {
     const latestJobs = snapshot.latest_jobs || {};
-    const magnetJob = snapshot.active_job?.job_type === 'magnet' ? snapshot.active_job : latestJobs.magnet;
-    syncMagnetParseSummaryFromJob(magnetJob);
-    ['magnet', 'share', 'rss'].forEach(jobType => restoreParseJobResult(latestJobs[jobType]));
+    const activeJob = getAuthoritativeSnapshotActiveJob(snapshot);
+    const activeMagnetJob = activeJob?.job_type === 'magnet' ? activeJob : null;
+    const latestPickerJob = [latestJobs.magnet, latestJobs.share]
+        .filter(job => job && String(job.status || '').toLowerCase() === 'completed' && job.result_payload)
+        .sort((a, b) => getParseJobTimestamp(b) - getParseJobTimestamp(a))[0] || null;
+    if (!activeMagnetJob && latestPickerJob?.job_type === 'share') {
+        magnetParseSummaryState = null;
+        renderMagnetParseSummary();
+        renderUnifiedShareParseResult(latestPickerJob.result_payload);
+    } else {
+        const magnetJob = activeMagnetJob || (latestPickerJob?.job_type === 'magnet' ? latestPickerJob : latestJobs.magnet);
+        syncMagnetParseSummaryFromJob(magnetJob);
+        restoreParseJobResult(magnetJob);
+    }
+    ['share', 'rss'].forEach(jobType => restoreParseJobResult(latestJobs[jobType]));
 }
 
 function applyParseJobState(job) {
@@ -2020,10 +2118,13 @@ function applyParseJobState(job) {
     if (normalizedJob && normalizedJob.job_type === 'magnet') {
         syncMagnetParseSummaryFromJob(normalizedJob);
     }
+    if (normalizedJob && normalizedJob.job_type === 'share' && magnetResultMode === 'share' && String(normalizedJob.status || '').toLowerCase() === 'completed') {
+        renderUnifiedShareParseResult(normalizedJob.result_payload);
+    }
     if (normalizedJob && String(normalizedJob.status || '').toLowerCase() === 'completed') {
         restoreParseJobResult(normalizedJob);
     }
-    setParseButtonsState(normalizedJob && ['pending', 'running'].includes(String(normalizedJob.status || '').toLowerCase()) ? normalizedJob : null);
+    setParseButtonsState(isActiveParseJob(normalizedJob) ? normalizedJob : null);
 }
 
 async function loadParseWorkspaceSnapshot(force = false) {
@@ -2033,13 +2134,15 @@ async function loadParseWorkspaceSnapshot(force = false) {
         const resp = await fetch('/api/pikpak/progress/snapshot', { cache: 'no-store' });
         const data = await readJsonSafe(resp);
         if (!resp.ok) throw new Error(data.detail || data.message || data.error || '读取进度快照失败');
+        const activeJob = getAuthoritativeSnapshotActiveJob(data);
+        const snapshot = { ...data, active_job: activeJob };
 
-        resetProgressLogView(data.active_job ? '后台任务运行中，日志会持续写入...' : '系统处于空闲状态...');
+        resetProgressLogView(activeJob ? '后台任务运行中，日志会持续写入...' : '系统处于空闲状态...');
         if (Array.isArray(data.logs)) {
             data.logs.forEach(item => appendProgressLogMessage(item));
         }
-        restoreParseResultsFromSnapshot(data);
-        applyParseJobState(data.active_job || null);
+        restoreParseResultsFromSnapshot(snapshot);
+        applyParseJobState(activeJob || null);
     } catch (e) {
         console.warn('加载解析快照失败:', e);
         setParseButtonsState(activeParseJob);
@@ -3406,6 +3509,8 @@ window.onload = async () => {
     });
     initAutoSave();
     initCustomSelects();
+    document.getElementById('magnetInput')?.addEventListener('input', syncUnifiedSharePassCodeVisibility);
+    syncUnifiedSharePassCodeVisibility();
     // 监听 Tel2TelDrive SSE 事件
     const es = new EventSource('/api/t2td/stream');
     es.onmessage = (e) => {
@@ -4012,14 +4117,79 @@ let magnetRoots = [];
 let magnetRootAccounts = {};
 let magnetFileData = [];
 let magnetDownloadSubmitting = false;
+let magnetResultMode = 'magnet';
 
+function cleanPikPakShareLink(value = '') {
+    return String(value || '').trim().split('?')[0].split('#')[0].trim();
+}
+
+function isPikPakShareLink(value = '') {
+    return /^(https?:\/\/)?(www\.)?(mypikpak|pikpak)\.com\/s\/[^/?#\s]+/i.test(cleanPikPakShareLink(value));
+}
+
+function analyzeUnifiedParseInput(input = '') {
+    const lines = String(input || '')
+        .split(/\r?\n/)
+        .map(line => line.trim())
+        .filter(Boolean);
+    const magnets = [];
+    const shares = [];
+    const unknown = [];
+    const seenMagnets = new Set();
+    const seenShares = new Set();
+
+    lines.forEach(line => {
+        if (/^magnet:/i.test(line)) {
+            if (!seenMagnets.has(line)) {
+                seenMagnets.add(line);
+                magnets.push(line);
+            }
+            return;
+        }
+        const shareLink = cleanPikPakShareLink(line);
+        if (isPikPakShareLink(shareLink)) {
+            if (!seenShares.has(shareLink)) {
+                seenShares.add(shareLink);
+                shares.push(shareLink);
+            }
+            return;
+        }
+        unknown.push(line);
+    });
+
+    if (!lines.length) return { type: 'empty', magnets, shares, unknown };
+    if (unknown.length) return { type: 'unknown', magnets, shares, unknown };
+    if (magnets.length && shares.length) return { type: 'mixed', magnets, shares, unknown };
+    if (shares.length > 1) return { type: 'multiple_share', magnets, shares, unknown };
+    if (shares.length === 1) return { type: 'share', shareLink: shares[0], magnets, shares, unknown };
+    return { type: 'magnet', magnets, shares, unknown };
+}
+
+function syncUnifiedSharePassCodeVisibility() {
+    const input = document.getElementById('magnetInput');
+    const passCodeInput = document.getElementById('magnetSharePassCode');
+    if (!passCodeInput) return;
+    const analysis = analyzeUnifiedParseInput(input?.value || '');
+    const shouldShow = analysis.type === 'share' || analysis.shares?.length > 0;
+    passCodeInput.style.display = shouldShow ? 'block' : 'none';
+}
 
 // === Magnet Parsing ===
 async function parseMagnet() {
     const input = document.getElementById('magnetInput').value.trim();
-    if (!input) return alert('请输入磁力链接');
-    const magnets = input.split('\n').map(s => s.trim()).filter(Boolean);
+    if (!input) return alert('请输入磁链或 PikPak 分享链接');
+    const analysis = analyzeUnifiedParseInput(input);
+    if (analysis.type === 'mixed') return alert('请分开解析磁链和 PikPak 分享链接');
+    if (analysis.type === 'multiple_share') return alert('一次只能解析一个 PikPak 分享链接');
+    if (analysis.type === 'unknown') return alert('未识别到有效的磁链或 PikPak 分享链接');
+    if (analysis.type === 'share') {
+        await parseUnifiedShareLink(analysis.shareLink);
+        return;
+    }
+    const magnets = analysis.magnets;
 
+    magnetResultMode = 'magnet';
+    shareCurrentData = null;
     magnetCurrentFileId = null;
     magnetRoots = [];
     magnetRootAccounts = {};
@@ -4032,6 +4202,7 @@ async function parseMagnet() {
         status: 'running',
     });
     setParseButtonsState({ job_type: 'magnet', status: 'running' });
+    let keepActiveJob = false;
 
     try {
         const resp = await fetch('/api/pikpak/magnet/parse', {
@@ -4041,6 +4212,7 @@ async function parseMagnet() {
         });
         const data = await readJsonSafe(resp);
         if (resp.status === 409 && data.active_job) {
+            keepActiveJob = true;
             applyParseJobState(data.active_job);
         }
         if (!resp.ok || data.success === false) {
@@ -4052,7 +4224,7 @@ async function parseMagnet() {
             showA2TDToast(data.message || '磁链解析任务已提交，正在后台执行', 'info');
         }
     } catch (e) {
-        if (!activeParseJob) {
+        if (!keepActiveJob) {
             if (magnetParseSummaryState) {
                 magnetParseSummaryState.status = 'failed';
                 renderMagnetParseSummary();
@@ -4063,10 +4235,64 @@ async function parseMagnet() {
     }
 }
 
+async function parseUnifiedShareLink(shareLink) {
+    const passCodeInput = document.getElementById('magnetSharePassCode');
+    const passCode = String(passCodeInput?.value || '').trim();
+    const cleanedLink = cleanPikPakShareLink(shareLink);
+    const input = document.getElementById('magnetInput');
+    if (input && input.value.trim() !== cleanedLink) input.value = cleanedLink;
+    syncUnifiedSharePassCodeVisibility();
+
+    magnetResultMode = 'share';
+    magnetCurrentFileId = null;
+    magnetRoots = [];
+    magnetRootAccounts = {};
+    magnetFileData = [];
+    shareCurrentData = null;
+    shareFileData = [];
+    magnetParseSummaryState = null;
+    renderMagnetParseSummary();
+    const area = document.getElementById('magnetFileArea');
+    if (area) area.style.display = 'none';
+    setParseButtonsState({ job_type: 'share', status: 'running' });
+    let keepActiveJob = false;
+
+    try {
+        const resp = await fetch('/api/pikpak/share/list', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ share_link: cleanedLink, pass_code: passCode })
+        });
+        const data = await readJsonSafe(resp);
+        if (resp.status === 409 && data.active_job) {
+            keepActiveJob = true;
+            applyParseJobState(data.active_job);
+        }
+        if (!resp.ok || data.success === false) throw new Error(data.error || data.message || '解析失败');
+
+        applyParseJobState(data.job || { job_type: 'share', status: 'running' });
+        if (typeof showA2TDToast === 'function') {
+            showA2TDToast(data.message || 'PikPak 分享解析任务已提交，正在后台执行', 'info');
+        }
+    } catch (e) {
+        if (!keepActiveJob) setParseButtonsState(null);
+        alert(e.message || '解析失败');
+    }
+}
+
 async function submitMagnets() {
     const input = document.getElementById('magnetInput').value.trim();
-    if (!input) return alert('请输入磁力链接');
+    if (!input) return alert('请输入磁链或 PikPak 分享链接');
     
+    const analysis = analyzeUnifiedParseInput(input);
+    if (analysis.type === 'mixed') return alert('请分开解析磁链和 PikPak 分享链接');
+    if (analysis.type === 'multiple_share') return alert('一次只能解析一个 PikPak 分享链接');
+    if (analysis.type === 'unknown') return alert('未识别到有效的磁链或 PikPak 分享链接');
+    if (analysis.type === 'share') {
+        await parseUnifiedShareLink(analysis.shareLink);
+        return;
+    }
+
     const btn = document.getElementById('submitBtn');
     if(!btn) return;
     btn.disabled = true;
@@ -4076,7 +4302,7 @@ async function submitMagnets() {
         const resp = await fetch('/api/pikpak/add', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ magnets: input })
+            body: JSON.stringify({ magnets: analysis.magnets.join('\n') })
         });
         const data = await resp.json();
         if(!resp.ok) throw new Error(data.error || '提交失败');
@@ -4097,6 +4323,10 @@ function toggleMagnetSelectAll() {
 
 
 async function downloadMagnetFiles() {
+    if (magnetResultMode === 'share') {
+        await downloadUnifiedShareFiles();
+        return;
+    }
     const roots = (Array.isArray(magnetRoots) && magnetRoots.length)
         ? magnetRoots
         : (magnetCurrentFileId ? [magnetCurrentFileId] : []);
@@ -4145,6 +4375,52 @@ async function downloadMagnetFiles() {
     }
 }
 
+async function downloadUnifiedShareFiles() {
+    if (!shareCurrentData || shareDownloadSubmitting) return;
+    const checkboxes = document.querySelectorAll('#magnetFileList input[data-role="file"]:checked');
+    const selectedSet = new Set(Array.from(checkboxes).map(cb => String(cb.value || '')));
+    const orderedSelectedItems = shareFileData.filter(item => selectedSet.has(String(item.id || '')));
+    const selectedIds = orderedSelectedItems.map(item => item.id);
+
+    if (!selectedIds.length) return alert('请先选择需要下载的文件');
+
+    const keepStructure = document.getElementById('magnetKeepStructure')?.checked ?? true;
+    const teldrivePath = getTelDriveTargetPath('magnetTeldrivePath');
+    const filePaths = Object.fromEntries(
+        orderedSelectedItems.map(item => [item.id, item.path || item.name || ''])
+    );
+    const btn = document.getElementById('magnetDownloadBtn');
+    if (!btn) return;
+    shareDownloadSubmitting = true;
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner"></span> 提交中...';
+
+    try {
+        const resp = await fetch('/api/pikpak/share/download', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                share_id: shareCurrentData.share_id,
+                file_ids: selectedIds,
+                pass_code_token: shareCurrentData.pass_code_token,
+                keep_structure: keepStructure,
+                file_paths: filePaths,
+                rename_by_folder: false,
+                teldrive_path: teldrivePath
+            })
+        });
+        const data = await resp.json();
+        if (!resp.ok) throw new Error(data.error || '提交失败');
+        switchPage('progress', { animated: true });
+    } catch (e) {
+        alert(e.message || '提交失败');
+    } finally {
+        shareDownloadSubmitting = false;
+        btn.disabled = false;
+        btn.innerHTML = '<i class="ph ph-download-simple"></i> 推送下载链接';
+    }
+}
+
 
 // === Share Parsing ===
 let shareCurrentData = null;
@@ -4188,16 +4464,20 @@ function getTelDriveTargetPath(inputId) {
     return (document.getElementById(inputId)?.value || '').trim() || '/';
 }
 
-
 async function parseShareLink() {
-    const shareLink = document.getElementById('shareLink').value.trim();
+    const shareLinkInput = document.getElementById('shareLink');
+    const shareLink = cleanPikPakShareLink(shareLinkInput?.value || '');
     const passCode = document.getElementById('sharePassCode').value.trim();
+    if (shareLinkInput && shareLinkInput.value.trim() !== shareLink) {
+        shareLinkInput.value = shareLink;
+    }
     if (!shareLink) return alert('请输入分享链接');
 
     shareCurrentData = null;
     shareFileData = [];
     document.getElementById('shareFileArea')?.classList.remove('visible');
     setParseButtonsState({ job_type: 'share', status: 'running' });
+    let keepActiveJob = false;
 
     try {
         const resp = await fetch('/api/pikpak/share/list', {
@@ -4207,6 +4487,7 @@ async function parseShareLink() {
         });
         const data = await readJsonSafe(resp);
         if (resp.status === 409 && data.active_job) {
+            keepActiveJob = true;
             applyParseJobState(data.active_job);
         }
         if (!resp.ok || data.success === false) throw new Error(data.error || data.message || '解析失败');
@@ -4216,7 +4497,7 @@ async function parseShareLink() {
             showA2TDToast(data.message || '分享解析任务已提交，正在后台执行', 'info');
         }
     } catch (e) {
-        if (!activeParseJob) setParseButtonsState(null);
+        if (!keepActiveJob) setParseButtonsState(null);
         alert(e.message || '解析失败');
     }
 }
@@ -4297,6 +4578,7 @@ async function parseRSS() {
     rssFileData = [];
     document.getElementById('rssResultArea')?.classList.remove('visible');
     setParseButtonsState({ job_type: 'rss', status: 'running' });
+    let keepActiveJob = false;
 
     try {
         const resp = await fetch('/api/pikpak/rss/parse', {
@@ -4306,6 +4588,7 @@ async function parseRSS() {
         });
         const data = await readJsonSafe(resp);
         if (resp.status === 409 && data.active_job) {
+            keepActiveJob = true;
             applyParseJobState(data.active_job);
         }
         if (!resp.ok || data.success === false) throw new Error(data.error || data.message || '扫描失败');
@@ -4315,7 +4598,7 @@ async function parseRSS() {
             showA2TDToast(data.message || 'RSS 解析任务已提交，正在后台执行', 'info');
         }
     } catch (e) {
-        if (!activeParseJob) setParseButtonsState(null);
+        if (!keepActiveJob) setParseButtonsState(null);
         alert(e.message || '扫描失败');
     }
 }

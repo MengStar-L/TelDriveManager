@@ -1,9 +1,12 @@
+import asyncio
 import copy
+from datetime import datetime, timedelta, timezone
 import unittest
 from typing import Any, cast
 
 from app import config as config_module
 from app.modules.pikpak import account_pool as account_pool_module
+from app.modules.pikpak import routes as pikpak_routes
 from app.modules.pikpak.account_pool import PikPakAccountPool
 from app.modules.pikpak.scheduler import MagnetParseScheduler
 
@@ -202,6 +205,224 @@ class MagnetParseSchedulerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(finished["status"], "failed")
         self.assertEqual(finished["result_payload"]["total"], 2)
         self.assertEqual([item["link"] for item in finished["result_payload"]["errors"]], ["bad-1", "bad-2"])
+
+
+class PikPakShareLinkTests(unittest.TestCase):
+    def test_clean_pikpak_share_link_strips_query_and_fragment(self):
+        self.assertEqual(
+            pikpak_routes._clean_pikpak_share_link("https://mypikpak.com/s/abc?act=play"),
+            "https://mypikpak.com/s/abc",
+        )
+        self.assertEqual(
+            pikpak_routes._clean_pikpak_share_link("https://mypikpak.com/s/abc?act=play&x=1#frag"),
+            "https://mypikpak.com/s/abc",
+        )
+        self.assertEqual(
+            pikpak_routes._clean_pikpak_share_link(" https://mypikpak.com/s/abc "),
+            "https://mypikpak.com/s/abc",
+        )
+
+
+class ParseJobStateTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        self.original_active_parse_job_id = pikpak_routes._active_parse_job_id
+        pikpak_routes._active_parse_job_id = None
+
+    async def asyncTearDown(self):
+        pikpak_routes._active_parse_job_id = self.original_active_parse_job_id
+
+    async def test_share_list_uses_cleaned_share_link_for_job_and_worker(self):
+        captured = {}
+
+        class FakeRequest:
+            async def json(self):
+                return {
+                    "share_link": "https://mypikpak.com/s/VOvb6etR01ViAz9VVKGev6pXo2?act=play",
+                    "pass_code": "1234",
+                }
+
+        original_create = pikpak_routes._create_parse_job
+        original_run = pikpak_routes._run_share_parse_job
+        original_background = pikpak_routes._create_parse_background_task
+        try:
+            async def fake_create(job_type, request_payload):
+                captured["create"] = (job_type, request_payload)
+                return {
+                    "job_id": "share-job",
+                    "job_type": job_type,
+                    "status": "running",
+                    "request_payload": request_payload,
+                }, None
+
+            def fake_run(job_id, share_link, pass_code):
+                captured["run"] = (job_id, share_link, pass_code)
+                return "fake-coro"
+
+            def fake_background(coro, job_id):
+                captured["background"] = (coro, job_id)
+                return None
+
+            pikpak_routes._create_parse_job = fake_create
+            pikpak_routes._run_share_parse_job = fake_run
+            pikpak_routes._create_parse_background_task = fake_background
+
+            response = await pikpak_routes.api_share_list(FakeRequest())
+        finally:
+            pikpak_routes._create_parse_job = original_create
+            pikpak_routes._run_share_parse_job = original_run
+            pikpak_routes._create_parse_background_task = original_background
+
+        cleaned = "https://mypikpak.com/s/VOvb6etR01ViAz9VVKGev6pXo2"
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(captured["create"], ("share", {"share_link": cleaned, "pass_code": "1234"}))
+        self.assertEqual(captured["run"], ("share-job", cleaned, "1234"))
+        self.assertEqual(captured["background"], ("fake-coro", "share-job"))
+
+    async def test_create_parse_job_returns_existing_active_job(self):
+        active = {
+            "job_id": "active-1",
+            "job_type": "magnet",
+            "status": "running",
+            "request_payload": {"magnets": ["magnet:?xt=1"], "total": 1, "parse_concurrency": 1},
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }
+        created = []
+
+        original_get_active = pikpak_routes.db.get_active_parse_job
+        original_create = pikpak_routes.db.create_parse_job
+        original_broadcast = pikpak_routes._broadcast_parse_job_state
+        try:
+            async def fake_get_active():
+                return active
+
+            async def fake_create(*args, **kwargs):
+                created.append((args, kwargs))
+                return {"job_id": "new"}
+
+            async def fake_broadcast(_job):
+                return None
+
+            pikpak_routes.db.get_active_parse_job = fake_get_active
+            pikpak_routes.db.create_parse_job = fake_create
+            pikpak_routes._broadcast_parse_job_state = fake_broadcast
+
+            job, active_job = await pikpak_routes._create_parse_job("magnet", {"magnets": ["new"]})
+        finally:
+            pikpak_routes.db.get_active_parse_job = original_get_active
+            pikpak_routes.db.create_parse_job = original_create
+            pikpak_routes._broadcast_parse_job_state = original_broadcast
+
+        self.assertIsNone(job)
+        self.assertEqual(active_job, active)
+        self.assertEqual(created, [])
+
+    async def test_finish_parse_job_clears_active_pointer(self):
+        finished = {}
+        broadcasts = []
+
+        original_update = pikpak_routes.db.update_parse_job
+        original_broadcast = pikpak_routes._broadcast_parse_job_state
+        try:
+            async def fake_update(job_id, **kwargs):
+                finished.update({"job_id": job_id, **kwargs})
+                return {"job_id": job_id, "job_type": "magnet", **kwargs}
+
+            async def fake_broadcast(job):
+                broadcasts.append(job)
+
+            pikpak_routes.db.update_parse_job = fake_update
+            pikpak_routes._broadcast_parse_job_state = fake_broadcast
+            pikpak_routes._active_parse_job_id = "job-1"
+
+            await pikpak_routes._finish_parse_job("job-1", "completed", result_payload={"files": []})
+        finally:
+            pikpak_routes.db.update_parse_job = original_update
+            pikpak_routes._broadcast_parse_job_state = original_broadcast
+
+        self.assertIsNone(pikpak_routes._active_parse_job_id)
+        self.assertEqual(finished["status"], "completed")
+        self.assertEqual(broadcasts[0]["status"], "completed")
+
+    async def test_stale_active_parse_job_is_marked_failed(self):
+        stale = {
+            "job_id": "stale-1",
+            "job_type": "magnet",
+            "status": "running",
+            "request_payload": {"magnets": ["m"], "total": 1, "parse_concurrency": 1},
+            "updated_at": (datetime.now(timezone.utc) - timedelta(seconds=125)).isoformat(),
+        }
+        active_results = [stale, None]
+        updates = []
+
+        original_get_active = pikpak_routes.db.get_active_parse_job
+        original_update = pikpak_routes.db.update_parse_job
+        original_broadcast = pikpak_routes._broadcast_parse_job_state
+        original_load_config = pikpak_routes.load_config
+        try:
+            async def fake_get_active():
+                return active_results.pop(0)
+
+            async def fake_update(job_id, **kwargs):
+                updates.append({"job_id": job_id, **kwargs})
+                return {**stale, **kwargs}
+
+            async def fake_broadcast(_job):
+                return None
+
+            pikpak_routes.db.get_active_parse_job = fake_get_active
+            pikpak_routes.db.update_parse_job = fake_update
+            pikpak_routes._broadcast_parse_job_state = fake_broadcast
+            pikpak_routes.load_config = lambda: {"pikpak": {"max_wait_time": 60, "parse_concurrency": 1}}
+
+            active_job = await pikpak_routes._get_active_parse_job()
+        finally:
+            pikpak_routes.db.get_active_parse_job = original_get_active
+            pikpak_routes.db.update_parse_job = original_update
+            pikpak_routes._broadcast_parse_job_state = original_broadcast
+            pikpak_routes.load_config = original_load_config
+
+        self.assertIsNone(active_job)
+        self.assertEqual(updates[0]["job_id"], "stale-1")
+        self.assertEqual(updates[0]["status"], "failed")
+
+    async def test_crashed_background_task_marks_active_job_failed(self):
+        updates = []
+        active = {"job_id": "crash-1", "job_type": "rss", "status": "running"}
+
+        async def boom():
+            raise RuntimeError("boom")
+
+        original_get = pikpak_routes.db.get_parse_job
+        original_update = pikpak_routes.db.update_parse_job
+        original_broadcast = pikpak_routes._broadcast_parse_job_state
+        try:
+            async def fake_get(_job_id):
+                return active
+
+            async def fake_update(job_id, **kwargs):
+                updates.append({"job_id": job_id, **kwargs})
+                return {**active, **kwargs}
+
+            async def fake_broadcast(_job):
+                return None
+
+            pikpak_routes.db.get_parse_job = fake_get
+            pikpak_routes.db.update_parse_job = fake_update
+            pikpak_routes._broadcast_parse_job_state = fake_broadcast
+
+            task = pikpak_routes._create_parse_background_task(boom(), "crash-1")
+            with self.assertRaises(RuntimeError):
+                await task
+            for _ in range(3):
+                await asyncio.sleep(0)
+        finally:
+            pikpak_routes.db.get_parse_job = original_get
+            pikpak_routes.db.update_parse_job = original_update
+            pikpak_routes._broadcast_parse_job_state = original_broadcast
+
+        self.assertEqual(updates[0]["job_id"], "crash-1")
+        self.assertEqual(updates[0]["status"], "failed")
+        self.assertIn("boom", updates[0]["error"])
 
 
 if __name__ == "__main__":

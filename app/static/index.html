@@ -335,6 +335,7 @@
         .input-footer { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 16px; flex-wrap: wrap; }
         .input-hint { font-size: 13px; color: var(--text-secondary); display: flex; align-items: center; gap: 6px; flex: 1 1 260px; min-width: min(220px, 100%); }
         .input-actions { display: flex; gap: 12px; align-items: center; justify-content: flex-end; flex: 1 1 360px; min-width: min(320px, 100%); flex-wrap: wrap; }
+        .unified-passcode-input { flex: 0 1 150px; min-width: 120px; height: 38px; }
         .parse-summary { flex: 1 1 460px; min-width: min(460px, 100%); display: flex; align-items: center; justify-content: center; gap: 8px; animation: parseSummaryEnter 0.32s ease both; }
         .parse-summary.is-hidden { display: none; }
         .parse-summary-chip { display: inline-flex; align-items: center; gap: 6px; min-height: 32px; padding: 7px 11px; border-radius: 999px; border: 1px solid transparent; font-size: 12px; font-weight: 700; white-space: nowrap; box-shadow: 0 8px 18px rgba(15, 23, 42, 0.06); }
@@ -1077,7 +1078,7 @@
                         <div class="nav-item active" data-page="magnet" data-tooltip="磁链解析" onclick="switchPage('magnet', { animated: true, source: 'user' })">
                 <i class="ph ph-link"></i>
             </div>
-            <div class="nav-item" data-page="share" data-tooltip="Pik分享" onclick="switchPage('share', { animated: true, source: 'user' })">
+            <div class="nav-item" hidden data-page="share" data-tooltip="Pik分享" onclick="switchPage('share', { animated: true, source: 'user' })">
                 <i class="ph ph-share-network"></i>
             </div>
             <div class="nav-item" data-page="rss" data-tooltip="RSS订阅" onclick="switchPage('rss', { animated: true, source: 'user' })">
@@ -1140,11 +1141,12 @@
                 <div class="page page-fill page-stack active" id="page-magnet">
                     <div class="card magnet-input-card">
                         <div class="card-body">
-                            <textarea class="magnet-input" id="magnetInput" placeholder="输入磁力链接，支持粘贴多行..."></textarea>
+                            <textarea class="magnet-input" id="magnetInput" placeholder="输入磁链或 PikPak 分享链接，磁链支持粘贴多行..."></textarea>
                             <div class="input-footer">
-                                <span class="input-hint"><i class="ph-fill ph-info"></i> 单链可以解析选择文件，多行直接全量并行下载。</span>
+                                <span class="input-hint"><i class="ph-fill ph-info"></i> 自动识别磁链和 PikPak 分享；混合输入请分开解析。</span>
                                 <div class="parse-summary is-hidden" id="magnetParseSummary" aria-live="polite"></div>
                                 <div class="input-actions">
+                                    <input class="form-input unified-passcode-input" type="text" id="magnetSharePassCode" placeholder="提取码" style="display:none">
                                     <label class="toggle-row remote-push-pill" data-tooltip="开启后，本地下载任务会同步向设置页配置的远程 aria2 推送一份相同下载链接（仅下载，不上传），即时生效">
                                         <i class="ph-fill ph-broadcast"></i> 远程推送
                                         <div class="toggle-switch">

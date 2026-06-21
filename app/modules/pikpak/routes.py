@@ -307,6 +307,75 @@ def _is_parse_job_active(job: Optional[dict]) -> bool:
     return bool(job and job.get("status") in {"pending", "running"})
 
 
+def _clean_pikpak_share_link(value: str) -> str:
+    cleaned = str(value or "").strip()
+    for sep in ("?", "#"):
+        cleaned = cleaned.split(sep, 1)[0].strip()
+    return cleaned
+
+
+def _parse_job_updated_at(job: Optional[dict]) -> Optional[datetime]:
+    if not job:
+        return None
+    value = str(job.get("updated_at") or job.get("created_at") or "").strip()
+    if not value:
+        return None
+    normalized = value.replace("Z", "+00:00")
+    if " " in normalized:
+        normalized = normalized.replace(" ", "T", 1)
+    try:
+        parsed = datetime.fromisoformat(normalized)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _parse_job_stale_after_seconds(job: Optional[dict]) -> float:
+    cfg = load_config().get("pikpak", {})
+    try:
+        max_wait_time = float(cfg.get("max_wait_time", 3600) or 3600)
+    except (TypeError, ValueError):
+        max_wait_time = 3600.0
+    stale_after = max(60.0, max_wait_time) + 60.0
+
+    if job and job.get("job_type") == "magnet":
+        payload = job.get("request_payload") if isinstance(job.get("request_payload"), dict) else {}
+        magnets = payload.get("magnets") if isinstance(payload.get("magnets"), list) else []
+        try:
+            total = int(payload.get("total") or len(magnets) or 1)
+        except (TypeError, ValueError):
+            total = len(magnets) or 1
+        try:
+            concurrency = int(payload.get("parse_concurrency") or cfg.get("parse_concurrency") or 1)
+        except (TypeError, ValueError):
+            concurrency = 1
+        concurrency = max(1, min(16, concurrency))
+        batches = max(1, (max(1, total) + concurrency - 1) // concurrency)
+        stale_after = max(60.0, max_wait_time) * batches + 60.0
+
+    return stale_after
+
+
+def _is_parse_job_stale(job: Optional[dict]) -> bool:
+    updated_at = _parse_job_updated_at(job)
+    if not updated_at:
+        return False
+    elapsed = (datetime.now(timezone.utc) - updated_at).total_seconds()
+    return elapsed > _parse_job_stale_after_seconds(job)
+
+
+async def _fail_stale_parse_job(job: Optional[dict]) -> bool:
+    if not _is_parse_job_active(job) or not _is_parse_job_stale(job):
+        return False
+    job_id = str(job.get("job_id") or "").strip()
+    if not job_id:
+        return False
+    await _finish_parse_job(job_id, "failed", error="Parse job timed out and was marked failed")
+    return True
+
+
 def _summarize_parse_request(job_type: str, request_payload: dict | None = None) -> str:
     payload = request_payload or {}
     if job_type == "magnet":
@@ -354,11 +423,21 @@ async def _get_active_parse_job() -> Optional[dict]:
     if _active_parse_job_id:
         job = await db.get_parse_job(_active_parse_job_id)
         if _is_parse_job_active(job):
-            return job
-        _active_parse_job_id = None
+            if await _fail_stale_parse_job(job):
+                _active_parse_job_id = None
+            else:
+                return job
+        else:
+            _active_parse_job_id = None
 
-    job = await db.get_active_parse_job()
-    if _is_parse_job_active(job):
+    for _ in range(8):
+        job = await db.get_active_parse_job()
+        if not _is_parse_job_active(job):
+            return None
+        if await _fail_stale_parse_job(job):
+            if _active_parse_job_id == str(job.get("job_id") or ""):
+                _active_parse_job_id = None
+            continue
         _active_parse_job_id = str(job.get("job_id") or "") or None
         return job
     return None
@@ -386,6 +465,9 @@ async def _finish_parse_job(job_id: str, status: str, *, result_payload: dict | 
 async def _create_parse_job(job_type: str, request_payload: dict) -> tuple[Optional[dict], Optional[dict]]:
     global _active_parse_job_id
     async with _parse_job_lock:
+        active_job = await _get_active_parse_job()
+        if active_job:
+            return None, active_job
         job_id = uuid.uuid4().hex
         job = await db.create_parse_job(job_id, job_type, request_payload, status="running")
         _active_parse_job_id = job_id
@@ -395,14 +477,42 @@ async def _create_parse_job(job_type: str, request_payload: dict) -> tuple[Optio
 
 async def _build_parse_snapshot() -> dict:
     log_limit = max(1, int(load_config().get("log", {}).get("buffer_size", 400) or 400))
+    active_job = await _get_active_parse_job()
     latest_jobs = {}
     for job_type in _PARSE_JOB_TYPES:
         latest_jobs[job_type] = _serialize_parse_job(await db.get_latest_parse_job(job_type))
     return {
         "logs": await db.get_progress_logs(stream="pikpak", limit=log_limit),
-        "active_job": _serialize_parse_job(await _get_active_parse_job()),
+        "active_job": _serialize_parse_job(active_job),
         "latest_jobs": latest_jobs,
     }
+
+
+async def _finalize_crashed_parse_task(job_id: str, task: asyncio.Task) -> None:
+    try:
+        if task.cancelled():
+            reason = "Parse job task was cancelled"
+        else:
+            exc = task.exception()
+            if exc is None:
+                return
+            reason = str(exc) or exc.__class__.__name__
+
+        job = await db.get_parse_job(job_id)
+        if _is_parse_job_active(job):
+            await _finish_parse_job(job_id, "failed", error=reason)
+    except Exception:
+        logger.exception("Failed to finalize crashed parse task %s", job_id)
+
+
+def _create_parse_background_task(coro, job_id: str) -> asyncio.Task:
+    task = asyncio.create_task(coro)
+
+    def _on_done(done_task: asyncio.Task) -> None:
+        asyncio.create_task(_finalize_crashed_parse_task(job_id, done_task))
+
+    task.add_done_callback(_on_done)
+    return task
 
 
 async def _parse_single_magnet(pikpak, magnet: str, index: int, total: int, job_id: str,
@@ -1066,7 +1176,7 @@ async def api_magnet_parse(request: Request):
             "active_job": _serialize_parse_job(active_job),
         }, status_code=409)
 
-    asyncio.create_task(_run_magnet_parse_job(job["job_id"], magnets))
+    _create_parse_background_task(_run_magnet_parse_job(job["job_id"], magnets), job["job_id"])
     return JSONResponse({
         "success": True,
         "message": f"磁链解析任务已提交（{len(magnets)} 个），正在后台执行",
@@ -1187,7 +1297,7 @@ async def api_rss_parse(request: Request):
             "active_job": _serialize_parse_job(active_job),
         }, status_code=409)
 
-    asyncio.create_task(_run_rss_parse_job(job["job_id"], rss_url))
+    _create_parse_background_task(_run_rss_parse_job(job["job_id"], rss_url), job["job_id"])
     return JSONResponse({
         "success": True,
         "message": "RSS 解析任务已提交，正在后台执行",
@@ -1214,7 +1324,7 @@ async def api_rss_download(request: Request):
 @router.post("/share/list")
 async def api_share_list(request: Request):
     body = await request.json()
-    share_link = body.get("share_link", "").strip()
+    share_link = _clean_pikpak_share_link(body.get("share_link", ""))
     pass_code = body.get("pass_code", "").strip()
     if not share_link:
         return JSONResponse({"error": "请输入分享链接"}, status_code=400)
@@ -1226,7 +1336,7 @@ async def api_share_list(request: Request):
             "active_job": _serialize_parse_job(active_job),
         }, status_code=409)
 
-    asyncio.create_task(_run_share_parse_job(job["job_id"], share_link, pass_code))
+    _create_parse_background_task(_run_share_parse_job(job["job_id"], share_link, pass_code), job["job_id"])
     return JSONResponse({
         "success": True,
         "message": "分享解析任务已提交，正在后台执行",
