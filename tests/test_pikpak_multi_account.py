@@ -33,6 +33,26 @@ class PikPakConfigMigrationTests(unittest.TestCase):
         self.assertEqual(self.normalize({"parse_concurrency": 99})["parse_concurrency"], 16)
         self.assertEqual(self.normalize({"parse_concurrency": "bad"})["parse_concurrency"], 1)
 
+    def test_account_runtime_metadata_survives_normalization(self):
+        pikpak = self.normalize({
+            "accounts": [{
+                "id": "account-1",
+                "name": "Account 1",
+                "login_mode": "password",
+                "username": "user@example.test",
+                "password": "secret",
+                "session": "encoded-token",
+                "enabled": True,
+                "vip": {"expire": "2030-01-02T03:04:05Z", "is_vip": True},
+                "last_login_refresh_at": "2026-06-21T10:00:00+00:00",
+            }],
+        })
+
+        account = pikpak["accounts"][0]
+        self.assertEqual(account["session"], "encoded-token")
+        self.assertEqual(account["vip"]["expire"], "2030-01-02T03:04:05Z")
+        self.assertEqual(account["last_login_refresh_at"], "2026-06-21T10:00:00+00:00")
+
 
 class PikPakAccountPoolTests(unittest.IsolatedAsyncioTestCase):
     async def test_round_robin_skips_disabled_accounts(self):
@@ -132,9 +152,56 @@ class MagnetParseSchedulerTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(finished["status"], "completed")
         self.assertEqual(len(finished["result_payload"]["files"]), 1)
+        self.assertEqual(finished["result_payload"]["parse_concurrency"], 2)
+        self.assertEqual(finished["result_payload"]["total"], 2)
         self.assertEqual(finished["result_payload"]["errors"][0]["link"], "bad")
         self.assertEqual(recorded_errors[0][0], "b")
         self.assertTrue(any(msg.get("type") == "task_error" for msg in broadcasts))
+
+    async def test_all_failures_keep_failed_links_in_result_payload(self):
+        class FakePool:
+            async def next_client(self):
+                account = account_pool_module.PikPakAccountContext("a", "A", "password", "a")
+                return account, {"account": account.id}
+
+        scheduler = MagnetParseScheduler(cast(Any, FakePool()))
+        finished = {}
+
+        async def parse_one(*args, **kwargs):
+            raise RuntimeError("broken link")
+
+        async def broadcast(_msg):
+            return None
+
+        async def finish_job(job_id, status, **kwargs):
+            finished.update({"job_id": job_id, "status": status, **kwargs})
+            return finished
+
+        scheduler_module = __import__("app.modules.pikpak.scheduler", fromlist=["load_config", "db"])
+        original_scheduler_load_config = scheduler_module.load_config
+        original_add_error = scheduler_module.db.add_pikpak_account_error
+        try:
+            scheduler_module.load_config = lambda: {"pikpak": {"parse_concurrency": 2, "poll_interval": 0, "max_wait_time": 1, "magnet_parse_timeout": 1}}
+
+            async def fake_add_error(*_args, **_kwargs):
+                return {}
+
+            scheduler_module.db.add_pikpak_account_error = fake_add_error
+            await scheduler.run(
+                "job-failed",
+                ["bad-1", "bad-2"],
+                parse_one=parse_one,
+                broadcast=broadcast,
+                finish_job=finish_job,
+                sort_files=lambda files: files,
+            )
+        finally:
+            scheduler_module.load_config = original_scheduler_load_config
+            scheduler_module.db.add_pikpak_account_error = original_add_error
+
+        self.assertEqual(finished["status"], "failed")
+        self.assertEqual(finished["result_payload"]["total"], 2)
+        self.assertEqual([item["link"] for item in finished["result_payload"]["errors"]], ["bad-1", "bad-2"])
 
 
 if __name__ == "__main__":

@@ -215,11 +215,15 @@ def _normalize_pikpak_account(raw_account: Any, fallback_index: int = 0) -> dict
         "login_mode": mode,
         "username": username if mode == "password" else "",
         "password": password if mode == "password" else "",
-        "session": session if mode == "token" else "",
+        "session": session,
         "enabled": bool(raw_account.get("enabled", True)),
         "created_at": str(raw_account.get("created_at") or ""),
         "updated_at": str(raw_account.get("updated_at") or ""),
     }
+    if isinstance(raw_account.get("vip"), dict):
+        account["vip"] = dict(raw_account["vip"])
+    if raw_account.get("last_login_refresh_at"):
+        account["last_login_refresh_at"] = str(raw_account.get("last_login_refresh_at") or "")
     return account if _has_pikpak_account_auth(account) else None
 
 

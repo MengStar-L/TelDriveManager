@@ -428,6 +428,7 @@ async def _parse_single_magnet(pikpak, magnet: str, index: int, total: int, job_
         "total": total,
         "magnet": magnet_summary,
         "parse_job_id": job_id,
+        "job_type": "magnet",
         "workflow": "parse",
         **account_payload,
     })
@@ -445,6 +446,7 @@ async def _parse_single_magnet(pikpak, magnet: str, index: int, total: int, job_
         "file_name": file_name,
         "task_id": task_id,
         "parse_job_id": job_id,
+        "job_type": "magnet",
         **account_payload,
     })
     await _broadcast({
@@ -452,6 +454,7 @@ async def _parse_single_magnet(pikpak, magnet: str, index: int, total: int, job_
         "index": index,
         "status": f"PikPak 离线任务已创建 [{index}/{total}]，等待云端完成缓存...",
         "parse_job_id": job_id,
+        "job_type": "magnet",
         **account_payload,
     })
 
@@ -498,14 +501,16 @@ async def _parse_single_magnet(pikpak, magnet: str, index: int, total: int, job_
         "index": index,
         "files": [item.get("name", "未知文件") for item in file_tree],
         "parse_job_id": job_id,
+        "job_type": "magnet",
         **account_payload,
     })
-    await _broadcast_resolved_files(index, file_tree, {"parse_job_id": job_id, **account_payload})
+    await _broadcast_resolved_files(index, file_tree, {"parse_job_id": job_id, "job_type": "magnet", **account_payload})
     await _broadcast({
         "type": "task_done",
         "index": index,
         "file_name": file_name,
         "parse_job_id": job_id,
+        "job_type": "magnet",
         **account_payload,
     })
     return {
@@ -1049,7 +1054,12 @@ async def api_magnet_parse(request: Request):
     if not magnets:
         return JSONResponse({"error": "请输入磁力链接"}, status_code=400)
 
-    job, active_job = await _create_parse_job("magnet", {"magnets": magnets})
+    pikpak_cfg = load_config().get("pikpak", {})
+    parse_concurrency = min(16, max(1, int(pikpak_cfg.get("parse_concurrency") or 1)))
+    job, active_job = await _create_parse_job(
+        "magnet",
+        {"magnets": magnets, "total": len(magnets), "parse_concurrency": parse_concurrency},
+    )
     if not job:
         return JSONResponse({
             "error": "当前已有解析任务正在执行，请等待完成后再发起新的解析",

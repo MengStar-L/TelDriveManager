@@ -79,7 +79,9 @@ class MagnetParseScheduler:
                         "type": "task_error",
                         "index": index,
                         "message": f"第 {index} 个磁链解析失败: {message}",
+                        "link": magnet,
                         "parse_job_id": job_id,
+                        "job_type": "magnet",
                         "account_id": account.id if account else "",
                         "account_name": account.name if account else "",
                     })
@@ -103,14 +105,28 @@ class MagnetParseScheduler:
 
             if not merged_files:
                 detail = "；".join(item["message"] for item in errors) if errors else "未解析到任何文件"
-                await broadcast({"type": "error", "message": f"磁链解析失败: {detail}", "parse_job_id": job_id})
-                await finish_job(job_id, "failed", error=detail)
+                await broadcast({"type": "error", "message": f"磁链解析失败: {detail}", "parse_job_id": job_id, "job_type": "magnet"})
+                await finish_job(
+                    job_id,
+                    "failed",
+                    result_payload={
+                        "file_id": "",
+                        "roots": [],
+                        "root_accounts": {},
+                        "file_name": "",
+                        "files": [],
+                        "errors": errors,
+                        "parse_concurrency": concurrency,
+                        "total": total,
+                    },
+                    error=detail,
+                )
                 return
 
             merged_files = sort_files(merged_files)
             file_name = names[0] if len(names) == 1 else f"{len(names)} 个磁链（共 {len(merged_files)} 个文件）"
 
-            await broadcast({"type": "all_done", "total": total, "parse_job_id": job_id})
+            await broadcast({"type": "all_done", "total": total, "parse_job_id": job_id, "job_type": "magnet"})
             await finish_job(
                 job_id,
                 "completed",
@@ -121,9 +137,11 @@ class MagnetParseScheduler:
                     "file_name": file_name,
                     "files": merged_files,
                     "errors": errors,
+                    "parse_concurrency": concurrency,
+                    "total": total,
                 },
                 error=(f"{len(errors)} 个链接解析失败" if errors else None),
             )
         except Exception as exc:
-            await broadcast({"type": "error", "message": f"磁链解析失败: {exc}", "parse_job_id": job_id})
+            await broadcast({"type": "error", "message": f"磁链解析失败: {exc}", "parse_job_id": job_id, "job_type": "magnet"})
             await finish_job(job_id, "failed", error=str(exc))

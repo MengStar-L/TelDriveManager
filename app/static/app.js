@@ -1608,6 +1608,236 @@ const PARSE_BUTTON_CONFIG = {
     }
 };
 
+let magnetParseSummaryState = null;
+
+function getMagnetJobPayload(job = {}) {
+    return job && typeof job === 'object' && job.request_payload && typeof job.request_payload === 'object'
+        ? job.request_payload
+        : {};
+}
+
+function getMagnetJobResult(job = {}) {
+    return job && typeof job === 'object' && job.result_payload && typeof job.result_payload === 'object'
+        ? job.result_payload
+        : {};
+}
+
+function normalizeMagnetLinks(links = []) {
+    const seen = new Set();
+    return (Array.isArray(links) ? links : [])
+        .map(link => String(link || '').trim())
+        .filter(link => {
+            if (!link || seen.has(link)) return false;
+            seen.add(link);
+            return true;
+        });
+}
+
+function getMagnetJobTotal(job = {}, fallbackMagnets = []) {
+    const payload = getMagnetJobPayload(job);
+    const result = getMagnetJobResult(job);
+    const payloadMagnets = normalizeMagnetLinks(payload.magnets);
+    const candidates = [
+        result.total,
+        payload.total,
+        fallbackMagnets.length,
+        payloadMagnets.length,
+    ];
+    for (const item of candidates) {
+        const value = parseInt(item, 10);
+        if (Number.isFinite(value) && value > 0) return value;
+    }
+    return 0;
+}
+
+function getMagnetJobConcurrency(job = {}, fallback = null) {
+    const payload = getMagnetJobPayload(job);
+    const result = getMagnetJobResult(job);
+    const candidates = [
+        result.parse_concurrency,
+        payload.parse_concurrency,
+        fallback,
+        pikpakAccountsState.parseConcurrency,
+        1,
+    ];
+    for (const item of candidates) {
+        const value = parseInt(item, 10);
+        if (Number.isFinite(value) && value > 0) return Math.max(1, Math.min(16, value));
+    }
+    return 1;
+}
+
+function resetMagnetParseSummary(seed = {}) {
+    const magnets = normalizeMagnetLinks(seed.magnets || []);
+    magnetParseSummaryState = {
+        jobId: String(seed.jobId || seed.job_id || seed.parse_job_id || ''),
+        status: seed.status || 'running',
+        total: Math.max(0, parseInt(seed.total, 10) || magnets.length || 0),
+        concurrency: Math.max(1, Math.min(16, parseInt(seed.concurrency, 10) || getMagnetJobConcurrency({}, null))),
+        magnets,
+        successIndexes: new Set(),
+        failedIndexes: new Set(),
+        failedLinks: [],
+        failedLinkSet: new Set(),
+        successCount: 0,
+        failedCount: 0,
+    };
+    renderMagnetParseSummary();
+}
+
+function ensureMagnetParseSummaryState(seed = {}) {
+    const jobId = String(seed.jobId || seed.job_id || seed.parse_job_id || '');
+    if (!magnetParseSummaryState || (jobId && magnetParseSummaryState.jobId && magnetParseSummaryState.jobId !== jobId)) {
+        resetMagnetParseSummary(seed);
+        return magnetParseSummaryState;
+    }
+    if (jobId && !magnetParseSummaryState.jobId) magnetParseSummaryState.jobId = jobId;
+    if (seed.status) magnetParseSummaryState.status = seed.status;
+    if (seed.total) magnetParseSummaryState.total = Math.max(magnetParseSummaryState.total || 0, parseInt(seed.total, 10) || 0);
+    if (seed.concurrency) magnetParseSummaryState.concurrency = Math.max(1, Math.min(16, parseInt(seed.concurrency, 10) || magnetParseSummaryState.concurrency || 1));
+    const magnets = normalizeMagnetLinks(seed.magnets || []);
+    if (magnets.length) magnetParseSummaryState.magnets = magnets;
+    return magnetParseSummaryState;
+}
+
+function addFailedMagnetLink(link, index = 0) {
+    if (!magnetParseSummaryState) return;
+    let normalized = String(link || '').trim();
+    if (!normalized && index > 0 && Array.isArray(magnetParseSummaryState.magnets)) {
+        normalized = String(magnetParseSummaryState.magnets[index - 1] || '').trim();
+    }
+    if (!normalized || magnetParseSummaryState.failedLinkSet.has(normalized)) return;
+    magnetParseSummaryState.failedLinkSet.add(normalized);
+    magnetParseSummaryState.failedLinks.push(normalized);
+}
+
+function renderMagnetParseSummary() {
+    const el = document.getElementById('magnetParseSummary');
+    if (!el) return;
+    const state = magnetParseSummaryState;
+    if (!state || !state.total) {
+        el.className = 'parse-summary is-hidden';
+        el.innerHTML = '';
+        return;
+    }
+    const totalText = escapeA2TDHtml(state.total);
+    const successCount = Math.min(state.total, Math.max(0, state.successCount || state.successIndexes?.size || 0));
+    const failedCount = Math.min(state.total, Math.max(0, state.failedCount || state.failedIndexes?.size || 0));
+    const running = state.status === 'running' || state.status === 'pending';
+    const copyButton = failedCount > 0 && state.failedLinks.length
+        ? `<button type="button" class="parse-summary-copy" onclick="copyFailedMagnetLinks(this)"><i class="ph ph-copy"></i> 复制失败磁链</button>`
+        : '';
+    el.className = `parse-summary${running ? ' is-running' : ''}`;
+    el.innerHTML = `
+        <span class="parse-summary-chip info"><i class="ph ${running ? 'ph-arrows-clockwise' : 'ph-gauge'}"></i> 并行 ${escapeA2TDHtml(state.concurrency || 1)}</span>
+        <span class="parse-summary-chip success"><i class="ph ph-check-circle"></i> 解析成功 ${escapeA2TDHtml(successCount)}/${totalText}</span>
+        ${failedCount > 0 ? `<span class="parse-summary-chip error"><i class="ph ph-warning-circle"></i> 失败 ${escapeA2TDHtml(failedCount)}/${totalText}</span>` : ''}
+        ${copyButton}
+    `;
+}
+
+function syncMagnetParseSummaryFromJob(job) {
+    if (!job || job.job_type !== 'magnet') return;
+    const payload = getMagnetJobPayload(job);
+    const result = getMagnetJobResult(job);
+    const magnets = normalizeMagnetLinks(payload.magnets);
+    const total = getMagnetJobTotal(job, magnets);
+    const status = String(job.status || '').toLowerCase();
+    const state = ensureMagnetParseSummaryState({
+        jobId: job.job_id,
+        status: ['pending', 'running'].includes(status) ? status : (status || 'completed'),
+        total,
+        concurrency: getMagnetJobConcurrency(job, null),
+        magnets,
+    });
+    if (!state) return;
+
+    if (result && Object.keys(result).length) {
+        const errors = Array.isArray(result.errors) ? result.errors : [];
+        const roots = Array.isArray(result.roots) ? result.roots.filter(Boolean) : [];
+        state.failedLinks = [];
+        state.failedLinkSet = new Set();
+        errors.forEach((item, offset) => addFailedMagnetLink(item?.link || '', Number(item?.index || 0) || offset + 1));
+        state.failedCount = errors.length;
+        state.successCount = roots.length || Math.max(0, (state.total || total || 0) - state.failedCount);
+        state.status = status || state.status;
+    }
+    renderMagnetParseSummary();
+}
+
+function updateMagnetParseSummaryFromMessage(msg = {}) {
+    const type = String(msg.type || '');
+    if (!['task_start', 'task_done', 'task_error', 'all_done', 'error'].includes(type)) return;
+    const jobType = String(msg.job_type || '').trim().toLowerCase();
+    if (jobType && jobType !== 'magnet') return;
+    const jobId = String(msg.parse_job_id || msg.job_id || '');
+    const activeType = String(activeParseJob?.job_type || '').trim().toLowerCase();
+    if (!jobType && activeType && activeType !== 'magnet') {
+        const currentJobId = String(magnetParseSummaryState?.jobId || '');
+        if (!currentJobId || (jobId && currentJobId !== jobId)) return;
+    }
+    const state = ensureMagnetParseSummaryState({
+        jobId,
+        status: type === 'all_done' ? 'completed' : 'running',
+        total: msg.total,
+    });
+    if (!state) return;
+    if (jobId && state.jobId && state.jobId !== jobId) return;
+    const index = parseInt(msg.index, 10) || 0;
+    if (type === 'task_start' && msg.total) {
+        state.total = Math.max(state.total || 0, parseInt(msg.total, 10) || 0);
+    } else if (type === 'task_done' && index > 0) {
+        state.successIndexes.add(index);
+        state.successCount = state.successIndexes.size;
+    } else if (type === 'task_error' && index > 0) {
+        state.failedIndexes.add(index);
+        state.failedCount = state.failedIndexes.size;
+        addFailedMagnetLink(msg.link || '', index);
+    } else if (type === 'all_done') {
+        state.status = 'completed';
+    } else if (type === 'error') {
+        state.status = 'failed';
+    }
+    renderMagnetParseSummary();
+}
+
+async function writeTextToClipboard(text) {
+    if (navigator.clipboard && window.isSecureContext) {
+        await navigator.clipboard.writeText(text);
+        return;
+    }
+    const textarea = document.createElement('textarea');
+    textarea.value = text;
+    textarea.setAttribute('readonly', '');
+    textarea.style.position = 'fixed';
+    textarea.style.left = '-9999px';
+    document.body.appendChild(textarea);
+    textarea.select();
+    document.execCommand('copy');
+    textarea.remove();
+}
+
+async function copyFailedMagnetLinks(button) {
+    const links = normalizeMagnetLinks(magnetParseSummaryState?.failedLinks || []);
+    if (!links.length) return;
+    try {
+        await writeTextToClipboard(links.join('\n'));
+        if (button) {
+            const oldHtml = button.innerHTML;
+            button.classList.add('is-copied');
+            button.innerHTML = '<i class="ph ph-check-circle"></i> 已复制';
+            setTimeout(() => {
+                if (!button.isConnected) return;
+                button.classList.remove('is-copied');
+                button.innerHTML = oldHtml;
+            }, 1600);
+        }
+        if (typeof showA2TDToast === 'function') showA2TDToast(`已复制 ${links.length} 条失败磁链`, 'success');
+    } catch (e) {
+        if (typeof showA2TDToast === 'function') showA2TDToast('复制失败磁链失败', 'error');
+    }
+}
+
 function formatProgressLogTime(value) {
     if (!value) return new Date().toLocaleTimeString('zh-CN', { hour12: false });
     const normalized = String(value).includes(' ') ? String(value).replace(' ', 'T') : String(value);
@@ -1634,7 +1864,7 @@ function addLogEntry(icon, text, options = {}) {
         ? String(options.logId)
         : '';
     if (normalizedLogId) {
-        if (progressLogSeenIds.has(normalizedLogId)) return;
+        if (progressLogSeenIds.has(normalizedLogId)) return false;
         progressLogSeenIds.add(normalizedLogId);
     }
 
@@ -1647,6 +1877,7 @@ function addLogEntry(icon, text, options = {}) {
     entry.innerHTML = `<span class="log-icon">${icon}</span><span class="log-text">${text}</span><span class="log-time">${options.timeText || new Date().toLocaleTimeString('zh-CN', { hour12: false })}</span>`;
     container.appendChild(entry);
     container.scrollTop = container.scrollHeight;
+    return true;
 }
 
 function normalizeProgressLogMessage(record = {}) {
@@ -1670,10 +1901,11 @@ function appendProgressLogMessage(msg) {
     const normalized = normalizeProgressLogMessage(msg);
     const entry = buildProgressLogEntry(normalized);
     if (!entry) return;
-    addLogEntry(entry.icon, entry.text, {
+    const added = addLogEntry(entry.icon, entry.text, {
         logId: normalized.log_id,
         timeText: formatProgressLogTime(normalized.created_at),
     });
+    if (added !== false) updateMagnetParseSummaryFromMessage(normalized);
 }
 
 function getParseButtonConfig(jobType = '') {
@@ -1778,11 +2010,16 @@ function restoreParseJobResult(job) {
 
 function restoreParseResultsFromSnapshot(snapshot = {}) {
     const latestJobs = snapshot.latest_jobs || {};
+    const magnetJob = snapshot.active_job?.job_type === 'magnet' ? snapshot.active_job : latestJobs.magnet;
+    syncMagnetParseSummaryFromJob(magnetJob);
     ['magnet', 'share', 'rss'].forEach(jobType => restoreParseJobResult(latestJobs[jobType]));
 }
 
 function applyParseJobState(job) {
     const normalizedJob = job && typeof job === 'object' ? job : null;
+    if (normalizedJob && normalizedJob.job_type === 'magnet') {
+        syncMagnetParseSummaryFromJob(normalizedJob);
+    }
     if (normalizedJob && String(normalizedJob.status || '').toLowerCase() === 'completed') {
         restoreParseJobResult(normalizedJob);
     }
@@ -3781,16 +4018,22 @@ let magnetDownloadSubmitting = false;
 async function parseMagnet() {
     const input = document.getElementById('magnetInput').value.trim();
     if (!input) return alert('请输入磁力链接');
+    const magnets = input.split('\n').map(s => s.trim()).filter(Boolean);
 
     magnetCurrentFileId = null;
     magnetRoots = [];
     magnetRootAccounts = {};
     magnetFileData = [];
     document.getElementById('magnetFileArea').style.display = 'none';
+    resetMagnetParseSummary({
+        magnets,
+        total: magnets.length,
+        concurrency: pikpakAccountsState.parseConcurrency,
+        status: 'running',
+    });
     setParseButtonsState({ job_type: 'magnet', status: 'running' });
 
     try {
-        const magnets = input.split('\n').map(s => s.trim()).filter(Boolean);
         const resp = await fetch('/api/pikpak/magnet/parse', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -3809,7 +4052,13 @@ async function parseMagnet() {
             showA2TDToast(data.message || '磁链解析任务已提交，正在后台执行', 'info');
         }
     } catch (e) {
-        if (!activeParseJob) setParseButtonsState(null);
+        if (!activeParseJob) {
+            if (magnetParseSummaryState) {
+                magnetParseSummaryState.status = 'failed';
+                renderMagnetParseSummary();
+            }
+            setParseButtonsState(null);
+        }
         alert(e.message || '解析失败');
     }
 }
