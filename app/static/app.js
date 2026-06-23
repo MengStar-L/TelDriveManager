@@ -4041,6 +4041,7 @@ function normalizeT2TDRelayJob(item = {}) {
         status,
         download_progress: Math.max(0, Math.min(100, Number(item.download_progress || 0) || 0)),
         upload_progress: Math.max(0, Math.min(100, Number(item.upload_progress || 0) || 0)),
+        download_speed: Math.max(0, Number(item.download_speed || 0) || 0),
         local_path: String(item.local_path || '').trim(),
         teldrive_file_id: String(item.teldrive_file_id || '').trim(),
         upload_id: String(item.upload_id || '').trim(),
@@ -4250,6 +4251,9 @@ function buildT2TDRelayJobCardContent(rawJob) {
     pushMetaItem(view.label, job.status === 'failed' ? 'warning' : job.status === 'uploading' ? 'primary upload' : 'primary');
     if (job.file_size > 0) pushMetaItem(`大小 ${escapeA2TDHtml(formatBytes(job.file_size, 0))}`);
     pushMetaItem(getT2TDRelayProgressText(job), mode === 'upload' ? 'primary upload' : 'secondary');
+    if (job.status === 'downloading' && job.download_speed > 0) {
+        pushMetaItem(`速度 ${escapeA2TDHtml(formatBytes(job.download_speed, 1))}/s`, 'primary');
+    }
     if (job.source_message_id) {
         pushMetaItem(`源消息 ${escapeA2TDHtml(job.source_channel_id)} / ${escapeA2TDHtml(job.source_message_id)}`, 'secondary');
     }
@@ -4409,7 +4413,15 @@ async function loadT2TDRelayJobs(force = false) {
         const resp = await fetch('/api/t2td/relay-jobs', { cache: 'no-store' });
         const data = await readJsonSafe(resp);
         if (!resp.ok) throw new Error(data.detail || data.message || '读取回源任务失败');
-        t2tdRelayJobs = Array.isArray(data.items) ? data.items.map(normalizeT2TDRelayJob) : [];
+        // REST 不含瞬时下载速度（不落库）；下载中任务沿用内存里上一次 SSE 速度，避免每次轮询闪回 0。
+        const prevSpeeds = new Map(t2tdRelayJobs.map(j => [j.job_id, j.download_speed]));
+        t2tdRelayJobs = Array.isArray(data.items) ? data.items.map(item => {
+            const job = normalizeT2TDRelayJob(item);
+            if (job.status === 'downloading' && !job.download_speed) {
+                job.download_speed = prevSpeeds.get(job.job_id) || 0;
+            }
+            return job;
+        }) : [];
         t2tdRelayJobsLoaded = true;
         if (isT2TDRelayPageActive()) renderT2TDRelayJobs();
     } catch (e) {

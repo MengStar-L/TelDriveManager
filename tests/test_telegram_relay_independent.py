@@ -317,6 +317,36 @@ class TelegramRelayIndependentTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(fake_client.deleted, [(config.telegram_channel_id, [222])])
         self.assertEqual(remembered_ids, [222])
 
+    async def test_download_speed_broadcast_only_while_downloading(self):
+        broker = FakeBroker()
+        manager = relay_module.TelegramRelayManager(FakeLogger(), broker)
+        config = make_runtime()
+        manager.config = config
+        job_id = relay_module.make_relay_job_id(config.telegram_channel_id, 333)
+        await db.add_telegram_relay_job(
+            job_id,
+            source_channel_id=config.telegram_channel_id,
+            source_message_id=333,
+            file_name="speed.bin",
+            file_size=1000,
+            mime_type="application/octet-stream",
+            local_path=str(Path(config.relay_download_dir) / job_id / "speed.bin"),
+        )
+        try:
+            await db.update_telegram_relay_job(job_id, status="downloading")
+            await manager._update_download_progress(job_id, 50.0, 2048.0)
+            dl_events = [e for e in broker.events if e["type"] == "relay_job_update"]
+            self.assertTrue(dl_events)
+            self.assertEqual(dl_events[-1]["payload"]["download_speed"], 2048.0)
+
+            await db.update_telegram_relay_job(job_id, status="uploading")
+            await manager._broadcast_job(await db.get_telegram_relay_job(job_id))
+            up_events = [e for e in broker.events if e["type"] == "relay_job_update"]
+            self.assertEqual(up_events[-1]["payload"]["download_speed"], 0.0)
+            self.assertNotIn(job_id, manager._download_speed)
+        finally:
+            await db.delete_telegram_relay_job(job_id)
+
     def test_mapping_load_migrates_legacy_file_to_runtime_path(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

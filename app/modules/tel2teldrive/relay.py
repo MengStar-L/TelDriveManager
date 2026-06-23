@@ -51,6 +51,7 @@ class TelegramRelayManager:
         self._concurrency: int = 1
         self._stopped = True
         self._watchdog_task: asyncio.Task[Any] | None = None
+        self._download_speed: dict[str, float] = {}
         self._logs: deque[dict[str, Any]] = deque(maxlen=RELAY_LOG_LIMIT)
         self._state: dict[str, Any] = {
             "phase": "disabled",
@@ -378,7 +379,7 @@ class TelegramRelayManager:
 
     async def _download_message(self, client: Any, message: Any, path: Path, job: dict):
         loop = asyncio.get_running_loop()
-        last_report = {"time": 0.0, "progress": -1.0}
+        last_report = {"time": loop.time(), "progress": -1.0, "bytes": 0}
         job_id = job["job_id"]
 
         def progress_callback(current: int, total: int):
@@ -386,9 +387,12 @@ class TelegramRelayManager:
             now = loop.time()
             if progress < 100 and progress - last_report["progress"] < 2.0 and now - last_report["time"] < 1.5:
                 return
+            dt = now - last_report["time"]
+            speed = (current - last_report["bytes"]) / dt if dt > 0 else 0.0
             last_report["time"] = now
             last_report["progress"] = progress
-            loop.create_task(self._update_download_progress(job_id, progress))
+            last_report["bytes"] = current
+            loop.create_task(self._update_download_progress(job_id, progress, max(0.0, speed)))
 
         downloaded = await client.download_media(message, file=str(path), progress_callback=progress_callback)
         final_path = Path(downloaded) if downloaded else path
@@ -495,10 +499,11 @@ class TelegramRelayManager:
             ids.append(message_id)
         return ids
 
-    async def _update_download_progress(self, job_id: str, progress: float):
+    async def _update_download_progress(self, job_id: str, progress: float, speed: float = 0.0):
         job = await db.get_telegram_relay_job(job_id)
         if not job or str(job.get("status")) != "downloading":
             return
+        self._download_speed[job_id] = speed
         await db.update_telegram_relay_job(job_id, download_progress=progress)
         await self._broadcast_job_id(job_id)
 
@@ -508,7 +513,15 @@ class TelegramRelayManager:
             await self._broadcast_job(job)
 
     async def _broadcast_job(self, job: dict):
-        await self.broker._broadcast({"type": "relay_job_update", "payload": job})
+        # download_speed 为运行时瞬时值（不落库），仅下载中携带，其余状态归零并清理。
+        payload = dict(job)
+        job_id = payload.get("job_id")
+        if str(payload.get("status")) == "downloading":
+            payload["download_speed"] = self._download_speed.get(job_id, 0.0)
+        else:
+            self._download_speed.pop(job_id, None)
+            payload["download_speed"] = 0.0
+        await self.broker._broadcast({"type": "relay_job_update", "payload": payload})
 
     async def _update_state(self, **kwargs: Any):
         self._state.update(kwargs)
