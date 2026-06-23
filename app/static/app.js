@@ -4108,64 +4108,9 @@ function setT2TDRelayFilter(filter) {
 
 function updateTelegramRelayState(state = {}) {
     telegramRelayState = { ...(telegramRelayState || {}), ...(state || {}) };
+    // 回源已复用主监听账号，无需单独登录：隐藏整个登录面板。
     const panel = document.getElementById('telegramRelayLoginPanel');
-    const text = document.getElementById('telegramRelayLoginText');
-    const qrImg = document.getElementById('telegramRelayQrImg');
-    const hint = document.getElementById('telegramRelayQrHint');
-    const form = document.getElementById('telegramRelay2faForm');
-    if (!panel || !text || !qrImg || !hint || !form) return;
-
-    const enabled = !!telegramRelayState.enabled;
-    panel.style.display = enabled ? 'block' : 'none';
-    if (!enabled) return;
-
-    if (telegramRelayState.authorized || telegramRelayState.phase === 'authorized') {
-        telegramRelayQrRefreshPending = false;
-        qrImg.style.display = 'none';
-        qrImg.removeAttribute('src');
-        hint.style.display = 'none';
-        form.style.display = 'none';
-        text.innerHTML = '<span style="color:var(--success)"><i class="ph-fill ph-check-circle"></i> 回源账号已登录</span>';
-        return;
-    }
-
-    if (telegramRelayState.needs_password || telegramRelayState.phase === 'awaiting_password') {
-        telegramRelayQrRefreshPending = false;
-        qrImg.style.display = 'none';
-        qrImg.removeAttribute('src');
-        hint.style.display = 'none';
-        form.style.display = 'block';
-        text.textContent = telegramRelayState.last_error || '回源账号需要两步验证密码';
-        form.onsubmit = async (event) => {
-            event.preventDefault();
-            const password = document.getElementById('telegramRelayPassword')?.value || '';
-            await fetch('/api/t2td/relay/login/password', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ password }),
-            });
-        };
-        return;
-    }
-
-    form.style.display = 'none';
-    if (telegramRelayState.qr_image) {
-        telegramRelayQrRefreshPending = false;
-        qrImg.src = telegramRelayState.qr_image;
-        qrImg.style.display = 'block';
-        qrImg.style.pointerEvents = 'auto';
-        const expires = formatT2TDExpireAt(telegramRelayState.qr_expires_at);
-        text.textContent = `请使用 Telegram App 扫描回源账号二维码 (${telegramRelayState.session_name || ''})`;
-        hint.style.display = 'block';
-        hint.textContent = expires ? `二维码有效至 ${expires}，点击二维码可主动刷新` : '点击二维码可主动刷新';
-        return;
-    }
-
-    qrImg.style.display = 'none';
-    qrImg.removeAttribute('src');
-    hint.style.display = 'block';
-    hint.textContent = telegramRelayState.last_error || telegramRelayState.phase || '回源账号准备中...';
-    text.textContent = telegramRelayQrRefreshPending ? '回源二维码刷新中，请稍候...' : '等待回源账号登录...';
+    if (panel) panel.style.display = 'none';
 }
 
 async function refreshTelegramRelayQr(manual = false) {
@@ -4452,7 +4397,7 @@ async function loadT2TDRelayJobs(force = false) {
 
     try {
         t2tdRelayJobsRefreshPending = true;
-        if (isT2TDRelayPageActive()) {
+        if (isT2TDRelayPageActive() && !t2tdRelayJobsLoaded) {
             const placeholder = document.getElementById('telegramRelayEmptyPlaceholder');
             const container = document.getElementById('telegramRelayBarsContainer');
             if (container) container.style.display = 'none';

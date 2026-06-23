@@ -17,6 +17,7 @@ TERMINAL_STATUSES = {"completed", "failed", "cancelled"}
 ACTIVE_STATUSES = {"pending", "downloading", "uploading", "cleaning"}
 DEFAULT_RELAY_SESSION_NAME = "tel2teldrive_relay_session"
 RELAY_LOG_LIMIT = 300
+RELAY_WATCHDOG_INTERVAL = 20
 
 
 def make_relay_job_id(channel_id: int | None, message_id: int) -> str:
@@ -49,6 +50,7 @@ class TelegramRelayManager:
         self._semaphore: asyncio.Semaphore | None = None
         self._concurrency: int = 1
         self._stopped = True
+        self._watchdog_task: asyncio.Task[Any] | None = None
         self._logs: deque[dict[str, Any]] = deque(maxlen=RELAY_LOG_LIMIT)
         self._state: dict[str, Any] = {
             "phase": "disabled",
@@ -95,10 +97,16 @@ class TelegramRelayManager:
             return
         self._stopped = False
         await self._refresh_auth_state()
+        self._ensure_watchdog()
         await self._schedule_active_jobs()
 
     async def stop(self):
         self._stopped = True
+        if self._watchdog_task and not self._watchdog_task.done():
+            self._watchdog_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await self._watchdog_task
+        self._watchdog_task = None
         tasks = list(self._tasks.values())
         self._tasks.clear()
         for task in tasks:
@@ -214,24 +222,38 @@ class TelegramRelayManager:
             self._log("INFO", f"Scheduled {scheduled_count} active relay job(s)")
 
     async def _refresh_auth_state(self):
-        """根据主监听客户端的登录状态刷新回源状态（前端据此显示）。"""
-        if await self._is_authorized():
-            await self._update_state(
-                phase="authorized",
-                authorized=True,
-                needs_password=False,
-                qr_image=None,
-                qr_expires_at=None,
-                last_error=None,
-            )
-        else:
-            await self._update_state(
-                phase="waiting_main",
-                authorized=False,
-                needs_password=False,
-                qr_image=None,
-                qr_expires_at=None,
-            )
+        """根据主监听客户端的登录状态刷新回源状态（仅在状态变化时广播，避免刷屏）。"""
+        authorized = await self._is_authorized()
+        phase = "authorized" if authorized else "waiting_main"
+        if bool(self._state.get("authorized")) == authorized and self._state.get("phase") == phase:
+            return
+        await self._update_state(
+            phase=phase,
+            authorized=authorized,
+            needs_password=False,
+            qr_image=None,
+            qr_expires_at=None,
+            last_error=None if authorized else self._state.get("last_error"),
+        )
+
+    def _ensure_watchdog(self):
+        if self._watchdog_task and not self._watchdog_task.done():
+            return
+        self._watchdog_task = asyncio.create_task(self._watchdog_loop())
+
+    async def _watchdog_loop(self):
+        # 主账号可能在任务入队后才登录/重连。定期巡检：主账号就绪即补调度待处理任务，
+        # 避免任务因某次鉴权未就绪而永久卡在“等待中”。
+        while not self._stopped and self.config is not None and getattr(self.config, "relay_enabled", False):
+            try:
+                await asyncio.sleep(RELAY_WATCHDOG_INTERVAL)
+            except asyncio.CancelledError:
+                raise
+            if self._stopped:
+                break
+            await self._refresh_auth_state()
+            if await self._is_authorized():
+                await self._schedule_active_jobs()
 
     async def _schedule(self, job_id: str):
         if self._stopped or job_id in self._tasks:
@@ -245,7 +267,7 @@ class TelegramRelayManager:
         semaphore = self._semaphore or asyncio.Semaphore(1)
         async with semaphore:
             if not await self._is_authorized():
-                self._log("WARN", f"Relay account is not logged in; job remains pending: {job_id}")
+                self._log("WARN", f"主账号未登录，回源任务等待中: {job_id}")
                 return
             max_attempts = max(1, int(getattr(self.config, "relay_max_retries", 1) or 1))
             while not self._stopped:
