@@ -801,7 +801,10 @@ function runPageSideEffects(name) {
         loadA2TDTasks();
         syncMonitorSerialToggle();
     }
-    if (name === 'telegramrelay') loadT2TDRelayJobs(true);
+    if (name === 'telegramrelay') {
+        loadT2TDRelayJobs(true);
+        loadT2TDState();
+    }
     if (name === 'magnet' || name === 'share' || name === 'rss') syncRemotePushToggles();
     if (name === 'tel2teldrive') loadT2TDState();
     if (name === 'teldrivefolders') loadTelDriveFolderTree();
@@ -3178,6 +3181,7 @@ function collectSettingsConfig() {
         },
         telegram_relay: {
             enabled: !!document.getElementById('cfgTelegramRelayEnabled')?.checked,
+            session_name: currentRelay.session_name || 'tel2teldrive_relay_session',
             proxy_type: normalizeTelegramRelayProxyType(document.getElementById('cfgTelegramRelayProxyType')?.value || currentRelay.proxy_type || 'socks5'),
             proxy_host: document.getElementById('cfgTelegramRelayProxyHost')?.value.trim() || '',
             proxy_port: Math.max(1, parseInt(document.getElementById('cfgTelegramRelayProxyPort')?.value, 10) || currentRelay.proxy_port || 1080),
@@ -3560,6 +3564,10 @@ window.onload = async () => {
                 upsertT2TDRelayJob(data.payload || data);
             } else if(data.type === "relay_job_deleted") {
                 removeT2TDRelayJob((data.payload || data).job_id);
+            } else if(data.type === "relay_state") {
+                updateTelegramRelayState(data.payload || data);
+            } else if(data.type === "relay_log") {
+                appendTelegramRelayLog(data.payload || data);
             }
         }catch(e){}
     };
@@ -3577,6 +3585,9 @@ let t2tdRelayJobs = [];
 let t2tdRelayJobsLoaded = false;
 let t2tdRelayJobsRefreshPending = false;
 let t2tdRelayFilter = 'all';
+let telegramRelayState = {};
+let telegramRelayLogs = [];
+let telegramRelayQrRefreshPending = false;
 let telegramRelaySettingsSaveTimer = null;
 let telegramRelaySettingsInitDone = false;
 const T2TD_RUNTIME_LOG_LIMIT = 400;
@@ -3978,6 +3989,8 @@ function initTelegramRelaySettingsModal() {
         if (event.key === 'Escape') {
             const { modal } = getTelegramRelaySettingsEls();
             if (modal?.classList.contains('show')) closeTelegramRelaySettingsModal();
+            const logModal = document.getElementById('telegramRelayLogModal');
+            if (logModal?.classList.contains('show')) closeTelegramRelayLogModal();
         }
     });
 }
@@ -4091,6 +4104,151 @@ function setT2TDRelayFilter(filter) {
     t2tdRelayFilter = T2TD_RELAY_FILTER_LABELS[filter] ? filter : 'all';
     syncT2TDRelayFilterButtons();
     renderT2TDRelayJobs();
+}
+
+function updateTelegramRelayState(state = {}) {
+    telegramRelayState = { ...(telegramRelayState || {}), ...(state || {}) };
+    const panel = document.getElementById('telegramRelayLoginPanel');
+    const text = document.getElementById('telegramRelayLoginText');
+    const qrImg = document.getElementById('telegramRelayQrImg');
+    const hint = document.getElementById('telegramRelayQrHint');
+    const form = document.getElementById('telegramRelay2faForm');
+    if (!panel || !text || !qrImg || !hint || !form) return;
+
+    const enabled = !!telegramRelayState.enabled;
+    panel.style.display = enabled ? 'block' : 'none';
+    if (!enabled) return;
+
+    if (telegramRelayState.authorized || telegramRelayState.phase === 'authorized') {
+        telegramRelayQrRefreshPending = false;
+        qrImg.style.display = 'none';
+        qrImg.removeAttribute('src');
+        hint.style.display = 'none';
+        form.style.display = 'none';
+        text.innerHTML = '<span style="color:var(--success)"><i class="ph-fill ph-check-circle"></i> 回源账号已登录</span>';
+        return;
+    }
+
+    if (telegramRelayState.needs_password || telegramRelayState.phase === 'awaiting_password') {
+        telegramRelayQrRefreshPending = false;
+        qrImg.style.display = 'none';
+        qrImg.removeAttribute('src');
+        hint.style.display = 'none';
+        form.style.display = 'block';
+        text.textContent = telegramRelayState.last_error || '回源账号需要两步验证密码';
+        form.onsubmit = async (event) => {
+            event.preventDefault();
+            const password = document.getElementById('telegramRelayPassword')?.value || '';
+            await fetch('/api/t2td/relay/login/password', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ password }),
+            });
+        };
+        return;
+    }
+
+    form.style.display = 'none';
+    if (telegramRelayState.qr_image) {
+        telegramRelayQrRefreshPending = false;
+        qrImg.src = telegramRelayState.qr_image;
+        qrImg.style.display = 'block';
+        qrImg.style.pointerEvents = 'auto';
+        const expires = formatT2TDExpireAt(telegramRelayState.qr_expires_at);
+        text.textContent = `请使用 Telegram App 扫描回源账号二维码 (${telegramRelayState.session_name || ''})`;
+        hint.style.display = 'block';
+        hint.textContent = expires ? `二维码有效至 ${expires}，点击二维码可主动刷新` : '点击二维码可主动刷新';
+        return;
+    }
+
+    qrImg.style.display = 'none';
+    qrImg.removeAttribute('src');
+    hint.style.display = 'block';
+    hint.textContent = telegramRelayState.last_error || telegramRelayState.phase || '回源账号准备中...';
+    text.textContent = telegramRelayQrRefreshPending ? '回源二维码刷新中，请稍候...' : '等待回源账号登录...';
+}
+
+async function refreshTelegramRelayQr(manual = false) {
+    if (telegramRelayQrRefreshPending) return;
+    const qrImg = document.getElementById('telegramRelayQrImg');
+    const hint = document.getElementById('telegramRelayQrHint');
+    const text = document.getElementById('telegramRelayLoginText');
+    try {
+        telegramRelayQrRefreshPending = true;
+        if (qrImg) {
+            qrImg.style.display = 'none';
+            qrImg.removeAttribute('src');
+            qrImg.style.pointerEvents = 'none';
+        }
+        if (hint) {
+            hint.style.display = 'block';
+            hint.textContent = '正在获取新的回源二维码...';
+        }
+        if (text) text.textContent = manual ? '回源二维码刷新中，请稍候...' : '回源二维码获取中，请稍候...';
+        const resp = await fetch('/api/t2td/relay/login/refresh', { method: 'POST' });
+        if (!resp.ok) {
+            const err = await resp.json().catch(() => ({}));
+            throw new Error(err.detail || '刷新回源二维码失败');
+        }
+    } catch (e) {
+        telegramRelayQrRefreshPending = false;
+        if (hint) hint.textContent = e.message || '刷新回源二维码失败';
+        if (qrImg) qrImg.style.pointerEvents = 'auto';
+        if (typeof showA2TDToast === 'function') showA2TDToast(e.message || '刷新回源二维码失败', 'error');
+    }
+}
+
+function openTelegramRelayLogModal() {
+    const modal = document.getElementById('telegramRelayLogModal');
+    if (!modal) return;
+    renderTelegramRelayLogs();
+    modal.setAttribute('aria-hidden', 'false');
+    modal.classList.add('show');
+}
+
+function closeTelegramRelayLogModal(event) {
+    if (event && event.target && event.currentTarget && event.target !== event.currentTarget) return;
+    const modal = document.getElementById('telegramRelayLogModal');
+    if (!modal) return;
+    modal.classList.remove('show');
+    modal.setAttribute('aria-hidden', 'true');
+}
+
+function appendTelegramRelayLog(log, options = {}) {
+    const { skipStore = false } = options;
+    if (!skipStore) {
+        telegramRelayLogs.push(log);
+        if (telegramRelayLogs.length > T2TD_RUNTIME_LOG_LIMIT) {
+            telegramRelayLogs = telegramRelayLogs.slice(-T2TD_RUNTIME_LOG_LIMIT);
+        }
+    }
+    renderTelegramRelayLogs();
+}
+
+function renderTelegramRelayLogs() {
+    const container = document.getElementById('telegramRelayLogContainer');
+    if (!container) return;
+    if (!telegramRelayLogs.length) {
+        container.innerHTML = '<div class="log-empty"><i class="ph ph-ghost"></i> 暂无回源日志</div>';
+        return;
+    }
+    container.innerHTML = '';
+    telegramRelayLogs.forEach(log => {
+        const logData = log.payload || log;
+        const entry = document.createElement('div');
+        entry.className = 'log-entry';
+        let color = '#fff';
+        if (logData.level === 'ERROR') color = '#f87171';
+        else if (logData.level === 'WARN' || logData.level === 'WARNING') color = '#f59e0b';
+        let time = logData.time || logData.timestamp || '(none)';
+        if (time && time.includes('T')) {
+            time = time.split('T')[1].split('.')[0] || time;
+            time = time.replace('Z', '').replace(/[+-]\d+:\d+$/, '');
+        }
+        entry.innerHTML = `<span style="color:${color}">[${escapeA2TDHtml(time)}] [${escapeA2TDHtml(logData.level || 'INFO')}] ${escapeA2TDHtml(logData.message || '')}</span>`;
+        container.appendChild(entry);
+    });
+    container.scrollTop = container.scrollHeight;
 }
 
 function getT2TDRelayCardId(job) {
@@ -4451,6 +4609,9 @@ async function loadT2TDState() {
         const res = await fetch('/api/t2td/bootstrap');
         const d = await res.json();
         updateT2TDState(d.state || {});
+        updateTelegramRelayState(d.relay_state || {});
+        telegramRelayLogs = Array.isArray(d.relay_logs) ? d.relay_logs.slice(-T2TD_RUNTIME_LOG_LIMIT) : [];
+        renderTelegramRelayLogs();
         t2tdRuntimeLogs = Array.isArray(d.logs) ? d.logs.slice(-T2TD_RUNTIME_LOG_LIMIT) : [];
         if (t2tdPanelMode === 'deleted') {
             await loadT2TDDeletedFiles(true);

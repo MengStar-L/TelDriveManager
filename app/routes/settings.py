@@ -49,11 +49,18 @@ async def update_settings(request_body: dict):
     await task_manager.reload_config()
     await pikpak_routes.reset_clients()
     await db.prune_progress_logs(current.get("log", {}).get("buffer_size", 400), stream="pikpak")
-    # 通知 tel2teldrive 服务重新加载配置
     try:
-        from app.modules.tel2teldrive.service import config_store as t2td_config_store, service as t2td_service
-        t2td_config_store.reload()
-        await t2td_service.request_reload()
+        from app.modules.tel2teldrive.service import (
+            config_store as t2td_config_store,
+            service as t2td_service,
+            should_reload_service,
+        )
+
+        old_runtime = t2td_config_store.runtime()
+        new_runtime = t2td_config_store.reload()
+        await t2td_service.relay_manager.apply_config(new_runtime)
+        if should_reload_service(old_runtime, new_runtime):
+            await t2td_service.request_reload()
     except Exception:
         pass  # 模块未初始化时静默忽略
     return {"success": True, "message": "设置已保存"}

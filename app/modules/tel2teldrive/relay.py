@@ -1,14 +1,21 @@
 from __future__ import annotations
 
 import asyncio
-import os
+import base64
 import re
 import shutil
-import uuid
+from collections import deque
 from contextlib import suppress
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+from telethon import TelegramClient
+from telethon.errors import PasswordHashInvalidError, SessionPasswordNeededError
+from telethon.password import compute_check
+from telethon.tl.functions.account import GetPasswordRequest
+from telethon.tl.functions.auth import CheckPasswordRequest, ExportLoginTokenRequest, ImportLoginTokenRequest
+from telethon.tl.types import auth
 
 from app import database as db
 from app.modules.aria2teldrive.teldrive_client import TelDriveClient
@@ -16,6 +23,8 @@ from app.modules.aria2teldrive.teldrive_client import TelDriveClient
 
 TERMINAL_STATUSES = {"completed", "failed", "cancelled"}
 ACTIVE_STATUSES = {"pending", "downloading", "uploading", "cleaning"}
+DEFAULT_RELAY_SESSION_NAME = "tel2teldrive_relay_session"
+RELAY_LOG_LIMIT = 300
 
 
 def make_relay_job_id(channel_id: int | None, message_id: int) -> str:
@@ -29,29 +38,72 @@ def sanitize_filename(name: str, fallback: str) -> str:
     return safe or fallback
 
 
+def build_relay_proxy(config: Any):
+    if not getattr(config, "relay_proxy_host", ""):
+        return None
+    try:
+        import socks
+    except ModuleNotFoundError as exc:
+        raise RuntimeError("PySocks is required for telegram relay proxy support") from exc
+    username = getattr(config, "relay_proxy_username", "") or None
+    password = getattr(config, "relay_proxy_password", "") or None
+    proxy_type = str(getattr(config, "relay_proxy_type", "socks5") or "socks5").strip().lower()
+    proxy_constant = socks.HTTP if proxy_type in ("http", "https") else socks.SOCKS5
+    return (
+        proxy_constant,
+        getattr(config, "relay_proxy_host"),
+        int(getattr(config, "relay_proxy_port", 1080) or 1080),
+        True,
+        username,
+        password,
+    )
+
+
 class TelegramRelayManager:
     def __init__(self, logger: Any, broker: Any):
         self.logger = logger
         self.broker = broker
-        self.client: Any | None = None
+        self.client: TelegramClient | None = None
         self.config: Any | None = None
         self._tasks: dict[str, asyncio.Task[Any]] = {}
         self._semaphore: asyncio.Semaphore | None = None
         self._stopped = True
+        self._connect_lock = asyncio.Lock()
+        self._login_task: asyncio.Task[Any] | None = None
+        self._refresh_qr_event = asyncio.Event()
+        self._password_future: asyncio.Future[str] | None = None
+        self._logs: deque[dict[str, Any]] = deque(maxlen=RELAY_LOG_LIMIT)
+        self._state: dict[str, Any] = {
+            "phase": "disabled",
+            "enabled": False,
+            "authorized": False,
+            "needs_password": False,
+            "qr_image": None,
+            "qr_expires_at": None,
+            "last_error": None,
+            "session_name": DEFAULT_RELAY_SESSION_NAME,
+            "updated_at": self._iso_now(),
+        }
 
-    async def start(self, client: Any, config: Any):
-        if not getattr(config, "relay_enabled", False):
+    async def start(self, _main_client: Any, config: Any):
+        await self.apply_config(config)
+
+    async def apply_config(self, config: Any):
+        await db.init_db()
+        self.config = config
+        self._semaphore = asyncio.Semaphore(max(1, int(getattr(config, "relay_concurrency", 1) or 1)))
+        enabled = bool(getattr(config, "relay_enabled", False))
+        await self._update_state(
+            enabled=enabled,
+            session_name=self._session_name(config),
+            concurrency=max(1, int(getattr(config, "relay_concurrency", 1) or 1)),
+        )
+        if not enabled:
             await self.stop()
             return
-        await db.init_db()
-        self.client = client
-        self.config = config
         self._stopped = False
-        self._semaphore = asyncio.Semaphore(max(1, int(getattr(config, "relay_concurrency", 1) or 1)))
-        active_jobs = await db.get_active_telegram_relay_jobs()
-        for job in active_jobs:
-            await self._schedule(job["job_id"])
-        self.logger.info(f"Telegram 回源队列已启用，待处理任务 {len(active_jobs)} 个")
+        await self._ensure_login_task()
+        await self._schedule_active_jobs()
 
     async def stop(self):
         self._stopped = True
@@ -61,17 +113,34 @@ class TelegramRelayManager:
             task.cancel()
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
+        if self._login_task and not self._login_task.done():
+            self._login_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await self._login_task
+        self._login_task = None
+        self._refresh_qr_event.set()
+        if self._password_future and not self._password_future.done():
+            self._password_future.cancel()
+        self._password_future = None
+        if self.client is not None:
+            with suppress(Exception):
+                if self.client.is_connected():
+                    await self.client.disconnect()
         self.client = None
         self.config = None
         self._semaphore = None
+        await self._update_state(
+            phase="disabled",
+            enabled=False,
+            authorized=False,
+            needs_password=False,
+            qr_image=None,
+            qr_expires_at=None,
+            last_error=None,
+        )
 
-    async def enqueue_message(self, client: Any, config: Any, msg: Any, file_info: dict[str, Any]) -> dict:
-        await db.init_db()
-        self.client = client
-        self.config = config
-        if self._semaphore is None:
-            self._semaphore = asyncio.Semaphore(max(1, int(getattr(config, "relay_concurrency", 1) or 1)))
-        self._stopped = False
+    async def enqueue_message(self, _main_client: Any, config: Any, msg: Any, file_info: dict[str, Any]) -> dict:
+        await self.apply_config(config)
 
         message_id = int(getattr(msg, "id"))
         channel_id = int(getattr(config, "telegram_channel_id") or 0)
@@ -89,9 +158,9 @@ class TelegramRelayManager:
         await self._broadcast_job(job)
         if str(job.get("status") or "pending") in ACTIVE_STATUSES:
             await self._schedule(job_id)
-            self.logger.info(f"已加入 Telegram 回源队列: {file_info['name']} (msg_id={message_id})")
+            self._log("INFO", f"Queued Telegram relay job: {file_info['name']} (msg_id={message_id})")
         else:
-            self.logger.warning(f"Telegram 回源任务已存在且处于终态，跳过重复入队: {job_id}")
+            self._log("WARN", f"Relay job already terminal, skip duplicate enqueue: {job_id}")
         return job
 
     async def retry_job(self, job_id: str) -> dict:
@@ -141,6 +210,215 @@ class TelegramRelayManager:
             await self.broker._broadcast({"type": "relay_job_deleted", "payload": {"job_id": job_id}})
         return {"success": deleted}
 
+    async def request_qr_refresh(self):
+        if not self.config or not getattr(self.config, "relay_enabled", False):
+            raise RuntimeError("telegram relay is not enabled")
+        self._refresh_qr_event.set()
+        await self._ensure_login_task(force=True)
+
+    async def submit_password(self, password: str):
+        if not password:
+            raise RuntimeError("password cannot be empty")
+        if not self._password_future or self._password_future.done():
+            raise RuntimeError("telegram relay is not waiting for password")
+        self._password_future.set_result(password)
+
+    def state_snapshot(self) -> dict[str, Any]:
+        return dict(self._state)
+
+    def logs_snapshot(self, limit: int = 200) -> list[dict[str, Any]]:
+        data = list(self._logs)
+        return data[-max(1, int(limit or 200)):]
+
+    async def _schedule_active_jobs(self):
+        active_jobs = await db.get_active_telegram_relay_jobs()
+        for job in active_jobs:
+            await self._schedule(job["job_id"])
+        if active_jobs:
+            self._log("INFO", f"Scheduled {len(active_jobs)} active relay job(s)")
+
+    async def _ensure_login_task(self, *, force: bool = False):
+        if force and self._login_task and not self._login_task.done():
+            self._login_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await self._login_task
+            self._login_task = None
+        if self._login_task and not self._login_task.done():
+            return
+        self._login_task = asyncio.create_task(self._login_loop())
+
+    async def _login_loop(self):
+        while not self._stopped and self.config is not None and getattr(self.config, "relay_enabled", False):
+            try:
+                client = await self._ensure_client()
+                if await client.is_user_authorized():
+                    await self._mark_authorized()
+                    await self._schedule_active_jobs()
+                    return
+                await self._authorize_with_dashboard(client)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                self._log("ERROR", f"Relay login failed: {type(exc).__name__}: {exc}")
+                await self._update_state(phase="error", authorized=False, last_error=str(exc))
+                await asyncio.sleep(5)
+
+    async def _ensure_client(self) -> TelegramClient:
+        config = self.config
+        if config is None:
+            raise RuntimeError("telegram relay config is missing")
+        async with self._connect_lock:
+            session_name = self._session_name(config)
+            proxy = build_relay_proxy(config)
+            if self.client is not None:
+                if self.client.session.filename and Path(self.client.session.filename).stem != session_name:
+                    with suppress(Exception):
+                        await self.client.disconnect()
+                    self.client = None
+                elif proxy != getattr(self.client, "_relay_proxy_tuple", None):
+                    with suppress(Exception):
+                        await self.client.disconnect()
+                    self.client = None
+            if self.client is None:
+                self.client = TelegramClient(
+                    session_name,
+                    int(getattr(config, "telegram_api_id") or 0),
+                    str(getattr(config, "telegram_api_hash") or ""),
+                    proxy=proxy,
+                )
+                setattr(self.client, "_relay_proxy_tuple", proxy)
+            if not self.client.is_connected():
+                await self._update_state(phase="connecting", authorized=False, last_error=None)
+                await self.client.connect()
+            return self.client
+
+    async def _authorize_with_dashboard(self, client: TelegramClient):
+        config = self.config
+        if config is None:
+            raise RuntimeError("telegram relay config is missing")
+        while not self._stopped and self.config is config and getattr(config, "relay_enabled", False):
+            self._refresh_qr_event.clear()
+            result = await client(
+                ExportLoginTokenRequest(
+                    api_id=int(getattr(config, "telegram_api_id") or 0),
+                    api_hash=str(getattr(config, "telegram_api_hash") or ""),
+                    except_ids=[],
+                )
+            )
+            if await self._consume_login_result(client, result):
+                return
+            if not isinstance(result, auth.LoginToken):
+                self._log("WARN", "Unexpected relay login token response, retrying")
+                await asyncio.sleep(2)
+                continue
+
+            from app.modules.tel2teldrive.service import build_qr_data_uri, format_local_time
+
+            token_b64 = base64.urlsafe_b64encode(result.token).decode("utf-8").rstrip("=")
+            qr_image = build_qr_data_uri(f"tg://login?token={token_b64}")
+            expires_at = result.expires.astimezone().isoformat(timespec="seconds")
+            await self._update_state(
+                phase="awaiting_qr",
+                authorized=False,
+                needs_password=False,
+                qr_image=qr_image,
+                qr_expires_at=expires_at,
+                last_error=None,
+            )
+            self._log("INFO", f"Relay login QR generated, expires at {format_local_time(expires_at)}")
+
+            while not self._stopped and self.config is config and getattr(config, "relay_enabled", False):
+                if self._refresh_qr_event.is_set():
+                    self._refresh_qr_event.clear()
+                    self._log("INFO", "Relay login QR refresh requested")
+                    break
+                if datetime.now(timezone.utc) >= result.expires:
+                    self._log("WARN", "Relay login QR expired, refreshing")
+                    break
+                await asyncio.sleep(3)
+                try:
+                    poll_result = await client(
+                        ExportLoginTokenRequest(
+                            api_id=int(getattr(config, "telegram_api_id") or 0),
+                            api_hash=str(getattr(config, "telegram_api_hash") or ""),
+                            except_ids=[],
+                        )
+                    )
+                    if await self._consume_login_result(client, poll_result):
+                        return
+                except SessionPasswordNeededError:
+                    await self._complete_password_login(client)
+                    return
+                except Exception as exc:
+                    message = str(exc)
+                    if "SESSION_PASSWORD_NEEDED" in message:
+                        await self._complete_password_login(client)
+                        return
+                    if "TOKEN_EXPIRED" in message:
+                        self._log("WARN", "Relay login token expired, refreshing")
+                        break
+                    raise
+
+    async def _consume_login_result(self, client: TelegramClient, result: Any) -> bool:
+        if isinstance(result, auth.LoginTokenSuccess):
+            await self._mark_authorized()
+            return True
+        if isinstance(result, auth.LoginTokenMigrateTo):
+            await client._switch_dc(result.dc_id)
+            migrated = await client(ImportLoginTokenRequest(token=result.token))
+            if isinstance(migrated, auth.LoginTokenSuccess):
+                await self._mark_authorized()
+                return True
+        return False
+
+    async def _mark_authorized(self):
+        self._refresh_qr_event.clear()
+        if self._password_future and not self._password_future.done():
+            self._password_future.cancel()
+        self._password_future = None
+        await self._update_state(
+            phase="authorized",
+            authorized=True,
+            needs_password=False,
+            qr_image=None,
+            qr_expires_at=None,
+            last_error=None,
+        )
+        self._log("INFO", "Telegram relay login successful")
+
+    async def _complete_password_login(self, client: TelegramClient):
+        await self._update_state(
+            phase="awaiting_password",
+            authorized=False,
+            needs_password=True,
+            qr_image=None,
+            qr_expires_at=None,
+            last_error=None,
+        )
+        self._log("WARN", "Relay account requires 2FA password")
+        while not self._stopped:
+            loop = asyncio.get_running_loop()
+            self._password_future = loop.create_future()
+            try:
+                password = await self._password_future
+            except asyncio.CancelledError:
+                return
+            finally:
+                self._password_future = None
+            try:
+                pwd = await client(GetPasswordRequest())
+                await client(CheckPasswordRequest(password=compute_check(pwd, password)))
+                await self._mark_authorized()
+                return
+            except PasswordHashInvalidError:
+                self._log("ERROR", "Relay 2FA password is invalid")
+                await self._update_state(
+                    phase="awaiting_password",
+                    authorized=False,
+                    needs_password=True,
+                    last_error="Relay 2FA password is invalid",
+                )
+
     async def _schedule(self, job_id: str):
         if self._stopped or job_id in self._tasks:
             return
@@ -151,6 +429,9 @@ class TelegramRelayManager:
     async def _run_job(self, job_id: str):
         semaphore = self._semaphore or asyncio.Semaphore(1)
         async with semaphore:
+            if not await self._is_authorized():
+                self._log("WARN", f"Relay account is not logged in; job remains pending: {job_id}")
+                return
             max_attempts = max(1, int(getattr(self.config, "relay_max_retries", 1) or 1))
             while not self._stopped:
                 job = await db.get_telegram_relay_job(job_id)
@@ -175,7 +456,7 @@ class TelegramRelayManager:
                             retry_count=retry_count,
                         )
                         await self._broadcast_job_id(job_id)
-                        self.logger.error(f"Telegram 回源任务失败: {job_id} - {exc}")
+                        self._log("ERROR", f"Relay job failed: {job_id} - {exc}")
                         return
                     await db.update_telegram_relay_job(
                         job_id,
@@ -184,13 +465,26 @@ class TelegramRelayManager:
                         retry_count=retry_count,
                     )
                     await self._broadcast_job_id(job_id)
-                    self.logger.warning(f"Telegram 回源任务准备重试: {job_id} ({retry_count}/{max_attempts}) - {exc}")
+                    self._log("WARN", f"Relay job will retry: {job_id} ({retry_count}/{max_attempts}) - {exc}")
                     await asyncio.sleep(min(5 * retry_count, 30))
 
+    async def _is_authorized(self) -> bool:
+        try:
+            client = await self._ensure_client()
+            if await client.is_user_authorized():
+                await self._mark_authorized()
+                return True
+        except Exception as exc:
+            self._log("ERROR", f"Relay authorization check failed: {exc}")
+            await self._update_state(phase="error", authorized=False, last_error=str(exc))
+            return False
+        await self._ensure_login_task()
+        return False
+
     async def _process_job(self, job: dict):
-        client = self.client
+        client = await self._ensure_client()
         config = self.config
-        if client is None or config is None:
+        if config is None:
             raise RuntimeError("telegram relay manager is not started")
 
         job_id = job["job_id"]
@@ -242,7 +536,7 @@ class TelegramRelayManager:
             completed_at=datetime.now().astimezone().isoformat(timespec="seconds"),
         )
         await self._broadcast_job_id(job_id)
-        self.logger.info(f"Telegram 回源重传完成: {job.get('file_name')} (msg_id={source_message_id})")
+        self._log("INFO", f"Relay reupload completed: {job.get('file_name')} (msg_id={source_message_id})")
 
     async def _download_message(self, client: Any, message: Any, path: Path, job: dict):
         loop = asyncio.get_running_loop()
@@ -252,7 +546,7 @@ class TelegramRelayManager:
         def progress_callback(current: int, total: int):
             progress = round((current / total) * 100, 1) if total else 0.0
             now = loop.time()
-            if progress < 100 and progress - last_report["progress"] < 1.0 and now - last_report["time"] < 1.0:
+            if progress < 100 and progress - last_report["progress"] < 2.0 and now - last_report["time"] < 1.5:
                 return
             last_report["time"] = now
             last_report["progress"] = progress
@@ -282,6 +576,7 @@ class TelegramRelayManager:
             parallel_chunk_upload=bool(config.upload_parallel_chunk_upload),
         )
         job_id = job["job_id"]
+        last_report = {"time": 0.0, "progress": -1.0}
 
         async def progress_callback(uploaded: int, total: int, confirmed_parts: int, total_parts: int):
             if total_parts > 0:
@@ -290,6 +585,11 @@ class TelegramRelayManager:
                 progress = round(min(uploaded, total) / total * 100, 1)
             else:
                 progress = 100.0
+            now = asyncio.get_running_loop().time()
+            if progress < 100 and progress - last_report["progress"] < 2.0 and now - last_report["time"] < 1.5:
+                return
+            last_report["time"] = now
+            last_report["progress"] = progress
             await db.update_telegram_relay_job(job_id, upload_progress=progress)
             await self._broadcast_job_id(job_id)
 
@@ -372,6 +672,25 @@ class TelegramRelayManager:
     async def _broadcast_job(self, job: dict):
         await self.broker._broadcast({"type": "relay_job_update", "payload": job})
 
+    async def _update_state(self, **kwargs: Any):
+        self._state.update(kwargs)
+        self._state["updated_at"] = self._iso_now()
+        await self.broker._broadcast({"type": "relay_state", "payload": self.state_snapshot()})
+
+    def _log(self, level: str, message: str):
+        entry = {
+            "id": str(len(self._logs) + 1),
+            "timestamp": self._iso_now(),
+            "level": level,
+            "message": message,
+        }
+        self._logs.append(entry)
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        loop.create_task(self.broker._broadcast({"type": "relay_log", "payload": entry}))
+
     def _download_root(self, config: Any | None = None) -> Path:
         cfg = config or self.config
         raw = str(getattr(cfg, "relay_download_dir", "./telegram_relay") or "./telegram_relay")
@@ -397,12 +716,12 @@ class TelegramRelayManager:
             cleanup_empty_parent = True
             if root is not None:
                 if root not in resolved.parents and resolved != root:
-                    self.logger.warning(f"skip relay cleanup outside download dir: {resolved}")
+                    self._log("WARN", f"skip relay cleanup outside download dir: {resolved}")
                     return
             else:
                 expected = str(job_id or "").strip()
                 if not expected or (resolved.name != expected and resolved.parent.name != expected):
-                    self.logger.warning(f"skip relay cleanup without active config: {resolved}")
+                    self._log("WARN", f"skip relay cleanup without active config: {resolved}")
                     return
                 cleanup_empty_parent = resolved.parent.name == expected
             if resolved.is_dir():
@@ -413,4 +732,13 @@ class TelegramRelayManager:
             if cleanup_empty_parent and parent.exists() and (root is None or parent != root) and not any(parent.iterdir()):
                 parent.rmdir()
         except Exception as exc:
-            self.logger.warning(f"Telegram 回源本地文件清理失败: {local_path}, {exc}")
+            self._log("WARN", f"Relay local cleanup failed: {local_path}, {exc}")
+
+    @staticmethod
+    def _session_name(config: Any | None) -> str:
+        value = str(getattr(config, "relay_session_name", "") or "").strip()
+        return value or DEFAULT_RELAY_SESSION_NAME
+
+    @staticmethod
+    def _iso_now() -> str:
+        return datetime.now().astimezone().isoformat(timespec="seconds")

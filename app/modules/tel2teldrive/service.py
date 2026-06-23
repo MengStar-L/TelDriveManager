@@ -54,7 +54,9 @@ STATIC_DIR = BASE_DIR / "static"
 TEMPLATES_DIR = BASE_DIR / "templates"
 # 动态指向项目根目录的 config.toml
 CONFIG_PATH = BASE_DIR.parent.parent.parent / "config.toml"
-MAPPING_PATH = BASE_DIR / "file_msg_map.json"
+RUNTIME_DATA_DIR = CONFIG_PATH.parent / "history" / "tel2teldrive"
+LEGACY_MAPPING_PATH = BASE_DIR / "file_msg_map.json"
+MAPPING_PATH = RUNTIME_DATA_DIR / "file_msg_map.json"
 DEFAULT_LOG_FILE = BASE_DIR / "runtime.log"
 T2TD_ACTION_LOG_STREAM = "t2td_sync"
 T2TD_ACTION_LOG_LIMIT_MULTIPLIER = 5
@@ -100,6 +102,7 @@ DEFAULT_CONFIG: dict[str, dict[str, Any]] = {
     },
     "telegram_relay": {
         "enabled": False,
+        "session_name": "tel2teldrive_relay_session",
         "proxy_type": "socks5",
         "proxy_host": "",
         "proxy_port": 1080,
@@ -174,6 +177,7 @@ class RuntimeConfig:
     upload_min_throughput_kbps: int
     upload_parallel_chunk_upload: bool
     relay_enabled: bool
+    relay_session_name: str
     relay_proxy_type: str
     relay_proxy_host: str
     relay_proxy_port: int
@@ -283,6 +287,7 @@ class ConfigStore:
             upload_min_throughput_kbps=upload.get("min_throughput_kbps", 100),
             upload_parallel_chunk_upload=upload.get("parallel_chunk_upload", False),
             relay_enabled=relay.get("enabled", False),
+            relay_session_name=relay.get("session_name", DEFAULT_CONFIG["telegram_relay"]["session_name"]),
             relay_proxy_type=relay.get("proxy_type", "socks5"),
             relay_proxy_host=relay.get("proxy_host", ""),
             relay_proxy_port=relay.get("proxy_port", 1080),
@@ -342,6 +347,7 @@ class ConfigStore:
             },
             "telegram_relay": {
                 "enabled": runtime.relay_enabled,
+                "session_name": runtime.relay_session_name,
                 "proxy_type": runtime.relay_proxy_type,
                 "proxy_host": runtime.relay_proxy_host,
                 "proxy_port": runtime.relay_proxy_port,
@@ -462,6 +468,10 @@ class ConfigStore:
         relay["enabled"] = self._parse_bool(
             relay_payload.get("enabled"),
             default=DEFAULT_CONFIG["telegram_relay"]["enabled"],
+        )
+        relay["session_name"] = self._parse_string(
+            relay_payload.get("session_name"),
+            fallback=DEFAULT_CONFIG["telegram_relay"]["session_name"],
         )
         relay["proxy_type"] = self._parse_proxy_type(relay_payload.get("proxy_type"))
         relay["proxy_host"] = self._parse_string(relay_payload.get("proxy_host"))
@@ -673,6 +683,7 @@ def state_config_payload(config: RuntimeConfig) -> dict[str, Any]:
         "confirm_cycles": config.confirm_cycles,
         "max_scan_messages": config.max_scan_messages,
         "relay_enabled": config.relay_enabled,
+        "relay_session_name": config.relay_session_name,
         "relay_concurrency": config.relay_concurrency,
         "log_file": config.log_file_path.name,
     }
@@ -724,15 +735,6 @@ def should_reload_service(old_config: RuntimeConfig, new_config: RuntimeConfig) 
         "upload_max_retries",
         "upload_min_throughput_kbps",
         "upload_parallel_chunk_upload",
-        "relay_enabled",
-        "relay_proxy_type",
-        "relay_proxy_host",
-        "relay_proxy_port",
-        "relay_proxy_username",
-        "relay_proxy_password",
-        "relay_download_dir",
-        "relay_concurrency",
-        "relay_max_retries",
         "db_host",
         "db_port",
         "db_user",
@@ -916,10 +918,18 @@ def normalize_mapping(mapping: Any) -> dict[str, list[int]]:
 
 
 def load_mapping() -> dict[str, list[int]]:
-    if MAPPING_PATH.exists():
+    source_path = MAPPING_PATH if MAPPING_PATH.exists() else LEGACY_MAPPING_PATH
+    if source_path.exists():
         try:
-            raw_mapping = json.loads(MAPPING_PATH.read_text(encoding="utf-8"))
-            return normalize_mapping(raw_mapping)
+            raw_mapping = json.loads(source_path.read_text(encoding="utf-8"))
+            mapping = normalize_mapping(raw_mapping)
+            if source_path == LEGACY_MAPPING_PATH and mapping:
+                MAPPING_PATH.parent.mkdir(parents=True, exist_ok=True)
+                MAPPING_PATH.write_text(
+                    json.dumps(mapping, ensure_ascii=False, indent=2),
+                    encoding="utf-8",
+                )
+            return mapping
         except Exception:
             return {}
     return {}
@@ -927,6 +937,7 @@ def load_mapping() -> dict[str, list[int]]:
 
 def save_mapping(mapping: dict[str, Any]):
     normalized = normalize_mapping(mapping)
+    MAPPING_PATH.parent.mkdir(parents=True, exist_ok=True)
     MAPPING_PATH.write_text(
         json.dumps(normalized, ensure_ascii=False, indent=2),
         encoding="utf-8",
@@ -2025,6 +2036,7 @@ class Tel2TelDriveService:
         self.refresh_qr_event = asyncio.Event()
         self.password_future: asyncio.Future[str] | None = None
         self.relay_manager = TelegramRelayManager(logger, broker)
+        self._running = False
 
     def _start_sync_deletions(self, client: TelegramClient, config: RuntimeConfig):
         if self.sync_task and not self.sync_task.done():
@@ -2077,6 +2089,11 @@ class Tel2TelDriveService:
 
 
     async def run_forever(self):
+        if self._running:
+            logger.warning("Tel2TelDrive service is already running; duplicate start ignored")
+            await self.stop_event.wait()
+            return
+        self._running = True
         logger.info("=" * 56)
         logger.info("Telegram 监听中转服务启动")
         logger.info("=" * 56)
@@ -2107,12 +2124,10 @@ class Tel2TelDriveService:
                 continue
 
             self.reload_event.clear()
-            telegram_proxy = build_telegram_proxy(config)
             self.client = TelegramClient(
                 config.session_name,
                 config.telegram_api_id,
                 config.telegram_api_hash,
-                proxy=telegram_proxy,
             )
             try:
                 await broker.update_state(
@@ -2214,6 +2229,7 @@ class Tel2TelDriveService:
 
         await broker.update_state(phase="stopped", authorized=False, needs_password=False, qr_image=None)
         logger.info("Tel2TelDrive 服务已停止")
+        self._running = False
 
     async def stop(self):
         self.stop_event.set()
@@ -2353,7 +2369,7 @@ class Tel2TelDriveService:
         @client.on(events.NewMessage(chats=config.telegram_channel_id))
         async def on_new_message(event: Any):
             try:
-                await self.handle_new_message(client, config, event.message)
+                await self.handle_new_message(client, config_store.runtime(), event.message)
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
@@ -2362,11 +2378,12 @@ class Tel2TelDriveService:
         @client.on(events.MessageDeleted(chats=config.telegram_channel_id))
         async def on_message_deleted(event: Any):
             try:
+                runtime_config = config_store.runtime()
                 deleted_ids = filter_external_deleted_message_ids(getattr(event, "deleted_ids", None) or [])
                 if not deleted_ids:
                     return
                 deleted_count = await delete_teldrive_files_for_missing_messages(
-                    config,
+                    runtime_config,
                     deleted_ids,
                     reason="telegram_message_deleted",
                 )

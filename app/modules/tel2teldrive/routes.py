@@ -134,6 +134,8 @@ async def bootstrap():
     return {
         "state": broker.snapshot(),
         "logs": broker.logs_snapshot(),
+        "relay_state": service.relay_manager.state_snapshot(),
+        "relay_logs": service.relay_manager.logs_snapshot(),
         "config": config_store.payload(),
     }
 
@@ -161,6 +163,7 @@ async def save_config(request: Request):
     logger.set_log_path(runtime.log_file_path)
     await broker.update_state(**state_config_payload(runtime))
     needs_reload = should_reload_service(previous_runtime, runtime)
+    await service.relay_manager.apply_config(runtime)
     if needs_reload:
         await service.request_reload()
         logger.info("网页配置已保存，关键配置发生变化，正在重新加载服务")
@@ -206,6 +209,28 @@ async def submit_password(request: Request):
     password = str(data.get("password", ""))
     try:
         await service.submit_password(password)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    return {"ok": True}
+
+
+@router.post("/relay/login/refresh")
+async def refresh_relay_qr():
+    service, _, _, _ = _get_deps()
+    try:
+        await service.relay_manager.request_qr_refresh()
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    return {"ok": True}
+
+
+@router.post("/relay/login/password")
+async def submit_relay_password(request: Request):
+    service, _, _, _ = _get_deps()
+    data = await request.json()
+    password = str(data.get("password", ""))
+    try:
+        await service.relay_manager.submit_password(password)
     except RuntimeError as exc:
         raise HTTPException(status_code=409, detail=str(exc))
     return {"ok": True}

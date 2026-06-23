@@ -1558,12 +1558,25 @@
                             </div>
                             <div class="page-actions" style="display:flex; flex-wrap: wrap; gap:8px;">
                                 <button class="btn btn-ghost btn-sm btn-action btn-action-neutral" onclick="openTelegramRelaySettingsModal()"><i class="ph ph-gear-six"></i> 设置</button>
+                                <button class="btn btn-ghost btn-sm btn-action btn-action-neutral" onclick="openTelegramRelayLogModal()"><i class="ph ph-terminal-window"></i> 日志</button>
                                 <button class="btn btn-ghost btn-sm btn-action btn-action-danger" data-relay-bulk-action="clear-failed" onclick="t2tdRelayBulkAction('clear-failed')"><i class="ph ph-warning-circle"></i> 清理失败</button>
                                 <button class="btn btn-ghost btn-sm btn-action btn-action-neutral" data-relay-bulk-action="clear-terminal" onclick="t2tdRelayBulkAction('clear-terminal')"><i class="ph ph-check-circle"></i> 清理已完成/已取消</button>
                                 <button class="btn btn-ghost btn-sm btn-action btn-action-neutral" onclick="loadT2TDRelayJobs(true)"><i class="ph ph-arrows-clockwise"></i> 刷新</button>
                             </div>
                         </div>
                         <div class="card-body" style="padding:16px">
+                            <div id="telegramRelayLoginPanel" style="display:none; margin-bottom:16px; padding:16px; border:1px solid var(--border); border-radius:8px; background:var(--surface-muted);">
+                                <div id="telegramRelayLoginText" style="font-weight:600; color:var(--text-primary); margin-bottom:12px;">回源账号登录状态检查中...</div>
+                                <img id="telegramRelayQrImg" src="" onclick="refreshTelegramRelayQr(true)" title="点击二维码刷新" style="display:none; margin:0 auto; border-radius:12px; border:2px solid var(--border); cursor:pointer;" width="220">
+                                <div id="telegramRelayQrHint" style="display:none; margin-top:10px; font-size:13px; color:var(--text-secondary); text-align:center;"></div>
+                                <form id="telegramRelay2faForm" style="display:none; max-width:320px; margin-top:12px;">
+                                    <div class="form-group">
+                                        <label>回源账号两步验证密码</label>
+                                        <input type="password" id="telegramRelayPassword" class="form-input" placeholder="输入云密码">
+                                    </div>
+                                    <button type="submit" class="btn btn-primary btn-sm" style="margin-top:8px;"><i class="ph ph-key"></i> 提交</button>
+                                </form>
+                            </div>
                             <div id="telegramRelayBarsContainer" style="display:none;">
                                 <div id="telegramRelayBars"></div>
                             </div>
@@ -2038,6 +2051,20 @@
             </div>
             <div class="telegram-relay-settings-footer">
                 <button class="btn btn-primary btn-sm" type="button" id="telegramRelayTestProxyBtn" onclick="testTelegramRelayProxy()"><i class="ph ph-plugs-connected"></i> 检测可用性</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="telegramRelayLogModal" class="telegram-relay-settings-modal" aria-hidden="true" onclick="closeTelegramRelayLogModal(event)">
+        <div class="telegram-relay-settings-dialog" role="dialog" aria-modal="true" aria-labelledby="telegramRelayLogTitle" onclick="event.stopPropagation()" style="width:min(860px, calc(100vw - 32px));">
+            <div class="telegram-relay-settings-header">
+                <h3 id="telegramRelayLogTitle"><i class="ph ph-terminal-window"></i> 回源监控日志</h3>
+                <button class="icon-btn" type="button" onclick="closeTelegramRelayLogModal()" aria-label="关闭"><i class="ph ph-x"></i></button>
+            </div>
+            <div class="telegram-relay-settings-body">
+                <div class="log-container" id="telegramRelayLogContainer" style="height:min(62vh, 560px); max-height:none;">
+                    <div class="log-empty"><i class="ph ph-ghost"></i> 暂无回源日志</div>
+                </div>
             </div>
         </div>
     </div>

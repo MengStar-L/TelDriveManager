@@ -87,6 +87,7 @@ confirm_cycles = 3
 # ─── TelDrive 数据库（Telegram同步可选） ───
 [telegram_relay]
 enabled = false
+session_name = "tel2teldrive_relay_session"
 proxy_type = "socks5"  # socks5 / http / https
 proxy_host = ""
 proxy_port = 1080
