@@ -244,6 +244,11 @@ async def test_telegram_relay_proxy(payload: dict = Body(None)):
     if payload:
         cfg.update(payload)
 
+    proxy_type = str(cfg.get("proxy_type") or "socks5").strip().lower()
+    if proxy_type in ("socks", "socks5h"):
+        proxy_type = "socks5"
+    if proxy_type not in ("socks5", "http", "https"):
+        return {"success": False, "message": "代理协议仅支持 socks5、http、https"}
     proxy_host = str(cfg.get("proxy_host") or "").strip()
     proxy_username = str(cfg.get("proxy_username") or "").strip() or None
     proxy_password = str(cfg.get("proxy_password") or "") or None
@@ -253,21 +258,22 @@ async def test_telegram_relay_proxy(payload: dict = Body(None)):
         proxy_port = 0
 
     if not proxy_host:
-        return {"success": False, "message": "请先填写 SOCKS5 链接"}
+        return {"success": False, "message": "请先填写代理链接"}
     if proxy_port < 1 or proxy_port > 65535:
-        return {"success": False, "message": "SOCKS5 端口无效"}
+        return {"success": False, "message": "代理端口无效"}
 
     def _probe() -> int:
         try:
             import socks
         except ModuleNotFoundError as exc:
-            raise RuntimeError("PySocks 未安装，无法检测 SOCKS5 链接") from exc
+            raise RuntimeError("PySocks 未安装，无法检测代理链接") from exc
 
         sock = socks.socksocket(socket.AF_INET, socket.SOCK_STREAM)
         started_at = time.monotonic()
         try:
+            proxy_constant = socks.HTTP if proxy_type in ("http", "https") else socks.SOCKS5
             sock.set_proxy(
-                socks.SOCKS5,
+                proxy_constant,
                 proxy_host,
                 proxy_port,
                 rdns=True,
@@ -285,11 +291,11 @@ async def test_telegram_relay_proxy(payload: dict = Body(None)):
 
     try:
         latency_ms = await asyncio.wait_for(asyncio.to_thread(_probe), timeout=10)
-        return {"success": True, "message": f"SOCKS5 可用，Telegram TCP 连接成功（{latency_ms} ms）"}
+        return {"success": True, "message": f"{proxy_type.upper()} 代理可用，Telegram TCP 连接成功（{latency_ms} ms）"}
     except asyncio.TimeoutError:
-        return {"success": False, "message": "SOCKS5 检测超时，请检查中转端口和防火墙"}
+        return {"success": False, "message": "代理检测超时，请检查中转端口和防火墙"}
     except Exception as e:
-        return {"success": False, "message": f"SOCKS5 检测失败: {str(e)}"}
+        return {"success": False, "message": f"代理检测失败: {str(e)}"}
 
 
 @router.post("/test/database")

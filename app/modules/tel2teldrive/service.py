@@ -100,6 +100,7 @@ DEFAULT_CONFIG: dict[str, dict[str, Any]] = {
     },
     "telegram_relay": {
         "enabled": False,
+        "proxy_type": "socks5",
         "proxy_host": "",
         "proxy_port": 1080,
         "proxy_username": "",
@@ -173,6 +174,7 @@ class RuntimeConfig:
     upload_min_throughput_kbps: int
     upload_parallel_chunk_upload: bool
     relay_enabled: bool
+    relay_proxy_type: str
     relay_proxy_host: str
     relay_proxy_port: int
     relay_proxy_username: str
@@ -281,6 +283,7 @@ class ConfigStore:
             upload_min_throughput_kbps=upload.get("min_throughput_kbps", 100),
             upload_parallel_chunk_upload=upload.get("parallel_chunk_upload", False),
             relay_enabled=relay.get("enabled", False),
+            relay_proxy_type=relay.get("proxy_type", "socks5"),
             relay_proxy_host=relay.get("proxy_host", ""),
             relay_proxy_port=relay.get("proxy_port", 1080),
             relay_proxy_username=relay.get("proxy_username", ""),
@@ -339,6 +342,7 @@ class ConfigStore:
             },
             "telegram_relay": {
                 "enabled": runtime.relay_enabled,
+                "proxy_type": runtime.relay_proxy_type,
                 "proxy_host": runtime.relay_proxy_host,
                 "proxy_port": runtime.relay_proxy_port,
                 "proxy_username": runtime.relay_proxy_username,
@@ -459,6 +463,7 @@ class ConfigStore:
             relay_payload.get("enabled"),
             default=DEFAULT_CONFIG["telegram_relay"]["enabled"],
         )
+        relay["proxy_type"] = self._parse_proxy_type(relay_payload.get("proxy_type"))
         relay["proxy_host"] = self._parse_string(relay_payload.get("proxy_host"))
         relay["proxy_port"] = self._parse_positive_int(
             relay_payload.get("proxy_port"),
@@ -538,6 +543,14 @@ class ConfigStore:
             return fallback
         text = str(value).strip()
         return text or fallback
+
+    def _parse_proxy_type(self, value: Any) -> str:
+        proxy_type = str(value or DEFAULT_CONFIG["telegram_relay"]["proxy_type"]).strip().lower()
+        if proxy_type in ("socks", "socks5h"):
+            proxy_type = "socks5"
+        if proxy_type not in ("socks5", "http", "https"):
+            return DEFAULT_CONFIG["telegram_relay"]["proxy_type"]
+        return proxy_type
 
     def _normalize_path_string(self, value: Any, *, fallback: str = "/") -> str:
         text = self._parse_string(value, fallback=fallback).replace("\\", "/")
@@ -676,8 +689,10 @@ def build_telegram_proxy(config: RuntimeConfig):
         raise RuntimeError("PySocks is required for telegram_relay proxy support") from exc
     username = config.relay_proxy_username or None
     password = config.relay_proxy_password or None
+    proxy_type = str(config.relay_proxy_type or "socks5").strip().lower()
+    proxy_constant = socks.HTTP if proxy_type in ("http", "https") else socks.SOCKS5
     return (
-        socks.SOCKS5,
+        proxy_constant,
         config.relay_proxy_host,
         int(config.relay_proxy_port),
         True,
@@ -710,6 +725,7 @@ def should_reload_service(old_config: RuntimeConfig, new_config: RuntimeConfig) 
         "upload_min_throughput_kbps",
         "upload_parallel_chunk_upload",
         "relay_enabled",
+        "relay_proxy_type",
         "relay_proxy_host",
         "relay_proxy_port",
         "relay_proxy_username",

@@ -1954,10 +1954,18 @@
                                         <div class="toggle-switch"><input type="checkbox" id="cfgTelegramRelayEnabled"><span class="toggle-slider"></span></div>
                                     </label>
                                     <div class="field-grid" style="margin-top:14px;">
-                                        <div class="form-group"><label>SOCKS5 主机</label><input class="form-input" type="text" id="cfgTelegramRelayProxyHost" placeholder="127.0.0.1"></div>
-                                        <div class="form-group"><label>SOCKS5 端口</label><input class="form-input" type="number" id="cfgTelegramRelayProxyPort" min="1" max="65535" placeholder="1080"></div>
-                                        <div class="form-group"><label>SOCKS5 用户名</label><input class="form-input" type="text" id="cfgTelegramRelayProxyUsername" placeholder="可留空"></div>
-                                        <div class="form-group"><label>SOCKS5 密码</label><input class="form-input" type="password" id="cfgTelegramRelayProxyPassword" placeholder="可留空"></div>
+                                        <div class="form-group">
+                                            <label>代理协议</label>
+                                            <select class="form-input" id="cfgTelegramRelayProxyType">
+                                                <option value="socks5">SOCKS5</option>
+                                                <option value="http">HTTP</option>
+                                                <option value="https">HTTPS</option>
+                                            </select>
+                                        </div>
+                                        <div class="form-group"><label>代理主机</label><input class="form-input" type="text" id="cfgTelegramRelayProxyHost" placeholder="127.0.0.1"></div>
+                                        <div class="form-group"><label>代理端口</label><input class="form-input" type="number" id="cfgTelegramRelayProxyPort" min="1" max="65535" placeholder="1080"></div>
+                                        <div class="form-group"><label>代理用户名</label><input class="form-input" type="text" id="cfgTelegramRelayProxyUsername" placeholder="可留空"></div>
+                                        <div class="form-group"><label>代理密码</label><input class="form-input" type="password" id="cfgTelegramRelayProxyPassword" placeholder="可留空"></div>
                                         <div class="form-group"><label>本地下载目录</label><input class="form-input" type="text" id="cfgTelegramRelayDownloadDir" placeholder="./telegram_relay"></div>
                                         <div class="form-group"><label>回源并发数</label><input class="form-input" type="number" id="cfgTelegramRelayConcurrency" min="1" max="16" placeholder="1"></div>
                                         <div class="form-group"><label>失败重试次数</label><input class="form-input" type="number" id="cfgTelegramRelayMaxRetries" min="1" max="20" placeholder="3"></div>
@@ -2022,9 +2030,9 @@
                     </div>
                 </label>
                 <div class="form-group">
-                    <label for="telegramRelaySocksUrl">SOCKS5 链接</label>
-                    <input class="form-input" type="text" id="telegramRelaySocksUrl" placeholder="socks5://user:password@127.0.0.1:1080" autocomplete="off" spellcheck="false">
-                    <div class="telegram-relay-settings-hint">支持 <code>socks5://host:port</code> 或 <code>socks5://user:password@host:port</code>。输入后自动保存，不需要手动提交。</div>
+                    <label for="telegramRelaySocksUrl">代理链接</label>
+                    <input class="form-input" type="text" id="telegramRelaySocksUrl" placeholder="socks5://user:password@127.0.0.1:1080 或 http://127.0.0.1:8080" autocomplete="off" spellcheck="false">
+                    <div class="telegram-relay-settings-hint">支持 <code>socks5://</code>、<code>http://</code>、<code>https://</code>。HTTP/HTTPS 代理需要支持 CONNECT 到 Telegram TCP 端口。</div>
                 </div>
                 <div class="telegram-relay-settings-status" id="telegramRelaySettingsStatus"><i class="ph ph-info"></i> 输入后会自动保存。</div>
             </div>

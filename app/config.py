@@ -87,6 +87,7 @@ DEFAULTS: dict[str, Any] = {
     },
     "telegram_relay": {
         "enabled": False,
+        "proxy_type": "socks5",
         "proxy_host": "",
         "proxy_port": 1080,
         "proxy_username": "",
@@ -321,6 +322,12 @@ def _normalize_config(merged: dict, raw: dict | None = None) -> dict:
     upload_cfg["min_throughput_kbps"] = max(16, int(upload_cfg.get("min_throughput_kbps") or 100))
 
     telegram_relay_cfg["enabled"] = bool(telegram_relay_cfg.get("enabled", False))
+    proxy_type = str(telegram_relay_cfg.get("proxy_type") or "socks5").strip().lower()
+    if proxy_type in ("socks", "socks5h"):
+        proxy_type = "socks5"
+    if proxy_type not in ("socks5", "http", "https"):
+        proxy_type = "socks5"
+    telegram_relay_cfg["proxy_type"] = proxy_type
     telegram_relay_cfg["proxy_host"] = str(telegram_relay_cfg.get("proxy_host") or "").strip()
     telegram_relay_cfg["proxy_port"] = max(1, int(telegram_relay_cfg.get("proxy_port") or 1080))
     telegram_relay_cfg["proxy_username"] = str(telegram_relay_cfg.get("proxy_username") or "").strip()

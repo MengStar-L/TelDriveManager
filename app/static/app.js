@@ -3178,6 +3178,7 @@ function collectSettingsConfig() {
         },
         telegram_relay: {
             enabled: !!document.getElementById('cfgTelegramRelayEnabled')?.checked,
+            proxy_type: normalizeTelegramRelayProxyType(document.getElementById('cfgTelegramRelayProxyType')?.value || currentRelay.proxy_type || 'socks5'),
             proxy_host: document.getElementById('cfgTelegramRelayProxyHost')?.value.trim() || '',
             proxy_port: Math.max(1, parseInt(document.getElementById('cfgTelegramRelayProxyPort')?.value, 10) || currentRelay.proxy_port || 1080),
             proxy_username: document.getElementById('cfgTelegramRelayProxyUsername')?.value.trim() || '',
@@ -3261,6 +3262,7 @@ async function loadConfig() {
         document.getElementById('cfgTelegramSyncInterval').value = cfg.telegram?.sync_interval || 10;
         document.getElementById('cfgTelegramSyncEnabled').checked = cfg.telegram?.sync_enabled !== false;
         document.getElementById('cfgTelegramRelayEnabled').checked = !!cfg.telegram_relay?.enabled;
+        document.getElementById('cfgTelegramRelayProxyType').value = normalizeTelegramRelayProxyType(cfg.telegram_relay?.proxy_type || 'socks5');
         document.getElementById('cfgTelegramRelayProxyHost').value = cfg.telegram_relay?.proxy_host || '';
         document.getElementById('cfgTelegramRelayProxyPort').value = cfg.telegram_relay?.proxy_port || 1080;
         document.getElementById('cfgTelegramRelayProxyUsername').value = cfg.telegram_relay?.proxy_username || '';
@@ -3763,9 +3765,17 @@ function safeDecodeUrlPart(value) {
     }
 }
 
+function normalizeTelegramRelayProxyType(value) {
+    let proxyType = String(value || 'socks5').trim().toLowerCase();
+    if (proxyType === 'socks' || proxyType === 'socks5h') proxyType = 'socks5';
+    if (!['socks5', 'http', 'https'].includes(proxyType)) proxyType = 'socks5';
+    return proxyType;
+}
+
 function buildTelegramRelaySocksUrl(relay = {}) {
     const host = String(relay.proxy_host || '').trim();
     if (!host) return '';
+    const proxyType = normalizeTelegramRelayProxyType(relay.proxy_type || 'socks5');
     const port = Math.max(1, parseInt(relay.proxy_port, 10) || 1080);
     const username = String(relay.proxy_username || '');
     const password = String(relay.proxy_password || '');
@@ -3774,13 +3784,14 @@ function buildTelegramRelaySocksUrl(relay = {}) {
         ? `${encodeURIComponent(username)}${password ? `:${encodeURIComponent(password)}` : ''}@`
         : '';
     const displayHost = host.includes(':') && !host.startsWith('[') ? `[${host}]` : host;
-    return `socks5://${auth}${displayHost}:${port}`;
+    return `${proxyType}://${auth}${displayHost}:${port}`;
 }
 
 function parseTelegramRelaySocksUrl(rawValue) {
     const raw = String(rawValue || '').trim();
     if (!raw) {
         return {
+            proxy_type: 'socks5',
             proxy_host: '',
             proxy_port: 1080,
             proxy_username: '',
@@ -3793,22 +3804,24 @@ function parseTelegramRelaySocksUrl(rawValue) {
     try {
         url = new URL(normalized);
     } catch (e) {
-        throw new Error('SOCKS 链接格式无效');
+        throw new Error('代理链接格式无效');
     }
 
-    const protocol = String(url.protocol || '').replace(':', '').toLowerCase();
-    if (!['socks', 'socks5', 'socks5h'].includes(protocol)) {
-        throw new Error('仅支持 socks5:// 链接');
+    const protocol = normalizeTelegramRelayProxyType(String(url.protocol || '').replace(':', ''));
+    const rawProtocol = String(url.protocol || '').replace(':', '').toLowerCase();
+    if (!['socks', 'socks5', 'socks5h', 'http', 'https'].includes(rawProtocol)) {
+        throw new Error('仅支持 socks5://、http:// 或 https:// 代理链接');
     }
 
     const host = String(url.hostname || '').replace(/^\[|\]$/g, '').trim();
     const port = parseInt(url.port, 10);
-    if (!host) throw new Error('SOCKS 链接缺少主机地址');
+    if (!host) throw new Error('代理链接缺少主机地址');
     if (!Number.isInteger(port) || port < 1 || port > 65535) {
-        throw new Error('SOCKS 链接缺少有效端口');
+        throw new Error('代理链接缺少有效端口');
     }
 
     return {
+        proxy_type: protocol,
         proxy_host: host,
         proxy_port: port,
         proxy_username: safeDecodeUrlPart(url.username),
@@ -3832,6 +3845,7 @@ function setTelegramRelaySettingsStatus(message, type = 'info') {
 
 function applyTelegramRelayConfigToSettingsInputs(relay = {}) {
     const mappings = [
+        ['cfgTelegramRelayProxyType', normalizeTelegramRelayProxyType(relay.proxy_type || 'socks5')],
         ['cfgTelegramRelayProxyHost', relay.proxy_host || ''],
         ['cfgTelegramRelayProxyPort', relay.proxy_port || 1080],
         ['cfgTelegramRelayProxyUsername', relay.proxy_username || ''],
@@ -3879,7 +3893,7 @@ function collectTelegramRelaySettingsPayload() {
         ...parsed,
     };
     if (payload.enabled && !payload.proxy_host) {
-        throw new Error('启用回源时必须填写 SOCKS5 链接');
+        throw new Error('启用回源时必须填写代理链接');
     }
     return payload;
 }
@@ -3894,12 +3908,12 @@ async function saveTelegramRelaySocksSettings(triggerInput = null, options = {})
     try {
         relayPayload = collectTelegramRelaySettingsPayload();
     } catch (e) {
-        setTelegramRelaySettingsStatus(e.message || 'SOCKS 设置无效，未保存', 'error');
+        setTelegramRelaySettingsStatus(e.message || '代理设置无效，未保存', 'error');
         return null;
     }
 
     try {
-        setTelegramRelaySettingsStatus('正在自动保存 SOCKS 设置...', 'saving');
+        setTelegramRelaySettingsStatus('正在自动保存代理设置...', 'saving');
         const resp = await fetch('/api/settings', {
             method: 'PUT',
             headers: { 'Content-Type': 'application/json' },
@@ -3907,7 +3921,7 @@ async function saveTelegramRelaySocksSettings(triggerInput = null, options = {})
         });
         const data = await readJsonSafe(resp);
         if (!resp.ok || data.success === false) {
-            throw new Error(data.detail || data.message || '保存 SOCKS 设置失败');
+            throw new Error(data.detail || data.message || '保存代理设置失败');
         }
 
         window.currentConfig = {
@@ -3919,10 +3933,10 @@ async function saveTelegramRelaySocksSettings(triggerInput = null, options = {})
         };
         applyTelegramRelayConfigToSettingsInputs(window.currentConfig.telegram_relay || {});
         if (triggerInput) showFieldCheck(triggerInput);
-        if (!options.quiet) setTelegramRelaySettingsStatus('SOCKS 设置已自动保存。', 'success');
+        if (!options.quiet) setTelegramRelaySettingsStatus('代理设置已自动保存。', 'success');
         return window.currentConfig.telegram_relay;
     } catch (e) {
-        setTelegramRelaySettingsStatus(e.message || '保存 SOCKS 设置失败', 'error');
+        setTelegramRelaySettingsStatus(e.message || '保存代理设置失败', 'error');
         return null;
     }
 }
@@ -3979,7 +3993,7 @@ async function testTelegramRelayProxy() {
             testBtn.disabled = true;
             testBtn.innerHTML = '<span class="spinner"></span> 检测中';
         }
-        setTelegramRelaySettingsStatus('正在检测 SOCKS 到 Telegram 的连通性...', 'testing');
+        setTelegramRelaySettingsStatus('正在检测代理到 Telegram 的连通性...', 'testing');
         const resp = await fetch('/api/settings/test/telegram-relay-proxy', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -3987,13 +4001,13 @@ async function testTelegramRelayProxy() {
         });
         const data = await readJsonSafe(resp);
         if (!resp.ok || data.success === false) {
-            throw new Error(data.detail || data.message || 'SOCKS 连通性检测失败');
+            throw new Error(data.detail || data.message || '代理连通性检测失败');
         }
-        setTelegramRelaySettingsStatus(data.message || 'SOCKS 可用。', 'success');
-        if (typeof showA2TDToast === 'function') showA2TDToast(data.message || 'SOCKS 可用', 'success');
+        setTelegramRelaySettingsStatus(data.message || '代理可用。', 'success');
+        if (typeof showA2TDToast === 'function') showA2TDToast(data.message || '代理可用', 'success');
     } catch (e) {
-        setTelegramRelaySettingsStatus(e.message || 'SOCKS 连通性检测失败', 'error');
-        if (typeof showA2TDToast === 'function') showA2TDToast(e.message || 'SOCKS 连通性检测失败', 'error');
+        setTelegramRelaySettingsStatus(e.message || '代理连通性检测失败', 'error');
+        if (typeof showA2TDToast === 'function') showA2TDToast(e.message || '代理连通性检测失败', 'error');
     } finally {
         if (testBtn) {
             testBtn.disabled = false;
