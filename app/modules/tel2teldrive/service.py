@@ -2446,6 +2446,7 @@ class Tel2TelDriveService:
             return
 
         if config.relay_enabled:
+            logger.info(f"Telegram relay enqueue: {name} (msg_id={msg.id})")
             await self.relay_manager.enqueue_message(client, config, msg, file_info)
             return
 

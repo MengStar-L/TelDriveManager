@@ -103,7 +103,8 @@ class TelegramRelayManager:
             await self.stop()
             return
         self._stopped = False
-        await self._ensure_login_task()
+        if not self._state.get("authorized"):
+            await self._ensure_login_task()
         await self._schedule_active_jobs()
 
     async def stop(self):
@@ -233,10 +234,12 @@ class TelegramRelayManager:
 
     async def _schedule_active_jobs(self):
         active_jobs = await db.get_active_telegram_relay_jobs()
+        scheduled_count = 0
         for job in active_jobs:
-            await self._schedule(job["job_id"])
-        if active_jobs:
-            self._log("INFO", f"Scheduled {len(active_jobs)} active relay job(s)")
+            if await self._schedule(job["job_id"]):
+                scheduled_count += 1
+        if scheduled_count:
+            self._log("INFO", f"Scheduled {scheduled_count} active relay job(s)")
 
     async def _ensure_login_task(self, *, force: bool = False):
         if force and self._login_task and not self._login_task.done():
@@ -373,6 +376,7 @@ class TelegramRelayManager:
         return False
 
     async def _mark_authorized(self):
+        was_authorized = bool(self._state.get("authorized"))
         self._refresh_qr_event.clear()
         if self._password_future and not self._password_future.done():
             self._password_future.cancel()
@@ -385,7 +389,8 @@ class TelegramRelayManager:
             qr_expires_at=None,
             last_error=None,
         )
-        self._log("INFO", "Telegram relay login successful")
+        if not was_authorized:
+            self._log("INFO", "Telegram relay login successful")
 
     async def _complete_password_login(self, client: TelegramClient):
         await self._update_state(
@@ -422,10 +427,11 @@ class TelegramRelayManager:
 
     async def _schedule(self, job_id: str):
         if self._stopped or job_id in self._tasks:
-            return
+            return False
         task = asyncio.create_task(self._run_job(job_id))
         self._tasks[job_id] = task
         task.add_done_callback(lambda done, jid=job_id: self._tasks.pop(jid, None))
+        return True
 
     async def _run_job(self, job_id: str):
         semaphore = self._semaphore or asyncio.Semaphore(1)

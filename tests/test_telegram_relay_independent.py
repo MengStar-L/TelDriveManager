@@ -51,6 +51,15 @@ class FakeRelayClient:
         self.deleted.append((channel_id, list(ids)))
 
 
+class FakeRelayManager:
+    def __init__(self):
+        self.enqueued = []
+
+    async def enqueue_message(self, client, config, msg, file_info):
+        self.enqueued.append((client, config, msg, dict(file_info)))
+        return {"job_id": "fake-job"}
+
+
 class FakeConstructedClient:
     created_args = None
     created_kwargs = None
@@ -229,6 +238,56 @@ class TelegramRelayIndependentTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsInstance(client, FakeConstructedClient)
         self.assertEqual(FakeConstructedClient.created_args[:3], (config.relay_session_name, config.telegram_api_id, config.telegram_api_hash))
         self.assertNotIn("proxy", FakeConstructedClient.created_kwargs)
+
+    async def test_relay_authorized_log_is_emitted_only_on_state_transition(self):
+        manager = relay_module.TelegramRelayManager(FakeLogger(), FakeBroker())
+
+        await manager._mark_authorized()
+        await manager._mark_authorized()
+
+        success_logs = [
+            item for item in manager.logs_snapshot()
+            if item["message"] == "Telegram relay login successful"
+        ]
+        self.assertEqual(len(success_logs), 1)
+
+    async def test_main_listener_enqueues_forwarded_video_when_relay_enabled(self):
+        service = service_module.Tel2TelDriveService()
+        fake_relay = FakeRelayManager()
+        service.relay_manager = cast(Any, fake_relay)
+        config = make_runtime()
+        client = object()
+        video_attr = service_module.DocumentAttributeVideo(duration=10, w=1920, h=1080)
+        media = service_module.MessageMediaDocument(
+            document=SimpleNamespace(
+                mime_type="video/mp4",
+                size=123456,
+                attributes=[video_attr],
+            )
+        )
+        msg = SimpleNamespace(id=3456, media=media)
+
+        async def fake_run_blocking_io(func, *args, **kwargs):
+            if func is service_module.load_mapping:
+                return {}
+            if func is service_module.get_teldrive_files:
+                return {}
+            raise AssertionError(f"unexpected blocking call: {func}")
+
+        original_run_blocking_io = service_module.run_blocking_io
+        try:
+            service_module.run_blocking_io = cast(Any, fake_run_blocking_io)
+            await service.handle_new_message(cast(Any, client), config, msg)
+        finally:
+            service_module.run_blocking_io = original_run_blocking_io
+
+        self.assertEqual(len(fake_relay.enqueued), 1)
+        enqueued_client, enqueued_config, enqueued_msg, file_info = fake_relay.enqueued[0]
+        self.assertIs(enqueued_client, client)
+        self.assertIs(enqueued_config, config)
+        self.assertIs(enqueued_msg, msg)
+        self.assertEqual(file_info["name"], "video_3456.mp4")
+        self.assertEqual(file_info["mime_type"], "video/mp4")
 
     async def test_relay_job_uses_independent_client_for_download_and_delete(self):
         manager = relay_module.TelegramRelayManager(FakeLogger(), FakeBroker())
