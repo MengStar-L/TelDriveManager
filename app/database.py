@@ -56,6 +56,29 @@ CREATE TABLE IF NOT EXISTS progress_logs (
 )
 """
 
+CREATE_TELEGRAM_RELAY_JOBS_TABLE_SQL = """
+CREATE TABLE IF NOT EXISTS telegram_relay_jobs (
+    job_id TEXT PRIMARY KEY,
+    source_channel_id INTEGER NOT NULL,
+    source_message_id INTEGER NOT NULL,
+    file_name TEXT NOT NULL,
+    file_size INTEGER DEFAULT 0,
+    mime_type TEXT DEFAULT '',
+    status TEXT DEFAULT 'pending',
+    download_progress REAL DEFAULT 0.0,
+    upload_progress REAL DEFAULT 0.0,
+    local_path TEXT DEFAULT '',
+    teldrive_file_id TEXT DEFAULT '',
+    upload_id TEXT DEFAULT '',
+    error TEXT,
+    retry_count INTEGER DEFAULT 0,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    completed_at TIMESTAMP,
+    UNIQUE(source_channel_id, source_message_id)
+)
+"""
+
 CREATE_PARSE_JOBS_TABLE_SQL = """
 CREATE TABLE IF NOT EXISTS parse_jobs (
     job_id TEXT PRIMARY KEY,
@@ -127,6 +150,11 @@ async def init_db():
     await _ensure_column(conn, "tasks", "upload_source_fingerprint", "TEXT")
     await _ensure_column(conn, "tasks", "source_size_bytes", "INTEGER DEFAULT 0")
     await conn.execute(CREATE_PROGRESS_LOGS_TABLE_SQL)
+    await conn.execute(CREATE_TELEGRAM_RELAY_JOBS_TABLE_SQL)
+    await conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_telegram_relay_jobs_status ON telegram_relay_jobs(status, updated_at DESC)")
+    await conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_telegram_relay_jobs_source ON telegram_relay_jobs(source_channel_id, source_message_id)")
     await conn.execute(CREATE_PARSE_JOBS_TABLE_SQL)
     await conn.execute(CREATE_PIKPAK_ACCOUNT_ERRORS_TABLE_SQL)
     await conn.execute(
@@ -488,6 +516,134 @@ async def delete_task(task_id: str) -> bool:
     conn = await _get_conn()
     cursor = await conn.execute(
         "DELETE FROM tasks WHERE task_id = ?", (task_id,)
+    )
+    await conn.commit()
+    return cursor.rowcount > 0
+
+
+async def add_telegram_relay_job(
+    job_id: str,
+    *,
+    source_channel_id: int,
+    source_message_id: int,
+    file_name: str,
+    file_size: int = 0,
+    mime_type: str = "",
+    local_path: str = "",
+) -> dict:
+    conn = await _get_conn()
+    await conn.execute(
+        """
+        INSERT OR IGNORE INTO telegram_relay_jobs (
+            job_id, source_channel_id, source_message_id, file_name,
+            file_size, mime_type, local_path
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            job_id,
+            int(source_channel_id),
+            int(source_message_id),
+            str(file_name or ""),
+            max(0, int(file_size or 0)),
+            str(mime_type or ""),
+            str(local_path or ""),
+        ),
+    )
+    await conn.commit()
+    job = await get_telegram_relay_job(job_id)
+    if job is None:
+        job = await get_telegram_relay_job_by_source(source_channel_id, source_message_id)
+    if job is None:
+        raise RuntimeError(f"failed to create telegram relay job {job_id}")
+    return job
+
+
+async def get_telegram_relay_job(job_id: str) -> Optional[dict]:
+    conn = await _get_conn()
+    async with conn.execute(
+        "SELECT * FROM telegram_relay_jobs WHERE job_id = ?", (job_id,)
+    ) as cursor:
+        row = await cursor.fetchone()
+        return dict(row) if row else None
+
+
+async def get_telegram_relay_job_by_source(source_channel_id: int, source_message_id: int) -> Optional[dict]:
+    conn = await _get_conn()
+    async with conn.execute(
+        """
+        SELECT * FROM telegram_relay_jobs
+        WHERE source_channel_id = ? AND source_message_id = ?
+        """,
+        (int(source_channel_id), int(source_message_id)),
+    ) as cursor:
+        row = await cursor.fetchone()
+        return dict(row) if row else None
+
+
+async def get_all_telegram_relay_jobs(limit: int = 200) -> list[dict]:
+    conn = await _get_conn()
+    async with conn.execute(
+        """
+        SELECT * FROM telegram_relay_jobs
+        ORDER BY created_at DESC, rowid DESC
+        LIMIT ?
+        """,
+        (max(1, int(limit or 200)),),
+    ) as cursor:
+        rows = await cursor.fetchall()
+        return [dict(row) for row in rows]
+
+
+async def get_active_telegram_relay_jobs(limit: int = 200) -> list[dict]:
+    conn = await _get_conn()
+    async with conn.execute(
+        """
+        SELECT * FROM telegram_relay_jobs
+        WHERE status IN ('pending', 'downloading', 'uploading', 'cleaning')
+        ORDER BY created_at ASC, rowid ASC
+        LIMIT ?
+        """,
+        (max(1, int(limit or 200)),),
+    ) as cursor:
+        rows = await cursor.fetchall()
+        return [dict(row) for row in rows]
+
+
+async def update_telegram_relay_job(job_id: str, **kwargs) -> None:
+    if not kwargs:
+        return
+    allowed = {
+        "status",
+        "download_progress",
+        "upload_progress",
+        "local_path",
+        "teldrive_file_id",
+        "upload_id",
+        "error",
+        "retry_count",
+        "completed_at",
+    }
+    fields = []
+    values: list[Any] = []
+    for key, value in kwargs.items():
+        if key not in allowed:
+            raise ValueError(f"unsupported telegram relay job field: {key}")
+        fields.append(f"{key} = ?")
+        values.append(value)
+    values.append(job_id)
+    conn = await _get_conn()
+    await conn.execute(
+        f"UPDATE telegram_relay_jobs SET {', '.join(fields)}, updated_at = CURRENT_TIMESTAMP WHERE job_id = ?",
+        values,
+    )
+    await conn.commit()
+
+
+async def delete_telegram_relay_job(job_id: str) -> bool:
+    conn = await _get_conn()
+    cursor = await conn.execute(
+        "DELETE FROM telegram_relay_jobs WHERE job_id = ?", (job_id,)
     )
     await conn.commit()
     return cursor.rowcount > 0

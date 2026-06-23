@@ -425,7 +425,6 @@
         .log-meta { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
         .log-meta-item { display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px; border-radius: 999px; background: rgba(148, 163, 184, 0.14); color: #cbd5e1; font-size: 11px; max-width: 100%; }
         .log-time { flex-shrink: 0; font-size: 11px; color: #64748b; margin-top: 2px; }
-
         .folder-tree-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 16px; flex-wrap: wrap; }
         .folder-tree-summary { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
         .folder-tree-chip { display: inline-flex; align-items: center; gap: 6px; padding: 6px 10px; border-radius: 999px; font-size: 12px; font-weight: 600; border: 1px solid transparent; }
@@ -616,6 +615,9 @@
         .progress-bar-fill.upload {
             background: linear-gradient(90deg, #8b5cf6, #a78bfa);
         }
+        .progress-bar-fill.cleaning {
+            background: linear-gradient(90deg, #f59e0b, #fbbf24);
+        }
         .progress-bar-fill.done {
             background: linear-gradient(90deg, var(--success), #34d399);
         }
@@ -782,6 +784,8 @@
         }
 
         .progress-card.paused { border-left: 3px solid #f59e0b; }
+        .progress-card.cleaning { border-left: 3px solid #f59e0b; }
+        .progress-card.cancelled { border-left: 3px solid #f59e0b; }
         .progress-card.failed { border-left: 3px solid var(--error); border-color: rgba(239, 68, 68, 0.22); }
         .progress-card.pending { border-left: 3px solid #94a3b8; }
         .progress-card.stalled { border-color: rgba(245, 158, 11, 0.36); box-shadow: 0 14px 32px rgba(245, 158, 11, 0.12); }
@@ -947,11 +951,17 @@
         #progressBarsContainer {
             max-width: none;
         }
-        #progressBars,
-        #a2tdEmptyPlaceholder {
+        #telegramRelayBarsContainer {
             max-width: none;
         }
-        #progressBars {
+        #progressBars,
+        #a2tdEmptyPlaceholder,
+        #telegramRelayBars,
+        #telegramRelayEmptyPlaceholder {
+            max-width: none;
+        }
+        #progressBars,
+        #telegramRelayBars {
             display: grid;
             grid-template-columns: repeat(2, minmax(0, 1fr));
             gap: 12px;
@@ -991,8 +1001,109 @@
         .progress-bar-track {
             margin-bottom: 8px;
         }
+
+        .telegram-relay-settings-modal {
+            position: fixed;
+            inset: 0;
+            z-index: 1260;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 24px;
+            background: rgba(15, 23, 42, 0.28);
+            backdrop-filter: blur(0);
+            -webkit-backdrop-filter: blur(0);
+            opacity: 0;
+            visibility: hidden;
+            pointer-events: none;
+            transition: opacity 0.24s ease, visibility 0s linear 0.24s, backdrop-filter 0.24s ease, -webkit-backdrop-filter 0.24s ease;
+        }
+        .telegram-relay-settings-modal.show {
+            opacity: 1;
+            visibility: visible;
+            pointer-events: auto;
+            backdrop-filter: blur(10px);
+            -webkit-backdrop-filter: blur(10px);
+            transition: opacity 0.24s ease, visibility 0s, backdrop-filter 0.24s ease, -webkit-backdrop-filter 0.24s ease;
+        }
+        .telegram-relay-settings-dialog {
+            width: min(560px, 100%);
+            max-height: min(680px, calc(100vh - 48px));
+            display: flex;
+            flex-direction: column;
+            background: var(--bg-card);
+            border: 1px solid rgba(226, 232, 240, 0.95);
+            border-radius: 14px;
+            box-shadow: 0 24px 70px rgba(15, 23, 42, 0.22);
+            overflow: hidden;
+            opacity: 0.96;
+            transform: translateY(18px) scale(0.98);
+            transition: transform 0.28s cubic-bezier(0.16, 1, 0.3, 1), opacity 0.22s ease;
+        }
+        .telegram-relay-settings-modal.show .telegram-relay-settings-dialog {
+            opacity: 1;
+            transform: translateY(0) scale(1);
+        }
+        .telegram-relay-settings-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 12px;
+            padding: 16px 18px;
+            border-bottom: 1px solid var(--border);
+        }
+        .telegram-relay-settings-body {
+            display: grid;
+            gap: 16px;
+            padding: 18px;
+            overflow-y: auto;
+        }
+        .telegram-relay-settings-hint {
+            margin-top: 8px;
+            color: var(--text-secondary);
+            font-size: 12px;
+            line-height: 1.6;
+        }
+        .telegram-relay-settings-status {
+            min-height: 34px;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 9px 12px;
+            border: 1px solid rgba(226, 232, 240, 0.95);
+            border-radius: 12px;
+            background: #f8fafc;
+            color: var(--text-secondary);
+            font-size: 12px;
+            line-height: 1.4;
+            transition: all 0.2s ease;
+        }
+        .telegram-relay-settings-status.success {
+            background: rgba(16, 185, 129, 0.1);
+            border-color: rgba(16, 185, 129, 0.22);
+            color: #047857;
+        }
+        .telegram-relay-settings-status.error {
+            background: rgba(239, 68, 68, 0.1);
+            border-color: rgba(239, 68, 68, 0.22);
+            color: #b91c1c;
+        }
+        .telegram-relay-settings-status.saving,
+        .telegram-relay-settings-status.testing {
+            background: rgba(59, 130, 246, 0.1);
+            border-color: rgba(59, 130, 246, 0.2);
+            color: #1d4ed8;
+        }
+        .telegram-relay-settings-footer {
+            display: flex;
+            justify-content: flex-end;
+            gap: 10px;
+            padding: 14px 18px 18px;
+            border-top: 1px solid rgba(226, 232, 240, 0.8);
+        }
         @media (max-width: 1180px) {
-            #progressBars {
+            #progressBars,
+            #telegramRelayBars {
                 grid-template-columns: 1fr;
             }
             .share-actions {
@@ -1012,6 +1123,27 @@
             }
             .share-actions .btn {
                 width: 100%;
+            }
+        }
+        @media (max-width: 640px) {
+            .telegram-relay-settings-modal {
+                padding: 14px;
+                align-items: flex-end;
+            }
+            .telegram-relay-settings-dialog {
+                width: 100%;
+                max-height: calc(100vh - 28px);
+                border-radius: 14px;
+                transform: translateY(24px) scale(1);
+            }
+            .telegram-relay-settings-footer .btn {
+                width: 100%;
+            }
+        }
+        @media (prefers-reduced-motion: reduce) {
+            .telegram-relay-settings-modal,
+            .telegram-relay-settings-dialog {
+                transition: none;
             }
         }
 
@@ -1093,6 +1225,10 @@
             <div class="nav-item" data-page="aria2teldrive" data-tooltip="下载与上传监控" onclick="switchPage('aria2teldrive', { animated: true, source: 'user' })">
 
                 <i class="ph ph-hard-drives"></i>
+            </div>
+
+            <div class="nav-item" data-page="telegramrelay" data-tooltip="Telegram 回源监控" onclick="switchPage('telegramrelay', { animated: true, source: 'user' })">
+                <i class="ph ph-cloud-arrow-down"></i>
             </div>
 
             <!-- Tel2TelDrive -->
@@ -1398,6 +1534,40 @@
                                 <div id="progressBars"></div>
                             </div>
                             <div id="a2tdEmptyPlaceholder" class="log-empty" style="padding:40px;"><i class="ph ph-tray"></i> 队列空闲中</div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Telegram Relay Monitor -->
+                <div class="page" id="page-telegramrelay">
+                    <div class="card">
+                        <div class="card-header" style="flex-wrap: wrap; gap: 12px; align-items: center;">
+                            <div class="a2td-header-main">
+                                <h3><i class="ph ph-cloud-arrow-down"></i> Telegram 回源重传队列</h3>
+
+                                <div class="a2td-filter-group" id="t2tdRelayTaskFilters">
+                                    <button class="a2td-filter-btn active" data-relay-filter="all" onclick="setT2TDRelayFilter('all')">全部</button>
+                                    <button class="a2td-filter-btn" data-relay-filter="downloading" onclick="setT2TDRelayFilter('downloading')">下载中</button>
+                                    <button class="a2td-filter-btn" data-relay-filter="uploading" onclick="setT2TDRelayFilter('uploading')">上传中</button>
+                                    <button class="a2td-filter-btn" data-relay-filter="cleaning" onclick="setT2TDRelayFilter('cleaning')">清理中</button>
+                                    <button class="a2td-filter-btn" data-relay-filter="completed" onclick="setT2TDRelayFilter('completed')">已完成</button>
+                                    <button class="a2td-filter-btn" data-relay-filter="failed" onclick="setT2TDRelayFilter('failed')">失败</button>
+                                    <button class="a2td-filter-btn" data-relay-filter="cancelled" onclick="setT2TDRelayFilter('cancelled')">已取消</button>
+                                    <button class="a2td-filter-btn" data-relay-filter="pending" onclick="setT2TDRelayFilter('pending')">等待中</button>
+                                </div>
+                            </div>
+                            <div class="page-actions" style="display:flex; flex-wrap: wrap; gap:8px;">
+                                <button class="btn btn-ghost btn-sm btn-action btn-action-neutral" onclick="openTelegramRelaySettingsModal()"><i class="ph ph-gear-six"></i> 设置</button>
+                                <button class="btn btn-ghost btn-sm btn-action btn-action-danger" data-relay-bulk-action="clear-failed" onclick="t2tdRelayBulkAction('clear-failed')"><i class="ph ph-warning-circle"></i> 清理失败</button>
+                                <button class="btn btn-ghost btn-sm btn-action btn-action-neutral" data-relay-bulk-action="clear-terminal" onclick="t2tdRelayBulkAction('clear-terminal')"><i class="ph ph-check-circle"></i> 清理已完成/已取消</button>
+                                <button class="btn btn-ghost btn-sm btn-action btn-action-neutral" onclick="loadT2TDRelayJobs(true)"><i class="ph ph-arrows-clockwise"></i> 刷新</button>
+                            </div>
+                        </div>
+                        <div class="card-body" style="padding:16px">
+                            <div id="telegramRelayBarsContainer" style="display:none;">
+                                <div id="telegramRelayBars"></div>
+                            </div>
+                            <div id="telegramRelayEmptyPlaceholder" class="log-empty" style="padding:40px;"><i class="ph ph-tray"></i> 队列空闲中</div>
                         </div>
                     </div>
                 </div>
@@ -1717,6 +1887,7 @@
                                     <div class="form-group"><label>API Endpoint</label><input class="form-input" type="text" id="cfgTeldriveHost" placeholder="http://localhost:8080"></div>
                                     <div class="form-group"><label>应用 Token</label><input class="form-input" type="password" id="cfgTeldriveToken" placeholder="获取于 Cookie"></div>
                                     <div class="form-group"><label>同步频道 ID</label><input class="form-input" type="number" id="cfgTeldriveChannel" placeholder="0"></div>
+                                    <div class="form-group"><label>默认上传目录</label><input class="form-input" type="text" id="cfgTeldriveTargetPath" placeholder="/"></div>
                                     <div class="form-group"><label>并发上传策略</label><input class="form-input" type="number" id="cfgTeldriveConcurrency" placeholder="4"></div>
                                     <div class="form-group">
                                         <label>上传分块大小</label>
@@ -1777,6 +1948,21 @@
                                         <div class="toggle-switch"><input type="checkbox" id="cfgTelegramSyncEnabled" checked><span class="toggle-slider"></span></div>
                                     </label>
                                 </div>
+                                <div style="margin-top:20px; padding-top:20px; border-top:1px solid var(--border)">
+                                    <label class="toggle-row" style="justify-content:space-between">
+                                        启用 Telegram 回源重传
+                                        <div class="toggle-switch"><input type="checkbox" id="cfgTelegramRelayEnabled"><span class="toggle-slider"></span></div>
+                                    </label>
+                                    <div class="field-grid" style="margin-top:14px;">
+                                        <div class="form-group"><label>SOCKS5 主机</label><input class="form-input" type="text" id="cfgTelegramRelayProxyHost" placeholder="127.0.0.1"></div>
+                                        <div class="form-group"><label>SOCKS5 端口</label><input class="form-input" type="number" id="cfgTelegramRelayProxyPort" min="1" max="65535" placeholder="1080"></div>
+                                        <div class="form-group"><label>SOCKS5 用户名</label><input class="form-input" type="text" id="cfgTelegramRelayProxyUsername" placeholder="可留空"></div>
+                                        <div class="form-group"><label>SOCKS5 密码</label><input class="form-input" type="password" id="cfgTelegramRelayProxyPassword" placeholder="可留空"></div>
+                                        <div class="form-group"><label>本地下载目录</label><input class="form-input" type="text" id="cfgTelegramRelayDownloadDir" placeholder="./telegram_relay"></div>
+                                        <div class="form-group"><label>回源并发数</label><input class="form-input" type="number" id="cfgTelegramRelayConcurrency" min="1" max="16" placeholder="1"></div>
+                                        <div class="form-group"><label>失败重试次数</label><input class="form-input" type="number" id="cfgTelegramRelayMaxRetries" min="1" max="20" placeholder="3"></div>
+                                    </div>
+                                </div>
                             </div>
                         </div>
 
@@ -1821,7 +2007,34 @@
         </div>
     </div>
 
-    <script src="/static/app.js?v=20260621a"></script>
+    <div id="telegramRelaySettingsModal" class="telegram-relay-settings-modal" aria-hidden="true" onclick="closeTelegramRelaySettingsModal(event)">
+        <div class="telegram-relay-settings-dialog" role="dialog" aria-modal="true" aria-labelledby="telegramRelaySettingsTitle" onclick="event.stopPropagation()">
+            <div class="telegram-relay-settings-header">
+                <h3 class="picker-panel-title" id="telegramRelaySettingsTitle"><i class="ph ph-cloud-arrow-down"></i> Telegram 回源设置</h3>
+                <button class="btn btn-ghost btn-sm" type="button" aria-label="关闭" onclick="closeTelegramRelaySettingsModal()"><i class="ph ph-x"></i></button>
+            </div>
+            <div class="telegram-relay-settings-body">
+                <label class="toggle-row" style="justify-content:space-between">
+                    启用 Telegram 回源重传
+                    <div class="toggle-switch">
+                        <input type="checkbox" id="telegramRelaySettingEnabled">
+                        <span class="toggle-slider"></span>
+                    </div>
+                </label>
+                <div class="form-group">
+                    <label for="telegramRelaySocksUrl">SOCKS5 链接</label>
+                    <input class="form-input" type="text" id="telegramRelaySocksUrl" placeholder="socks5://user:password@127.0.0.1:1080" autocomplete="off" spellcheck="false">
+                    <div class="telegram-relay-settings-hint">支持 <code>socks5://host:port</code> 或 <code>socks5://user:password@host:port</code>。输入后自动保存，不需要手动提交。</div>
+                </div>
+                <div class="telegram-relay-settings-status" id="telegramRelaySettingsStatus"><i class="ph ph-info"></i> 输入后会自动保存。</div>
+            </div>
+            <div class="telegram-relay-settings-footer">
+                <button class="btn btn-primary btn-sm" type="button" id="telegramRelayTestProxyBtn" onclick="testTelegramRelayProxy()"><i class="ph ph-plugs-connected"></i> 检测可用性</button>
+            </div>
+        </div>
+    </div>
+
+    <script src="/static/app.js?v=20260623a"></script>
 
 
 

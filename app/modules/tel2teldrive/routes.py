@@ -256,6 +256,43 @@ async def clear_deleted_files():
     return {"success": True, "count": cleared}
 
 
+@router.get("/relay-jobs")
+async def get_relay_jobs(limit: int = 200):
+    from app import database as db
+
+    await db.init_db()
+    normalized_limit = max(1, min(int(limit or 200), 500))
+    jobs = await db.get_all_telegram_relay_jobs(limit=normalized_limit)
+    return {"items": jobs, "count": len(jobs)}
+
+
+@router.post("/relay-jobs/{job_id}/retry")
+async def retry_relay_job(job_id: str):
+    service, _, _, _ = _get_deps()
+    result = await service.relay_manager.retry_job(job_id)
+    if not result.get("success"):
+        raise HTTPException(status_code=400, detail=result.get("message") or "retry failed")
+    return result
+
+
+@router.post("/relay-jobs/{job_id}/cancel")
+async def cancel_relay_job(job_id: str):
+    service, _, _, _ = _get_deps()
+    result = await service.relay_manager.cancel_job(job_id)
+    if not result.get("success"):
+        raise HTTPException(status_code=400, detail=result.get("message") or "cancel failed")
+    return result
+
+
+@router.delete("/relay-jobs/{job_id}")
+async def delete_relay_job(job_id: str):
+    service, _, _, _ = _get_deps()
+    result = await service.relay_manager.delete_job(job_id)
+    if not result.get("success"):
+        raise HTTPException(status_code=400, detail=result.get("message") or "delete failed")
+    return result
+
+
 @router.get("/folder-tree")
 async def get_folder_tree():
     _, _, config_store, _ = _get_deps()

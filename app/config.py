@@ -85,6 +85,16 @@ DEFAULTS: dict[str, Any] = {
         "sync_interval": 10, "sync_enabled": True,
         "max_scan_messages": 10000, "confirm_cycles": 3,
     },
+    "telegram_relay": {
+        "enabled": False,
+        "proxy_host": "",
+        "proxy_port": 1080,
+        "proxy_username": "",
+        "proxy_password": "",
+        "download_dir": "./telegram_relay",
+        "concurrency": 1,
+        "max_retries": 3,
+    },
     "telegram_db": {
         "host": "", "port": 5432, "user": "", "password": "", "name": "postgres",
     },
@@ -252,6 +262,7 @@ def _normalize_config(merged: dict, raw: dict | None = None) -> dict:
     aria2_cfg = merged.setdefault("aria2", {})
     upload_cfg = merged.setdefault("upload", {})
     log_cfg = merged.setdefault("log", {})
+    telegram_relay_cfg = merged.setdefault("telegram_relay", {})
 
     raw_aria2 = raw.get("aria2") if isinstance(raw.get("aria2"), dict) else {}
     raw_pikpak = raw.get("pikpak") if isinstance(raw.get("pikpak"), dict) else {}
@@ -308,6 +319,15 @@ def _normalize_config(merged: dict, raw: dict | None = None) -> dict:
     upload_cfg["serial_transfer_mode"] = bool(upload_cfg.get("serial_transfer_mode", False))
     upload_cfg["parallel_chunk_upload"] = bool(upload_cfg.get("parallel_chunk_upload", False))
     upload_cfg["min_throughput_kbps"] = max(16, int(upload_cfg.get("min_throughput_kbps") or 100))
+
+    telegram_relay_cfg["enabled"] = bool(telegram_relay_cfg.get("enabled", False))
+    telegram_relay_cfg["proxy_host"] = str(telegram_relay_cfg.get("proxy_host") or "").strip()
+    telegram_relay_cfg["proxy_port"] = max(1, int(telegram_relay_cfg.get("proxy_port") or 1080))
+    telegram_relay_cfg["proxy_username"] = str(telegram_relay_cfg.get("proxy_username") or "").strip()
+    telegram_relay_cfg["proxy_password"] = str(telegram_relay_cfg.get("proxy_password") or "")
+    telegram_relay_cfg["download_dir"] = str(telegram_relay_cfg.get("download_dir") or "./telegram_relay").strip() or "./telegram_relay"
+    telegram_relay_cfg["concurrency"] = max(1, int(telegram_relay_cfg.get("concurrency") or 1))
+    telegram_relay_cfg["max_retries"] = max(1, int(telegram_relay_cfg.get("max_retries") or 3))
 
     log_cfg["buffer_size"] = max(50, int(log_cfg.get("buffer_size") or 400))
     log_cfg["file"] = str(log_cfg.get("file") or "runtime.log").strip() or "runtime.log"

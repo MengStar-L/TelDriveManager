@@ -85,6 +85,16 @@ max_scan_messages = 10000
 confirm_cycles = 3
 
 # ─── TelDrive 数据库（Telegram同步可选） ───
+[telegram_relay]
+enabled = false
+proxy_host = ""
+proxy_port = 1080
+proxy_username = ""
+proxy_password = ""
+download_dir = "./telegram_relay"
+concurrency = 1
+max_retries = 3
+
 [telegram_db]
 host = ""
 port = 5432

@@ -1,5 +1,8 @@
 """统一设置路由 — 管理所有模块的配置、aria2 安装与连接测试"""
 
+import asyncio
+import socket
+import time
 import uuid
 from pathlib import Path
 
@@ -233,6 +236,60 @@ async def test_telegram(payload: dict = Body(None)):
     if state.get("phase") in ("awaiting_qr", "awaiting_password"):
         return {"success": True, "message": "正常：等待扫码验证"}
     return {"success": False, "message": f"连接异常: {state.get('last_error', '服务未激活')}"}
+
+
+@router.post("/test/telegram-relay-proxy")
+async def test_telegram_relay_proxy(payload: dict = Body(None)):
+    cfg = dict(load_config(force_reload=True).get("telegram_relay", {}))
+    if payload:
+        cfg.update(payload)
+
+    proxy_host = str(cfg.get("proxy_host") or "").strip()
+    proxy_username = str(cfg.get("proxy_username") or "").strip() or None
+    proxy_password = str(cfg.get("proxy_password") or "") or None
+    try:
+        proxy_port = int(cfg.get("proxy_port") or 1080)
+    except (TypeError, ValueError):
+        proxy_port = 0
+
+    if not proxy_host:
+        return {"success": False, "message": "请先填写 SOCKS5 链接"}
+    if proxy_port < 1 or proxy_port > 65535:
+        return {"success": False, "message": "SOCKS5 端口无效"}
+
+    def _probe() -> int:
+        try:
+            import socks
+        except ModuleNotFoundError as exc:
+            raise RuntimeError("PySocks 未安装，无法检测 SOCKS5 链接") from exc
+
+        sock = socks.socksocket(socket.AF_INET, socket.SOCK_STREAM)
+        started_at = time.monotonic()
+        try:
+            sock.set_proxy(
+                socks.SOCKS5,
+                proxy_host,
+                proxy_port,
+                rdns=True,
+                username=proxy_username,
+                password=proxy_password,
+            )
+            sock.settimeout(8)
+            sock.connect(("149.154.167.50", 443))
+            return int((time.monotonic() - started_at) * 1000)
+        finally:
+            try:
+                sock.close()
+            except Exception:
+                pass
+
+    try:
+        latency_ms = await asyncio.wait_for(asyncio.to_thread(_probe), timeout=10)
+        return {"success": True, "message": f"SOCKS5 可用，Telegram TCP 连接成功（{latency_ms} ms）"}
+    except asyncio.TimeoutError:
+        return {"success": False, "message": "SOCKS5 检测超时，请检查中转端口和防火墙"}
+    except Exception as e:
+        return {"success": False, "message": f"SOCKS5 检测失败: {str(e)}"}
 
 
 @router.post("/test/database")

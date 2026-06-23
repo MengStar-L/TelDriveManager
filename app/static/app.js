@@ -801,6 +801,7 @@ function runPageSideEffects(name) {
         loadA2TDTasks();
         syncMonitorSerialToggle();
     }
+    if (name === 'telegramrelay') loadT2TDRelayJobs(true);
     if (name === 'magnet' || name === 'share' || name === 'rss') syncRemotePushToggles();
     if (name === 'tel2teldrive') loadT2TDState();
     if (name === 'teldrivefolders') loadTelDriveFolderTree();
@@ -3109,6 +3110,9 @@ async function clearPikpakAccountErrors() {
 
 function collectSettingsConfig() {
     const currentAria2 = window.currentConfig?.aria2 || {};
+    const currentTeldrive = window.currentConfig?.teldrive || {};
+    const currentUpload = window.currentConfig?.upload || {};
+    const currentRelay = window.currentConfig?.telegram_relay || {};
     const pikpakMode = normalizePikpakLoginMode(document.getElementById('cfgPikpakLoginMode')?.value || 'password');
     const pikpakUsername = document.getElementById('cfgPikpakUsername').value.trim();
     const pikpakPassword = document.getElementById('cfgPikpakPassword').value;
@@ -3154,14 +3158,16 @@ function collectSettingsConfig() {
             api_host: document.getElementById('cfgTeldriveHost').value,
             access_token: document.getElementById('cfgTeldriveToken').value,
             channel_id: parseInt(document.getElementById('cfgTeldriveChannel').value, 10) || 0,
+            target_path: document.getElementById('cfgTeldriveTargetPath')?.value.trim() || currentTeldrive.target_path || '/',
             upload_concurrency: parseInt(document.getElementById('cfgTeldriveConcurrency').value, 10) || 4,
-            chunk_size: document.getElementById('cfgTeldriveChunkSize')?.value || currentConfig?.teldrive?.chunk_size || '250M'
+            chunk_size: document.getElementById('cfgTeldriveChunkSize')?.value || currentTeldrive.chunk_size || '250M'
         },
         upload: {
             auto_delete: document.getElementById('cfgUploadAutoDelete').checked,
             serial_transfer_mode: !!document.getElementById('cfgUploadSerialTransferMode')?.checked,
-            parallel_chunk_upload: !!(window.currentConfig?.upload?.parallel_chunk_upload),
-            max_retries: 3
+            parallel_chunk_upload: !!(currentUpload.parallel_chunk_upload),
+            max_retries: Math.max(1, parseInt(currentUpload.max_retries, 10) || 3),
+            min_throughput_kbps: Math.max(16, parseInt(currentUpload.min_throughput_kbps, 10) || 100)
         },
         telegram: {
             api_id: parseInt(document.getElementById('cfgTelegramApiId').value, 10) || 0,
@@ -3169,6 +3175,16 @@ function collectSettingsConfig() {
             channel_id: parseInt(document.getElementById('cfgTelegramChannelId').value, 10) || 0,
             sync_interval: parseInt(document.getElementById('cfgTelegramSyncInterval').value, 10) || 10,
             sync_enabled: document.getElementById('cfgTelegramSyncEnabled').checked
+        },
+        telegram_relay: {
+            enabled: !!document.getElementById('cfgTelegramRelayEnabled')?.checked,
+            proxy_host: document.getElementById('cfgTelegramRelayProxyHost')?.value.trim() || '',
+            proxy_port: Math.max(1, parseInt(document.getElementById('cfgTelegramRelayProxyPort')?.value, 10) || currentRelay.proxy_port || 1080),
+            proxy_username: document.getElementById('cfgTelegramRelayProxyUsername')?.value.trim() || '',
+            proxy_password: document.getElementById('cfgTelegramRelayProxyPassword')?.value || '',
+            download_dir: document.getElementById('cfgTelegramRelayDownloadDir')?.value.trim() || currentRelay.download_dir || './telegram_relay',
+            concurrency: Math.max(1, parseInt(document.getElementById('cfgTelegramRelayConcurrency')?.value, 10) || currentRelay.concurrency || 1),
+            max_retries: Math.max(1, parseInt(document.getElementById('cfgTelegramRelayMaxRetries')?.value, 10) || currentRelay.max_retries || 3)
         },
         telegram_db: {
             host: document.getElementById('cfgDbHost').value,
@@ -3227,6 +3243,7 @@ async function loadConfig() {
         document.getElementById('cfgTeldriveHost').value = cfg.teldrive?.api_host || '';
         document.getElementById('cfgTeldriveToken').value = cfg.teldrive?.access_token || '';
         document.getElementById('cfgTeldriveChannel').value = cfg.teldrive?.channel_id || 0;
+        document.getElementById('cfgTeldriveTargetPath').value = cfg.teldrive?.target_path || '/';
         document.getElementById('cfgTeldriveConcurrency').value = cfg.teldrive?.upload_concurrency || 4;
         document.getElementById('cfgTeldriveChunkSize').value = cfg.teldrive?.chunk_size || '250M';
         document.getElementById('cfgTeldriveChunkSize').closest('.custom-select')?._sync?.();
@@ -3243,6 +3260,17 @@ async function loadConfig() {
         document.getElementById('cfgTelegramChannelId').value = cfg.telegram?.channel_id || 0;
         document.getElementById('cfgTelegramSyncInterval').value = cfg.telegram?.sync_interval || 10;
         document.getElementById('cfgTelegramSyncEnabled').checked = cfg.telegram?.sync_enabled !== false;
+        document.getElementById('cfgTelegramRelayEnabled').checked = !!cfg.telegram_relay?.enabled;
+        document.getElementById('cfgTelegramRelayProxyHost').value = cfg.telegram_relay?.proxy_host || '';
+        document.getElementById('cfgTelegramRelayProxyPort').value = cfg.telegram_relay?.proxy_port || 1080;
+        document.getElementById('cfgTelegramRelayProxyUsername').value = cfg.telegram_relay?.proxy_username || '';
+        document.getElementById('cfgTelegramRelayProxyPassword').value = cfg.telegram_relay?.proxy_password || '';
+        document.getElementById('cfgTelegramRelayDownloadDir').value = cfg.telegram_relay?.download_dir || './telegram_relay';
+        document.getElementById('cfgTelegramRelayConcurrency').value = cfg.telegram_relay?.concurrency || 1;
+        document.getElementById('cfgTelegramRelayMaxRetries').value = cfg.telegram_relay?.max_retries || 3;
+        if (document.getElementById('telegramRelaySettingsModal')?.classList.contains('show')) {
+            fillTelegramRelaySettingsForm(cfg.telegram_relay || {});
+        }
 
         document.getElementById('cfgDbHost').value = cfg.telegram_db?.host || '';
         document.getElementById('cfgDbPort').value = cfg.telegram_db?.port || 5432;
@@ -3504,11 +3532,14 @@ window.onload = async () => {
     checkServicesStatus();
     setInterval(checkServicesStatus, 30000);
     setInterval(() => refreshA2TDMonitorIfNeeded(), 4000);
+    setInterval(() => refreshT2TDRelayMonitorIfNeeded(), 4000);
     document.addEventListener('visibilitychange', () => {
         if (!document.hidden) refreshA2TDMonitorIfNeeded(true);
+        if (!document.hidden) refreshT2TDRelayMonitorIfNeeded(true);
     });
     initAutoSave();
     initCustomSelects();
+    initTelegramRelaySettingsModal();
     document.getElementById('magnetInput')?.addEventListener('input', syncUnifiedSharePassCodeVisibility);
     syncUnifiedSharePassCodeVisibility();
     // 监听 Tel2TelDrive SSE 事件
@@ -3523,6 +3554,10 @@ window.onload = async () => {
                 if (t2tdPanelMode === 'deleted' && isT2TDAutoDeleteLog(data.payload || data)) {
                     loadT2TDDeletedFiles(true);
                 }
+            } else if(data.type === "relay_job_update") {
+                upsertT2TDRelayJob(data.payload || data);
+            } else if(data.type === "relay_job_deleted") {
+                removeT2TDRelayJob((data.payload || data).job_id);
             }
         }catch(e){}
     };
@@ -3536,7 +3571,25 @@ let t2tdRuntimeLogs = [];
 let t2tdDeletedFiles = [];
 let t2tdDeletedFilesLoaded = false;
 let t2tdDeletedFilesRefreshPending = false;
+let t2tdRelayJobs = [];
+let t2tdRelayJobsLoaded = false;
+let t2tdRelayJobsRefreshPending = false;
+let t2tdRelayFilter = 'all';
+let telegramRelaySettingsSaveTimer = null;
+let telegramRelaySettingsInitDone = false;
 const T2TD_RUNTIME_LOG_LIMIT = 400;
+const T2TD_RELAY_ACTIVE_STATUSES = new Set(['pending', 'downloading', 'uploading', 'cleaning']);
+const T2TD_RELAY_TERMINAL_STATUSES = new Set(['completed', 'failed', 'cancelled']);
+const T2TD_RELAY_FILTER_LABELS = {
+    all: '全部',
+    downloading: '下载中',
+    uploading: '上传中',
+    cleaning: '清理中',
+    completed: '已完成',
+    failed: '失败',
+    cancelled: '已取消',
+    pending: '等待中',
+};
 
 let teldriveFolderTreeSnapshot = null;
 let teldriveFolderTreeLoading = false;
@@ -3560,14 +3613,17 @@ function setT2TDPlaceholder(message, icon = 'ph-ghost') {
 function syncT2TDPanelToggleButton() {
     const button = document.getElementById('t2tdViewToggleBtn');
     const clearButton = document.getElementById('t2tdClearDeletedBtn');
-    if (!button) return;
     if (t2tdPanelMode === 'deleted') {
-        button.innerHTML = '<i class="ph ph-terminal-window"></i> 返回运行日志';
-        button.setAttribute('aria-pressed', 'true');
+        if (button) {
+            button.innerHTML = '<i class="ph ph-terminal-window"></i> 返回运行日志';
+            button.setAttribute('aria-pressed', 'true');
+        }
         if (clearButton) clearButton.style.display = 'inline-flex';
     } else {
-        button.innerHTML = '<i class="ph ph-files"></i> 查看被删除文件';
-        button.setAttribute('aria-pressed', 'false');
+        if (button) {
+            button.innerHTML = '<i class="ph ph-files"></i> 查看被删除文件';
+            button.setAttribute('aria-pressed', 'false');
+        }
         if (clearButton) clearButton.style.display = 'none';
     }
 }
@@ -3686,6 +3742,676 @@ async function loadT2TDDeletedFiles(force = false) {
         if (t2tdPanelMode === 'deleted') setT2TDPlaceholder(e.message || '读取删除记录失败', 'ph-warning');
     } finally {
         t2tdDeletedFilesRefreshPending = false;
+    }
+}
+
+function getTelegramRelaySettingsEls() {
+    return {
+        modal: document.getElementById('telegramRelaySettingsModal'),
+        enabled: document.getElementById('telegramRelaySettingEnabled'),
+        url: document.getElementById('telegramRelaySocksUrl'),
+        status: document.getElementById('telegramRelaySettingsStatus'),
+        testBtn: document.getElementById('telegramRelayTestProxyBtn'),
+    };
+}
+
+function safeDecodeUrlPart(value) {
+    try {
+        return decodeURIComponent(String(value || ''));
+    } catch (e) {
+        return String(value || '');
+    }
+}
+
+function buildTelegramRelaySocksUrl(relay = {}) {
+    const host = String(relay.proxy_host || '').trim();
+    if (!host) return '';
+    const port = Math.max(1, parseInt(relay.proxy_port, 10) || 1080);
+    const username = String(relay.proxy_username || '');
+    const password = String(relay.proxy_password || '');
+    const hasAuth = username || password;
+    const auth = hasAuth
+        ? `${encodeURIComponent(username)}${password ? `:${encodeURIComponent(password)}` : ''}@`
+        : '';
+    const displayHost = host.includes(':') && !host.startsWith('[') ? `[${host}]` : host;
+    return `socks5://${auth}${displayHost}:${port}`;
+}
+
+function parseTelegramRelaySocksUrl(rawValue) {
+    const raw = String(rawValue || '').trim();
+    if (!raw) {
+        return {
+            proxy_host: '',
+            proxy_port: 1080,
+            proxy_username: '',
+            proxy_password: '',
+        };
+    }
+
+    const normalized = /^[a-z][a-z0-9+.-]*:\/\//i.test(raw) ? raw : `socks5://${raw}`;
+    let url;
+    try {
+        url = new URL(normalized);
+    } catch (e) {
+        throw new Error('SOCKS 链接格式无效');
+    }
+
+    const protocol = String(url.protocol || '').replace(':', '').toLowerCase();
+    if (!['socks', 'socks5', 'socks5h'].includes(protocol)) {
+        throw new Error('仅支持 socks5:// 链接');
+    }
+
+    const host = String(url.hostname || '').replace(/^\[|\]$/g, '').trim();
+    const port = parseInt(url.port, 10);
+    if (!host) throw new Error('SOCKS 链接缺少主机地址');
+    if (!Number.isInteger(port) || port < 1 || port > 65535) {
+        throw new Error('SOCKS 链接缺少有效端口');
+    }
+
+    return {
+        proxy_host: host,
+        proxy_port: port,
+        proxy_username: safeDecodeUrlPart(url.username),
+        proxy_password: safeDecodeUrlPart(url.password),
+    };
+}
+
+function setTelegramRelaySettingsStatus(message, type = 'info') {
+    const { status } = getTelegramRelaySettingsEls();
+    if (!status) return;
+    const icons = {
+        success: 'ph-check-circle',
+        error: 'ph-warning-circle',
+        saving: 'ph-arrows-clockwise',
+        testing: 'ph-plugs-connected',
+        info: 'ph-info',
+    };
+    status.className = `telegram-relay-settings-status ${type === 'info' ? '' : type}`.trim();
+    status.innerHTML = `<i class="ph ${icons[type] || icons.info}"></i> ${escapeA2TDHtml(message || '')}`;
+}
+
+function applyTelegramRelayConfigToSettingsInputs(relay = {}) {
+    const mappings = [
+        ['cfgTelegramRelayProxyHost', relay.proxy_host || ''],
+        ['cfgTelegramRelayProxyPort', relay.proxy_port || 1080],
+        ['cfgTelegramRelayProxyUsername', relay.proxy_username || ''],
+        ['cfgTelegramRelayProxyPassword', relay.proxy_password || ''],
+        ['cfgTelegramRelayDownloadDir', relay.download_dir || './telegram_relay'],
+        ['cfgTelegramRelayConcurrency', relay.concurrency || 1],
+        ['cfgTelegramRelayMaxRetries', relay.max_retries || 3],
+    ];
+    const enabled = document.getElementById('cfgTelegramRelayEnabled');
+    if (enabled) enabled.checked = !!relay.enabled;
+    mappings.forEach(([id, value]) => {
+        const el = document.getElementById(id);
+        if (el) el.value = value;
+    });
+}
+
+function fillTelegramRelaySettingsForm(relay = {}) {
+    const { enabled, url } = getTelegramRelaySettingsEls();
+    if (enabled) enabled.checked = !!relay.enabled;
+    if (url) url.value = buildTelegramRelaySocksUrl(relay);
+}
+
+async function loadTelegramRelaySettingsConfig() {
+    try {
+        const resp = await fetch('/api/settings', { cache: 'no-store' });
+        const cfg = await readJsonSafe(resp);
+        if (!resp.ok) throw new Error(cfg.detail || cfg.message || '读取回源设置失败');
+        window.currentConfig = cfg;
+        fillTelegramRelaySettingsForm(cfg.telegram_relay || {});
+        setTelegramRelaySettingsStatus('输入后会自动保存。');
+        return cfg.telegram_relay || {};
+    } catch (e) {
+        setTelegramRelaySettingsStatus(e.message || '读取回源设置失败', 'error');
+        return null;
+    }
+}
+
+function collectTelegramRelaySettingsPayload() {
+    const { enabled, url } = getTelegramRelaySettingsEls();
+    const currentRelay = window.currentConfig?.telegram_relay || {};
+    const parsed = parseTelegramRelaySocksUrl(url?.value || '');
+    const payload = {
+        ...currentRelay,
+        enabled: !!enabled?.checked,
+        ...parsed,
+    };
+    if (payload.enabled && !payload.proxy_host) {
+        throw new Error('启用回源时必须填写 SOCKS5 链接');
+    }
+    return payload;
+}
+
+async function saveTelegramRelaySocksSettings(triggerInput = null, options = {}) {
+    if (telegramRelaySettingsSaveTimer) {
+        clearTimeout(telegramRelaySettingsSaveTimer);
+        telegramRelaySettingsSaveTimer = null;
+    }
+
+    let relayPayload;
+    try {
+        relayPayload = collectTelegramRelaySettingsPayload();
+    } catch (e) {
+        setTelegramRelaySettingsStatus(e.message || 'SOCKS 设置无效，未保存', 'error');
+        return null;
+    }
+
+    try {
+        setTelegramRelaySettingsStatus('正在自动保存 SOCKS 设置...', 'saving');
+        const resp = await fetch('/api/settings', {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ telegram_relay: relayPayload }),
+        });
+        const data = await readJsonSafe(resp);
+        if (!resp.ok || data.success === false) {
+            throw new Error(data.detail || data.message || '保存 SOCKS 设置失败');
+        }
+
+        window.currentConfig = {
+            ...(window.currentConfig || {}),
+            telegram_relay: {
+                ...(window.currentConfig?.telegram_relay || {}),
+                ...relayPayload,
+            },
+        };
+        applyTelegramRelayConfigToSettingsInputs(window.currentConfig.telegram_relay || {});
+        if (triggerInput) showFieldCheck(triggerInput);
+        if (!options.quiet) setTelegramRelaySettingsStatus('SOCKS 设置已自动保存。', 'success');
+        return window.currentConfig.telegram_relay;
+    } catch (e) {
+        setTelegramRelaySettingsStatus(e.message || '保存 SOCKS 设置失败', 'error');
+        return null;
+    }
+}
+
+function scheduleTelegramRelaySettingsSave(triggerInput) {
+    if (telegramRelaySettingsSaveTimer) clearTimeout(telegramRelaySettingsSaveTimer);
+    setTelegramRelaySettingsStatus('等待自动保存...', 'saving');
+    telegramRelaySettingsSaveTimer = setTimeout(() => {
+        saveTelegramRelaySocksSettings(triggerInput);
+    }, 650);
+}
+
+async function openTelegramRelaySettingsModal() {
+    initTelegramRelaySettingsModal();
+    const { modal } = getTelegramRelaySettingsEls();
+    if (!modal) return;
+    fillTelegramRelaySettingsForm(window.currentConfig?.telegram_relay || {});
+    modal.setAttribute('aria-hidden', 'false');
+    modal.classList.add('show');
+    await loadTelegramRelaySettingsConfig();
+    setTimeout(() => document.getElementById('telegramRelaySocksUrl')?.focus(), 120);
+}
+
+function closeTelegramRelaySettingsModal(event) {
+    if (event && event.target && event.currentTarget && event.target !== event.currentTarget) return;
+    const { modal } = getTelegramRelaySettingsEls();
+    if (!modal) return;
+    modal.classList.remove('show');
+    modal.setAttribute('aria-hidden', 'true');
+}
+
+function initTelegramRelaySettingsModal() {
+    if (telegramRelaySettingsInitDone) return;
+    telegramRelaySettingsInitDone = true;
+    const { enabled, url } = getTelegramRelaySettingsEls();
+    enabled?.addEventListener('change', () => scheduleTelegramRelaySettingsSave(enabled));
+    url?.addEventListener('input', () => scheduleTelegramRelaySettingsSave(url));
+    document.addEventListener('keydown', (event) => {
+        if (event.key === 'Escape') {
+            const { modal } = getTelegramRelaySettingsEls();
+            if (modal?.classList.contains('show')) closeTelegramRelaySettingsModal();
+        }
+    });
+}
+
+async function testTelegramRelayProxy() {
+    const { testBtn } = getTelegramRelaySettingsEls();
+    const oldHtml = testBtn ? testBtn.innerHTML : '';
+    const relayPayload = await saveTelegramRelaySocksSettings(null, { quiet: true });
+    if (!relayPayload) return;
+
+    try {
+        if (testBtn) {
+            testBtn.disabled = true;
+            testBtn.innerHTML = '<span class="spinner"></span> 检测中';
+        }
+        setTelegramRelaySettingsStatus('正在检测 SOCKS 到 Telegram 的连通性...', 'testing');
+        const resp = await fetch('/api/settings/test/telegram-relay-proxy', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(relayPayload),
+        });
+        const data = await readJsonSafe(resp);
+        if (!resp.ok || data.success === false) {
+            throw new Error(data.detail || data.message || 'SOCKS 连通性检测失败');
+        }
+        setTelegramRelaySettingsStatus(data.message || 'SOCKS 可用。', 'success');
+        if (typeof showA2TDToast === 'function') showA2TDToast(data.message || 'SOCKS 可用', 'success');
+    } catch (e) {
+        setTelegramRelaySettingsStatus(e.message || 'SOCKS 连通性检测失败', 'error');
+        if (typeof showA2TDToast === 'function') showA2TDToast(e.message || 'SOCKS 连通性检测失败', 'error');
+    } finally {
+        if (testBtn) {
+            testBtn.disabled = false;
+            testBtn.innerHTML = oldHtml || '<i class="ph ph-plugs-connected"></i> 检测可用性';
+        }
+    }
+}
+
+function normalizeT2TDRelayJob(item = {}) {
+    const status = String(item.status || 'pending').trim() || 'pending';
+    return {
+        job_id: String(item.job_id || '').trim(),
+        source_channel_id: Number(item.source_channel_id || 0) || 0,
+        source_message_id: Number(item.source_message_id || 0) || 0,
+        file_name: String(item.file_name || '未命名文件').trim() || '未命名文件',
+        file_size: Number(item.file_size || 0) || 0,
+        mime_type: String(item.mime_type || '').trim(),
+        status,
+        download_progress: Math.max(0, Math.min(100, Number(item.download_progress || 0) || 0)),
+        upload_progress: Math.max(0, Math.min(100, Number(item.upload_progress || 0) || 0)),
+        local_path: String(item.local_path || '').trim(),
+        teldrive_file_id: String(item.teldrive_file_id || '').trim(),
+        upload_id: String(item.upload_id || '').trim(),
+        error: String(item.error || '').trim(),
+        retry_count: Number(item.retry_count || 0) || 0,
+        created_at: item.created_at || null,
+        updated_at: item.updated_at || null,
+        completed_at: item.completed_at || null,
+    };
+}
+
+function getT2TDRelayStatusView(status) {
+    const map = {
+        pending: { label: '等待中', icon: 'ph-hourglass-medium', color: '#94a3b8' },
+        downloading: { label: '下载中', icon: 'ph-cloud-arrow-down', color: '#60a5fa' },
+        uploading: { label: '上传中', icon: 'ph-cloud-arrow-up', color: '#a78bfa' },
+        cleaning: { label: '清理中', icon: 'ph-broom', color: '#fbbf24' },
+        completed: { label: '已完成', icon: 'ph-check-circle', color: '#34d399' },
+        failed: { label: '失败', icon: 'ph-warning-circle', color: '#f87171' },
+        cancelled: { label: '已取消', icon: 'ph-pause-circle', color: '#f59e0b' },
+    };
+    return map[String(status || '').trim()] || map.pending;
+}
+
+function sortT2TDRelayJobs(items) {
+    return [...items].sort((a, b) => {
+        const aTime = Date.parse(a.created_at || a.updated_at || '') || 0;
+        const bTime = Date.parse(b.created_at || b.updated_at || '') || 0;
+        return bTime - aTime;
+    });
+}
+
+function getT2TDRelayFilterCounts(jobs = []) {
+    const counts = Object.fromEntries(Object.keys(T2TD_RELAY_FILTER_LABELS).map(key => [key, 0]));
+    counts.all = Array.isArray(jobs) ? jobs.length : 0;
+    if (!Array.isArray(jobs)) return counts;
+    jobs.forEach(job => {
+        const status = String(job?.status || 'pending');
+        if (Object.prototype.hasOwnProperty.call(counts, status)) counts[status] += 1;
+    });
+    return counts;
+}
+
+function syncT2TDRelayFilterButtons(jobs = t2tdRelayJobs) {
+    const counts = getT2TDRelayFilterCounts(jobs);
+    document.querySelectorAll('[data-relay-filter]').forEach(btn => {
+        const filter = btn.dataset.relayFilter || 'all';
+        const label = T2TD_RELAY_FILTER_LABELS[filter] || '全部';
+        const count = counts[filter] || 0;
+        btn.classList.toggle('active', filter === t2tdRelayFilter);
+        setA2TDHtmlIfChanged(btn, `${label}<span class="a2td-filter-count">${count}</span>`);
+    });
+}
+
+function matchesT2TDRelayFilter(job) {
+    if (t2tdRelayFilter === 'all') return true;
+    return String(job?.status || 'pending') === t2tdRelayFilter;
+}
+
+function setT2TDRelayFilter(filter) {
+    t2tdRelayFilter = T2TD_RELAY_FILTER_LABELS[filter] ? filter : 'all';
+    syncT2TDRelayFilterButtons();
+    renderT2TDRelayJobs();
+}
+
+function getT2TDRelayCardId(job) {
+    return `telegram-relay-${String(job.job_id || 'unknown').replace(/[^a-zA-Z0-9_-]+/g, '_')}`;
+}
+
+function getT2TDRelayMode(job) {
+    if (job.status === 'completed') return 'done';
+    if (job.status === 'cleaning') return 'cleaning';
+    if (job.status === 'uploading' || (job.upload_progress > 0 && job.download_progress >= 100)) return 'upload';
+    return 'download';
+}
+
+function getT2TDRelayProgress(job) {
+    if (job.status === 'completed') return 100;
+    const mode = getT2TDRelayMode(job);
+    if (mode === 'upload' || mode === 'cleaning') return Math.max(0, Math.min(100, job.upload_progress || 0));
+    return Math.max(0, Math.min(100, job.download_progress || 0));
+}
+
+function getT2TDRelayProgressText(job) {
+    const download = Math.max(0, Math.min(100, Number(job.download_progress || 0) || 0)).toFixed(1);
+    const upload = Math.max(0, Math.min(100, Number(job.upload_progress || 0) || 0)).toFixed(1);
+    if (job.status === 'completed') return '下载 100.0% / 上传 100.0%';
+    return `下载 ${download}% / 上传 ${upload}%`;
+}
+
+function renderT2TDRelayJobActions(job) {
+    const jobArg = escapeA2TDJsArg(job.job_id);
+    const buttons = [];
+    if (job.status === 'failed' || job.status === 'cancelled') {
+        buttons.push(`<button class="btn btn-ghost btn-sm btn-action btn-action-success" onclick="retryT2TDRelayJob(${jobArg})"><i class="ph ph-arrow-clockwise"></i> 重试</button>`);
+    }
+    if (T2TD_RELAY_ACTIVE_STATUSES.has(job.status)) {
+        buttons.push(`<button class="btn btn-ghost btn-sm btn-action btn-action-warning" onclick="cancelT2TDRelayJob(${jobArg})"><i class="ph ph-pause-circle"></i> 取消</button>`);
+    }
+    if (T2TD_RELAY_TERMINAL_STATUSES.has(job.status)) {
+        buttons.push(`<button class="btn btn-ghost btn-sm btn-action btn-action-danger" onclick="deleteT2TDRelayJob(${jobArg})"><i class="ph ph-trash"></i> 清理记录</button>`);
+    }
+    return buttons.join('');
+}
+
+function buildT2TDRelayJobCardContent(rawJob) {
+    const job = normalizeT2TDRelayJob(rawJob);
+    const view = getT2TDRelayStatusView(job.status);
+    const mode = getT2TDRelayMode(job);
+    const progress = getT2TDRelayProgress(job);
+    const inlineItems = [];
+    const pushMetaItem = (text, className = 'muted') => {
+        if (!text) return;
+        inlineItems.push(`<span class="task-inline-item ${className}">${text}</span>`);
+    };
+
+    pushMetaItem(view.label, job.status === 'failed' ? 'warning' : job.status === 'uploading' ? 'primary upload' : 'primary');
+    if (job.file_size > 0) pushMetaItem(`大小 ${escapeA2TDHtml(formatBytes(job.file_size, 0))}`);
+    pushMetaItem(getT2TDRelayProgressText(job), mode === 'upload' ? 'primary upload' : 'secondary');
+    if (job.source_message_id) {
+        pushMetaItem(`源消息 ${escapeA2TDHtml(job.source_channel_id)} / ${escapeA2TDHtml(job.source_message_id)}`, 'secondary');
+    }
+    if (job.retry_count > 0) pushMetaItem(`重试 ${escapeA2TDHtml(job.retry_count)}`, 'warning');
+    if (job.teldrive_file_id) pushMetaItem(`TelDrive ${escapeA2TDHtml(job.teldrive_file_id)}`, 'secondary');
+    pushMetaItem(`最近活动 ${escapeA2TDHtml(formatA2TDRelativeTime(job.updated_at || job.created_at))}`, 'secondary');
+
+    const errorNote = job.error
+        ? `<div class="task-note error"><i class="ph ph-warning-circle"></i><span>${escapeA2TDHtml(job.error)}</span></div>`
+        : '';
+    const localNote = job.status === 'failed' && job.local_path
+        ? `<div class="task-note warning"><i class="ph ph-folder-simple"></i><span>${escapeA2TDHtml(job.local_path)}</span></div>`
+        : '';
+    const barClass = `progress-bar-fill ${mode === 'done' ? 'done' : mode === 'cleaning' ? 'cleaning' : mode}`;
+    const iconClass = mode === 'upload'
+        ? 'ph-upload-simple ul-icon'
+        : mode === 'cleaning'
+            ? 'ph-broom'
+            : job.status === 'completed'
+                ? 'ph-check-circle'
+                : job.status === 'failed'
+                    ? 'ph-warning-circle'
+                    : 'ph-download-simple dl-icon';
+
+    return {
+        className: `progress-card ${job.status || 'pending'} ${mode === 'done' ? 'completed' : mode === 'upload' ? 'uploading' : mode === 'cleaning' ? 'cleaning' : 'downloading'}`.trim(),
+        filenameText: job.file_name || job.job_id || '未命名文件',
+        iconClass,
+        actionsHtml: renderT2TDRelayJobActions(job),
+        inlineRowHtml: inlineItems.join(''),
+        barClass,
+        progressWidth: `${Math.max(0, Math.min(100, progress))}%`,
+        notesHtml: `${errorNote}${localNote}`,
+    };
+}
+
+function createT2TDRelayJobCardElement(job, view) {
+    const card = document.createElement('div');
+    card.id = getT2TDRelayCardId(job);
+    card.innerHTML = `
+        <div class="progress-header">
+            <div class="progress-filename">
+                <i class="ph" data-role="icon"></i>
+                <span data-role="name"></span>
+            </div>
+            <div class="progress-header-actions" data-role="actions"></div>
+        </div>
+        <div class="task-inline-row" data-role="inline-row"></div>
+        <div class="progress-bar-track">
+            <div class="progress-bar-fill" data-role="bar"></div>
+        </div>
+        <div data-role="notes"></div>
+    `;
+    patchA2TDTaskCardElement(card, view);
+    return card;
+}
+
+function renderT2TDRelayJobs(items = t2tdRelayJobs) {
+    const container = document.getElementById('telegramRelayBarsContainer');
+    const barsEl = document.getElementById('telegramRelayBars');
+    const placeholder = document.getElementById('telegramRelayEmptyPlaceholder');
+    if (!container || !barsEl || !placeholder) return;
+
+    const sourceJobs = Array.isArray(items) ? sortT2TDRelayJobs(items.map(normalizeT2TDRelayJob)) : [];
+    syncT2TDRelayFilterButtons(sourceJobs);
+    const visibleJobs = sourceJobs.filter(matchesT2TDRelayFilter);
+
+    if (sourceJobs.length === 0) {
+        barsEl.innerHTML = '';
+        container.style.display = 'none';
+        placeholder.style.display = 'block';
+        placeholder.innerHTML = '<i class="ph ph-tray"></i> 队列空闲中';
+        return;
+    }
+
+    if (visibleJobs.length === 0) {
+        barsEl.innerHTML = '';
+        container.style.display = 'none';
+        placeholder.style.display = 'block';
+        placeholder.innerHTML = `<i class="ph ph-funnel"></i> 当前筛选“${escapeA2TDHtml(T2TD_RELAY_FILTER_LABELS[t2tdRelayFilter] || '全部')}”下暂无任务`;
+        return;
+    }
+
+    container.style.display = 'block';
+    placeholder.style.display = 'none';
+
+    const activeIds = new Set();
+    visibleJobs.forEach((job, index) => {
+        const cardId = getT2TDRelayCardId(job);
+        const view = buildT2TDRelayJobCardContent(job);
+        let card = document.getElementById(cardId);
+        if (!card) {
+            card = createT2TDRelayJobCardElement(job, view);
+        } else {
+            patchA2TDTaskCardElement(card, view);
+        }
+        const anchor = barsEl.children[index] || null;
+        if (card !== anchor) {
+            barsEl.insertBefore(card, anchor);
+        }
+        activeIds.add(cardId);
+    });
+
+    Array.from(barsEl.children).forEach(card => {
+        if (!activeIds.has(card.id)) card.remove();
+    });
+}
+
+function upsertT2TDRelayJob(rawJob) {
+    const job = normalizeT2TDRelayJob(rawJob);
+    if (!job.job_id) return;
+    const index = t2tdRelayJobs.findIndex(item => item.job_id === job.job_id);
+    if (index >= 0) {
+        t2tdRelayJobs[index] = { ...t2tdRelayJobs[index], ...job };
+    } else {
+        t2tdRelayJobs.unshift(job);
+    }
+    t2tdRelayJobs = sortT2TDRelayJobs(t2tdRelayJobs);
+    if (isT2TDRelayPageActive()) renderT2TDRelayJobs();
+}
+
+function removeT2TDRelayJob(jobId) {
+    const id = String(jobId || '').trim();
+    if (!id) return;
+    t2tdRelayJobs = t2tdRelayJobs.filter(item => item.job_id !== id);
+    if (isT2TDRelayPageActive()) renderT2TDRelayJobs();
+}
+
+function isT2TDRelayPageActive() {
+    const page = document.getElementById('page-telegramrelay');
+    return !!page && page.classList.contains('active');
+}
+
+function refreshT2TDRelayMonitorIfNeeded(force = false) {
+    if (!isT2TDRelayPageActive()) return;
+    return loadT2TDRelayJobs(true);
+}
+
+async function loadT2TDRelayJobs(force = false) {
+    if (t2tdRelayJobsRefreshPending) return;
+    if (t2tdRelayJobsLoaded && !force) {
+        if (isT2TDRelayPageActive()) renderT2TDRelayJobs();
+        return;
+    }
+
+    try {
+        t2tdRelayJobsRefreshPending = true;
+        if (isT2TDRelayPageActive()) {
+            const placeholder = document.getElementById('telegramRelayEmptyPlaceholder');
+            const container = document.getElementById('telegramRelayBarsContainer');
+            if (container) container.style.display = 'none';
+            if (placeholder) {
+                placeholder.style.display = 'block';
+                placeholder.innerHTML = '<i class="ph ph-spinner-gap"></i> 正在加载回源任务...';
+            }
+        }
+        const resp = await fetch('/api/t2td/relay-jobs', { cache: 'no-store' });
+        const data = await readJsonSafe(resp);
+        if (!resp.ok) throw new Error(data.detail || data.message || '读取回源任务失败');
+        t2tdRelayJobs = Array.isArray(data.items) ? data.items.map(normalizeT2TDRelayJob) : [];
+        t2tdRelayJobsLoaded = true;
+        if (isT2TDRelayPageActive()) renderT2TDRelayJobs();
+    } catch (e) {
+        if (isT2TDRelayPageActive()) {
+            const placeholder = document.getElementById('telegramRelayEmptyPlaceholder');
+            const container = document.getElementById('telegramRelayBarsContainer');
+            if (container) container.style.display = 'none';
+            if (placeholder) {
+                placeholder.style.display = 'block';
+                placeholder.innerHTML = `<i class="ph ph-warning"></i> ${escapeA2TDHtml(e.message || '读取回源任务失败')}`;
+            }
+        }
+    } finally {
+        t2tdRelayJobsRefreshPending = false;
+    }
+}
+
+async function performT2TDRelayJobAction(jobId, action) {
+    const id = String(jobId || '').trim();
+    if (!id) return;
+    if (action === 'cancel' && !confirm('确认取消这个回源任务吗？源 Telegram 消息不会被删除。')) return;
+    if (action === 'delete' && !confirm('确认清理这个回源任务记录吗？若有本地残留文件也会一并清理。')) return;
+
+    try {
+        const suffix = action === 'delete' ? '' : `/${action}`;
+        const resp = await fetch(`/api/t2td/relay-jobs/${encodeURIComponent(id)}${suffix}`, {
+            method: action === 'delete' ? 'DELETE' : 'POST',
+        });
+        const data = await readJsonSafe(resp);
+        if (!resp.ok || data.success === false) {
+            throw new Error(data.detail || data.message || `${action} failed`);
+        }
+        if (action === 'delete') {
+            removeT2TDRelayJob(id);
+        } else if (data.data) {
+            upsertT2TDRelayJob(data.data);
+        } else {
+            await loadT2TDRelayJobs(true);
+        }
+        if (typeof showA2TDToast === 'function') {
+            const labels = { retry: '重试已提交', cancel: '任务已取消', delete: '任务记录已清理' };
+            showA2TDToast(labels[action] || '操作已提交', 'success');
+        }
+    } catch (e) {
+        if (typeof showA2TDToast === 'function') {
+            showA2TDToast(e.message || '回源任务操作失败', 'error');
+        } else {
+            alert(e.message || '回源任务操作失败');
+        }
+    }
+}
+
+function retryT2TDRelayJob(jobId) {
+    return performT2TDRelayJobAction(jobId, 'retry');
+}
+
+function cancelT2TDRelayJob(jobId) {
+    return performT2TDRelayJobAction(jobId, 'cancel');
+}
+
+function deleteT2TDRelayJob(jobId) {
+    return performT2TDRelayJobAction(jobId, 'delete');
+}
+
+async function t2tdRelayBulkAction(action) {
+    const btn = document.querySelector(`[data-relay-bulk-action="${action}"]`);
+    const oldHtml = btn ? btn.innerHTML : '';
+    const targets = t2tdRelayJobs.filter(job => {
+        if (action === 'clear-failed') return job.status === 'failed';
+        if (action === 'clear-terminal') return job.status === 'completed' || job.status === 'cancelled';
+        return false;
+    });
+
+    if (targets.length === 0) {
+        if (typeof showA2TDToast === 'function') showA2TDToast('没有可清理的回源任务', 'info');
+        return;
+    }
+    const label = action === 'clear-failed' ? '失败任务' : '已完成/已取消任务';
+    if (!confirm(`确认清理 ${targets.length} 个${label}吗？若有本地残留文件也会一并清理。`)) return;
+
+    try {
+        if (btn) {
+            btn.disabled = true;
+            btn.classList.add('is-loading');
+            btn.innerHTML = '<span class="spinner"></span> 清理中';
+        }
+        let successCount = 0;
+        const failedMessages = [];
+        for (const job of targets) {
+            try {
+                const resp = await fetch(`/api/t2td/relay-jobs/${encodeURIComponent(job.job_id)}`, { method: 'DELETE' });
+                const data = await readJsonSafe(resp);
+                if (!resp.ok || data.success === false) {
+                    throw new Error(data.detail || data.message || '清理失败');
+                }
+                successCount += 1;
+                removeT2TDRelayJob(job.job_id);
+            } catch (e) {
+                failedMessages.push(`${job.file_name || job.job_id}: ${e.message || '清理失败'}`);
+            }
+        }
+        if (failedMessages.length) {
+            throw new Error(`已清理 ${successCount} 个，失败 ${failedMessages.length} 个`);
+        }
+        if (typeof showA2TDToast === 'function') showA2TDToast(`已清理 ${successCount} 个回源任务`, 'success');
+        await loadT2TDRelayJobs(true);
+    } catch (e) {
+        if (typeof showA2TDToast === 'function') {
+            showA2TDToast(e.message || '批量清理失败', 'error');
+        } else {
+            alert(e.message || '批量清理失败');
+        }
+        await loadT2TDRelayJobs(true);
+    } finally {
+        if (btn) {
+            btn.disabled = false;
+            btn.classList.remove('is-loading');
+            btn.innerHTML = oldHtml;
+        }
     }
 }
 

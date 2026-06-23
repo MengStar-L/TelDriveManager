@@ -47,6 +47,8 @@ from telethon.tl.types import (
     auth,
 )
 
+from app.modules.tel2teldrive.relay import TelegramRelayManager
+
 BASE_DIR = Path(__file__).parent
 STATIC_DIR = BASE_DIR / "static"
 TEMPLATES_DIR = BASE_DIR / "templates"
@@ -76,16 +78,35 @@ DEFAULT_CONFIG: dict[str, dict[str, Any]] = {
         "api_hash": "",
         "channel_id": None,
         "session_name": "tel2teldrive_session",
+        "sync_interval": 10,
+        "sync_enabled": True,
+        "max_scan_messages": 10000,
+        "confirm_cycles": 3,
     },
     "teldrive": {
         "api_host": "",
         "access_token": "",
         "channel_id": None,
-        "sync_interval": 10,
-        "sync_enabled": True,
-        "max_scan_messages": 10000,
-        "confirm_cycles": 3,
+        "target_path": "/",
+        "chunk_size": "250M",
+        "upload_concurrency": 4,
+        "random_chunk_name": True,
 
+    },
+    "upload": {
+        "max_retries": 3,
+        "min_throughput_kbps": 100,
+        "parallel_chunk_upload": False,
+    },
+    "telegram_relay": {
+        "enabled": False,
+        "proxy_host": "",
+        "proxy_port": 1080,
+        "proxy_username": "",
+        "proxy_password": "",
+        "download_dir": "./telegram_relay",
+        "concurrency": 1,
+        "max_retries": 3,
     },
     "telegram_db": {
         "host": "",
@@ -140,10 +161,25 @@ class RuntimeConfig:
     teldrive_url: str
     bearer_token: str
     teldrive_channel_id: int | None
+    teldrive_target_path: str
+    teldrive_chunk_size: str
+    teldrive_upload_concurrency: int
+    teldrive_random_chunk_name: bool
     sync_interval: int
     sync_enabled: bool
     max_scan_messages: int
     confirm_cycles: int
+    upload_max_retries: int
+    upload_min_throughput_kbps: int
+    upload_parallel_chunk_upload: bool
+    relay_enabled: bool
+    relay_proxy_host: str
+    relay_proxy_port: int
+    relay_proxy_username: str
+    relay_proxy_password: str
+    relay_download_dir: str
+    relay_concurrency: int
+    relay_max_retries: int
     db_host: str
     db_port: int
     db_user: str
@@ -219,6 +255,8 @@ class ConfigStore:
     def _runtime_from_data(self, data: dict[str, dict[str, Any]]) -> RuntimeConfig:
         telegram = data["telegram"]
         teldrive = data["teldrive"]
+        upload = data.get("upload", {})
+        relay = data.get("telegram_relay", {})
         web = data["web"]
         missing_fields = self._collect_missing_fields(data)
         return RuntimeConfig(
@@ -231,10 +269,25 @@ class ConfigStore:
             teldrive_url=teldrive["api_host"],
             bearer_token=teldrive["access_token"],
             teldrive_channel_id=teldrive["channel_id"],
-            sync_interval=teldrive["sync_interval"],
-            sync_enabled=teldrive["sync_enabled"],
-            max_scan_messages=teldrive["max_scan_messages"],
-            confirm_cycles=teldrive["confirm_cycles"],
+            teldrive_target_path=teldrive["target_path"],
+            teldrive_chunk_size=teldrive["chunk_size"],
+            teldrive_upload_concurrency=teldrive["upload_concurrency"],
+            teldrive_random_chunk_name=teldrive["random_chunk_name"],
+            sync_interval=telegram.get("sync_interval", teldrive.get("sync_interval", 10)),
+            sync_enabled=telegram.get("sync_enabled", teldrive.get("sync_enabled", True)),
+            max_scan_messages=telegram.get("max_scan_messages", teldrive.get("max_scan_messages", 10000)),
+            confirm_cycles=telegram.get("confirm_cycles", teldrive.get("confirm_cycles", 3)),
+            upload_max_retries=upload.get("max_retries", 3),
+            upload_min_throughput_kbps=upload.get("min_throughput_kbps", 100),
+            upload_parallel_chunk_upload=upload.get("parallel_chunk_upload", False),
+            relay_enabled=relay.get("enabled", False),
+            relay_proxy_host=relay.get("proxy_host", ""),
+            relay_proxy_port=relay.get("proxy_port", 1080),
+            relay_proxy_username=relay.get("proxy_username", ""),
+            relay_proxy_password=relay.get("proxy_password", ""),
+            relay_download_dir=relay.get("download_dir", "./telegram_relay"),
+            relay_concurrency=relay.get("concurrency", 1),
+            relay_max_retries=relay.get("max_retries", 3),
             db_host=data.get("telegram_db", {}).get("host", ""),
             db_port=data.get("telegram_db", {}).get("port", 5432),
             db_user=data.get("telegram_db", {}).get("user", ""),
@@ -257,6 +310,10 @@ class ConfigStore:
                 "api_hash": runtime.telegram_api_hash,
                 "channel_id": "" if runtime.telegram_channel_id is None else runtime.telegram_channel_id,
                 "session_name": runtime.session_name,
+                "sync_interval": runtime.sync_interval,
+                "sync_enabled": runtime.sync_enabled,
+                "max_scan_messages": runtime.max_scan_messages,
+                "confirm_cycles": runtime.confirm_cycles,
             },
             "telegram_db": {
                 "host": runtime.db_host,
@@ -269,20 +326,28 @@ class ConfigStore:
                 "api_host": runtime.teldrive_url,
                 "access_token": runtime.bearer_token,
                 "channel_id": "" if runtime.teldrive_channel_id is None else runtime.teldrive_channel_id,
-                "sync_interval": runtime.sync_interval,
-                "sync_enabled": runtime.sync_enabled,
-                "max_scan_messages": runtime.max_scan_messages,
-                "confirm_cycles": runtime.confirm_cycles,
+                "target_path": runtime.teldrive_target_path,
+                "chunk_size": runtime.teldrive_chunk_size,
+                "upload_concurrency": runtime.teldrive_upload_concurrency,
+                "random_chunk_name": runtime.teldrive_random_chunk_name,
 
             },
-            "telegram_db": {
-        "host": "",
-        "port": 5432,
-        "user": "",
-        "password": "",
-        "name": "postgres",
-    },
-    "web": {
+            "upload": {
+                "max_retries": runtime.upload_max_retries,
+                "min_throughput_kbps": runtime.upload_min_throughput_kbps,
+                "parallel_chunk_upload": runtime.upload_parallel_chunk_upload,
+            },
+            "telegram_relay": {
+                "enabled": runtime.relay_enabled,
+                "proxy_host": runtime.relay_proxy_host,
+                "proxy_port": runtime.relay_proxy_port,
+                "proxy_username": runtime.relay_proxy_username,
+                "proxy_password": runtime.relay_proxy_password,
+                "download_dir": runtime.relay_download_dir,
+                "concurrency": runtime.relay_concurrency,
+                "max_retries": runtime.relay_max_retries,
+            },
+            "web": {
                 "host": runtime.web_host,
                 "frontend_password": runtime.frontend_password,
                 "frontend_monitor_port": runtime.frontend_monitor_port,
@@ -312,6 +377,8 @@ class ConfigStore:
         data = self._default_data()
         telegram_payload = payload.get("telegram") if isinstance(payload.get("telegram"), dict) else {}
         teldrive_payload = payload.get("teldrive") if isinstance(payload.get("teldrive"), dict) else {}
+        upload_payload = payload.get("upload") if isinstance(payload.get("upload"), dict) else {}
+        relay_payload = payload.get("telegram_relay") if isinstance(payload.get("telegram_relay"), dict) else {}
         telegram_db_payload = payload.get("telegram_db") if isinstance(payload.get("telegram_db"), dict) else {}
         web_payload = payload.get("web") if isinstance(payload.get("web"), dict) else {}
 
@@ -323,34 +390,101 @@ class ConfigStore:
             telegram_payload.get("session_name"),
             fallback=DEFAULT_CONFIG["telegram"]["session_name"],
         )
+        telegram["sync_interval"] = self._parse_positive_int(
+            telegram_payload.get("sync_interval", teldrive_payload.get("sync_interval")),
+            "删除同步轮询间隔",
+            default=DEFAULT_CONFIG["telegram"]["sync_interval"],
+            strict=strict,
+        )
+        telegram["sync_enabled"] = self._parse_bool(
+            telegram_payload.get("sync_enabled", teldrive_payload.get("sync_enabled")),
+            default=DEFAULT_CONFIG["telegram"]["sync_enabled"],
+        )
+        telegram["max_scan_messages"] = self._parse_positive_int(
+            telegram_payload.get("max_scan_messages", teldrive_payload.get("max_scan_messages")),
+            "历史扫描上限",
+            default=DEFAULT_CONFIG["telegram"]["max_scan_messages"],
+            strict=strict,
+        )
+        telegram["confirm_cycles"] = self._parse_positive_int(
+            telegram_payload.get("confirm_cycles", teldrive_payload.get("confirm_cycles")),
+            "确认周期",
+            default=DEFAULT_CONFIG["telegram"]["confirm_cycles"],
+            strict=strict,
+        )
 
         teldrive = data["teldrive"]
         teldrive["api_host"] = self._parse_string(teldrive_payload.get("api_host"))
         teldrive["access_token"] = self._parse_string(teldrive_payload.get("access_token"))
+        teldrive["target_path"] = self._normalize_path_string(
+            teldrive_payload.get("target_path"),
+            fallback=DEFAULT_CONFIG["teldrive"]["target_path"],
+        )
+        teldrive["chunk_size"] = self._parse_string(
+            teldrive_payload.get("chunk_size"),
+            fallback=DEFAULT_CONFIG["teldrive"]["chunk_size"],
+        )
+        teldrive["upload_concurrency"] = self._parse_positive_int(
+            teldrive_payload.get("upload_concurrency"),
+            "TelDrive upload concurrency",
+            default=DEFAULT_CONFIG["teldrive"]["upload_concurrency"],
+            strict=strict,
+        )
+        teldrive["random_chunk_name"] = self._parse_bool(
+            teldrive_payload.get("random_chunk_name"),
+            default=DEFAULT_CONFIG["teldrive"]["random_chunk_name"],
+        )
         teldrive["channel_id"] = self._parse_optional_int(teldrive_payload.get("channel_id"), "TelDrive 频道 ID", strict=strict)
-        teldrive["sync_interval"] = self._parse_positive_int(
-            teldrive_payload.get("sync_interval"),
-            "删除同步轮询间隔",
-            default=DEFAULT_CONFIG["teldrive"]["sync_interval"],
+
+        upload = data["upload"]
+        upload["max_retries"] = self._parse_positive_int(
+            upload_payload.get("max_retries"),
+            "upload max retries",
+            default=DEFAULT_CONFIG["upload"]["max_retries"],
             strict=strict,
         )
-        teldrive["sync_enabled"] = self._parse_bool(
-            teldrive_payload.get("sync_enabled"),
-            default=DEFAULT_CONFIG["teldrive"]["sync_enabled"],
-        )
-        teldrive["max_scan_messages"] = self._parse_positive_int(
-            teldrive_payload.get("max_scan_messages"),
-            "历史扫描上限",
-            default=DEFAULT_CONFIG["teldrive"]["max_scan_messages"],
+        upload["min_throughput_kbps"] = self._parse_positive_int(
+            upload_payload.get("min_throughput_kbps"),
+            "upload min throughput",
+            default=DEFAULT_CONFIG["upload"]["min_throughput_kbps"],
             strict=strict,
         )
-        teldrive["confirm_cycles"] = self._parse_positive_int(
-            teldrive_payload.get("confirm_cycles"),
-            "确认周期",
-            default=DEFAULT_CONFIG["teldrive"]["confirm_cycles"],
+        upload["parallel_chunk_upload"] = self._parse_bool(
+            upload_payload.get("parallel_chunk_upload"),
+            default=DEFAULT_CONFIG["upload"]["parallel_chunk_upload"],
+        )
+
+        relay = data["telegram_relay"]
+        relay["enabled"] = self._parse_bool(
+            relay_payload.get("enabled"),
+            default=DEFAULT_CONFIG["telegram_relay"]["enabled"],
+        )
+        relay["proxy_host"] = self._parse_string(relay_payload.get("proxy_host"))
+        relay["proxy_port"] = self._parse_positive_int(
+            relay_payload.get("proxy_port"),
+            "relay proxy port",
+            default=DEFAULT_CONFIG["telegram_relay"]["proxy_port"],
             strict=strict,
         )
-        
+        relay["proxy_username"] = self._parse_string(relay_payload.get("proxy_username"))
+        relay["proxy_password"] = self._parse_string(relay_payload.get("proxy_password"))
+        relay["download_dir"] = self._parse_string(
+            relay_payload.get("download_dir"),
+            fallback=DEFAULT_CONFIG["telegram_relay"]["download_dir"],
+        )
+        relay["concurrency"] = self._parse_positive_int(
+            relay_payload.get("concurrency"),
+            "relay concurrency",
+            default=DEFAULT_CONFIG["telegram_relay"]["concurrency"],
+            strict=strict,
+        )
+        relay["max_retries"] = self._parse_positive_int(
+            relay_payload.get("max_retries"),
+            "relay max retries",
+            default=DEFAULT_CONFIG["telegram_relay"]["max_retries"],
+            strict=strict,
+        )
+
         data.setdefault("telegram_db", {})
         telegram_db = data["telegram_db"]
         telegram_db["host"] = self._parse_string(telegram_db_payload.get("host"))
@@ -395,6 +529,8 @@ class ConfigStore:
             missing.append("TelDrive Access Token")
         if data["teldrive"]["channel_id"] is None:
             missing.append(FIELD_LABELS["teldrive.channel_id"])
+        if data.get("telegram_relay", {}).get("enabled") and not data.get("telegram_relay", {}).get("proxy_host"):
+            missing.append("Telegram Relay Proxy Host")
         return missing
 
     def _parse_string(self, value: Any, *, fallback: str = "") -> str:
@@ -402,6 +538,14 @@ class ConfigStore:
             return fallback
         text = str(value).strip()
         return text or fallback
+
+    def _normalize_path_string(self, value: Any, *, fallback: str = "/") -> str:
+        text = self._parse_string(value, fallback=fallback).replace("\\", "/")
+        if not text.startswith("/"):
+            text = "/" + text
+        while "//" in text:
+            text = text.replace("//", "/")
+        return text.rstrip("/") or "/"
 
     def _parse_optional_int(self, value: Any, field_name: str, *, strict: bool) -> int | None:
         if value in (None, ""):
@@ -449,7 +593,7 @@ class ConfigStore:
 
     def _dump_toml(self, data: dict[str, dict[str, Any]]) -> str:
         lines = ["# ================= Tel2TelDrive 配置文件 =================", ""]
-        for section_name in ("telegram", "telegram_db", "teldrive", "web"):
+        for section_name in ("telegram", "telegram_relay", "telegram_db", "teldrive", "upload", "web"):
             lines.append(f"[{section_name}]")
             for key, value in data[section_name].items():
                 lines.append(f"{key} = {self._format_toml_value(value)}")
@@ -515,8 +659,31 @@ def state_config_payload(config: RuntimeConfig) -> dict[str, Any]:
         "sync_interval": config.sync_interval,
         "confirm_cycles": config.confirm_cycles,
         "max_scan_messages": config.max_scan_messages,
+        "relay_enabled": config.relay_enabled,
+        "relay_concurrency": config.relay_concurrency,
         "log_file": config.log_file_path.name,
     }
+
+
+def build_telegram_proxy(config: RuntimeConfig):
+    if not config.relay_enabled:
+        return None
+    if not config.relay_proxy_host:
+        raise RuntimeError("telegram_relay.enabled=true but proxy_host is empty")
+    try:
+        import socks
+    except ModuleNotFoundError as exc:
+        raise RuntimeError("PySocks is required for telegram_relay proxy support") from exc
+    username = config.relay_proxy_username or None
+    password = config.relay_proxy_password or None
+    return (
+        socks.SOCKS5,
+        config.relay_proxy_host,
+        int(config.relay_proxy_port),
+        True,
+        username,
+        password,
+    )
 
 
 def should_reload_service(old_config: RuntimeConfig, new_config: RuntimeConfig) -> bool:
@@ -531,10 +698,25 @@ def should_reload_service(old_config: RuntimeConfig, new_config: RuntimeConfig) 
         "teldrive_url",
         "bearer_token",
         "teldrive_channel_id",
+        "teldrive_target_path",
+        "teldrive_chunk_size",
+        "teldrive_upload_concurrency",
+        "teldrive_random_chunk_name",
         "sync_interval",
         "sync_enabled",
         "max_scan_messages",
         "confirm_cycles",
+        "upload_max_retries",
+        "upload_min_throughput_kbps",
+        "upload_parallel_chunk_upload",
+        "relay_enabled",
+        "relay_proxy_host",
+        "relay_proxy_port",
+        "relay_proxy_username",
+        "relay_proxy_password",
+        "relay_download_dir",
+        "relay_concurrency",
+        "relay_max_retries",
         "db_host",
         "db_port",
         "db_user",
@@ -1826,6 +2008,7 @@ class Tel2TelDriveService:
         self.reload_event = asyncio.Event()
         self.refresh_qr_event = asyncio.Event()
         self.password_future: asyncio.Future[str] | None = None
+        self.relay_manager = TelegramRelayManager(logger, broker)
 
     def _start_sync_deletions(self, client: TelegramClient, config: RuntimeConfig):
         if self.sync_task and not self.sync_task.done():
@@ -1908,7 +2091,13 @@ class Tel2TelDriveService:
                 continue
 
             self.reload_event.clear()
-            self.client = TelegramClient(config.session_name, config.telegram_api_id, config.telegram_api_hash)
+            telegram_proxy = build_telegram_proxy(config)
+            self.client = TelegramClient(
+                config.session_name,
+                config.telegram_api_id,
+                config.telegram_api_hash,
+                proxy=telegram_proxy,
+            )
             try:
                 await broker.update_state(
                     phase="connecting",
@@ -1938,6 +2127,7 @@ class Tel2TelDriveService:
                 self.register_handlers(self.client, config)
                 logger.info("实时监听已启动，初始文件映射将在后台构建")
                 self.initial_mapping_task = asyncio.create_task(self._run_initial_mapping(self.client, config))
+                await self.relay_manager.start(self.client, config)
 
                 if config.sync_enabled:
 
@@ -2134,6 +2324,8 @@ class Tel2TelDriveService:
                 await self.sync_restart_task
             self.sync_restart_task = None
 
+        await self.relay_manager.stop()
+
         if self.client:
             with suppress(Exception):
                 if self.client.is_connected():
@@ -2218,6 +2410,10 @@ class Tel2TelDriveService:
             mapping[file_id] = merge_message_ids(mapping.get(file_id), [msg.id])
             await run_blocking_io(save_mapping, mapping)
             logger.info(f"TelDrive 已存在该文件，仅补充映射: {name}")
+            return
+
+        if config.relay_enabled:
+            await self.relay_manager.enqueue_message(client, config, msg, file_info)
             return
 
         result = await add_file_to_teldrive(
