@@ -4,6 +4,7 @@ import asyncio
 import base64
 import re
 import shutil
+import traceback
 from collections import deque
 from contextlib import suppress
 from datetime import datetime, timezone
@@ -13,6 +14,7 @@ from typing import Any
 from telethon import TelegramClient
 from telethon.errors import PasswordHashInvalidError, SessionPasswordNeededError
 from telethon.password import compute_check
+from telethon.sessions import SQLiteSession
 from telethon.tl.functions.account import GetPasswordRequest
 from telethon.tl.functions.auth import CheckPasswordRequest, ExportLoginTokenRequest, ImportLoginTokenRequest
 from telethon.tl.types import auth
@@ -259,6 +261,8 @@ class TelegramRelayManager:
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
+                with suppress(Exception):
+                    self.logger.error(traceback.format_exc())
                 self._log("ERROR", f"Relay login failed: {type(exc).__name__}: {exc}")
                 await self._update_state(phase="error", authorized=False, last_error=str(exc))
                 await asyncio.sleep(5)
@@ -281,7 +285,7 @@ class TelegramRelayManager:
                     self.client = None
             if self.client is None:
                 self.client = TelegramClient(
-                    session_name,
+                    SQLiteSession(session_name),
                     int(getattr(config, "telegram_api_id") or 0),
                     str(getattr(config, "telegram_api_hash") or ""),
                     proxy=proxy,
