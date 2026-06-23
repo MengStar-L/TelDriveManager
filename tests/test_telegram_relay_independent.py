@@ -51,6 +51,23 @@ class FakeRelayClient:
         self.deleted.append((channel_id, list(ids)))
 
 
+class FakeConstructedClient:
+    created_args = None
+    created_kwargs = None
+
+    def __init__(self, *args, **kwargs):
+        type(self).created_args = args
+        type(self).created_kwargs = kwargs
+        self.session = SimpleNamespace(filename=f"{args[0]}.session")
+        self.connected = False
+
+    def is_connected(self):
+        return self.connected
+
+    async def connect(self):
+        self.connected = True
+
+
 def make_runtime(**overrides):
     base = dict(
         relay_enabled=True,
@@ -193,6 +210,25 @@ class TelegramRelayIndependentTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(first["job_id"], second["job_id"])
         self.assertEqual(first["source_message_id"], second["source_message_id"])
         self.assertEqual(schedule_calls, [first["job_id"]])
+
+    async def test_relay_client_construction_matches_main_listener_shape(self):
+        manager = relay_module.TelegramRelayManager(FakeLogger(), FakeBroker())
+        config = make_runtime(relay_proxy_host="127.0.0.1")
+        manager.config = config
+        manager._stopped = False
+
+        original_client = relay_module.TelegramClient
+        try:
+            FakeConstructedClient.created_args = None
+            FakeConstructedClient.created_kwargs = None
+            relay_module.TelegramClient = cast(Any, FakeConstructedClient)
+            client = await manager._ensure_client()
+        finally:
+            relay_module.TelegramClient = original_client
+
+        self.assertIsInstance(client, FakeConstructedClient)
+        self.assertEqual(FakeConstructedClient.created_args[:3], (config.relay_session_name, config.telegram_api_id, config.telegram_api_hash))
+        self.assertNotIn("proxy", FakeConstructedClient.created_kwargs)
 
     async def test_relay_job_uses_independent_client_for_download_and_delete(self):
         manager = relay_module.TelegramRelayManager(FakeLogger(), FakeBroker())

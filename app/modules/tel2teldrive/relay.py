@@ -14,7 +14,6 @@ from typing import Any
 from telethon import TelegramClient
 from telethon.errors import PasswordHashInvalidError, SessionPasswordNeededError
 from telethon.password import compute_check
-from telethon.sessions import SQLiteSession
 from telethon.tl.functions.account import GetPasswordRequest
 from telethon.tl.functions.auth import CheckPasswordRequest, ExportLoginTokenRequest, ImportLoginTokenRequest
 from telethon.tl.types import auth
@@ -261,8 +260,10 @@ class TelegramRelayManager:
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
+                tb = traceback.format_exc()
                 with suppress(Exception):
-                    self.logger.error(traceback.format_exc())
+                    self.logger.error(tb)
+                self._log("ERROR", tb)
                 self._log("ERROR", f"Relay login failed: {type(exc).__name__}: {exc}")
                 await self._update_state(phase="error", authorized=False, last_error=str(exc))
                 await asyncio.sleep(5)
@@ -273,24 +274,20 @@ class TelegramRelayManager:
             raise RuntimeError("telegram relay config is missing")
         async with self._connect_lock:
             session_name = self._session_name(config)
-            proxy = build_relay_proxy(config)
             if self.client is not None:
                 if self.client.session.filename and Path(self.client.session.filename).stem != session_name:
                     with suppress(Exception):
                         await self.client.disconnect()
                     self.client = None
-                elif proxy != getattr(self.client, "_relay_proxy_tuple", None):
-                    with suppress(Exception):
-                        await self.client.disconnect()
-                    self.client = None
             if self.client is None:
+                # Keep this identical to the proven main listener path: pass the
+                # session name string directly and do not add relay-specific proxy
+                # handling during login.
                 self.client = TelegramClient(
-                    SQLiteSession(session_name),
+                    session_name,
                     int(getattr(config, "telegram_api_id") or 0),
                     str(getattr(config, "telegram_api_hash") or ""),
-                    proxy=proxy,
                 )
-                setattr(self.client, "_relay_proxy_tuple", proxy)
             if not self.client.is_connected():
                 await self._update_state(phase="connecting", authorized=False, last_error=None)
                 await self.client.connect()
