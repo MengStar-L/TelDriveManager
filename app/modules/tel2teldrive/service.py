@@ -2100,13 +2100,19 @@ class Tel2TelDriveService:
     async def run_forever(self):
         if self._running:
             logger.warning("Tel2TelDrive service is already running; duplicate start ignored")
-            await self.stop_event.wait()
             return
         self._running = True
         logger.info("=" * 56)
         logger.info("Telegram 监听中转服务启动")
         logger.info("=" * 56)
+        # _running 必须无论如何都复位：循环体内若在 try 外抛异常（如代理构造失败），
+        # 否则标志会泄漏成 True，看门狗重启时被 "already running" 拦截导致服务焊死。
+        try:
+            await self._run_loop()
+        finally:
+            self._running = False
 
+    async def _run_loop(self):
         while not self.stop_event.is_set():
             config = config_store.runtime()
             logger.set_log_path(config.log_file_path)
@@ -2133,13 +2139,15 @@ class Tel2TelDriveService:
                 continue
 
             self.reload_event.clear()
-            self.client = TelegramClient(
-                config.session_name,
-                config.telegram_api_id,
-                config.telegram_api_hash,
-                proxy=build_telegram_proxy(config),
-            )
             try:
+                # 客户端构造（含 build_telegram_proxy）放进 try：代理缺依赖/配置错误时
+                # 走下面的异常重试分支，而不是逃出循环把服务焊死。
+                self.client = TelegramClient(
+                    config.session_name,
+                    config.telegram_api_id,
+                    config.telegram_api_hash,
+                    proxy=build_telegram_proxy(config),
+                )
                 await broker.update_state(
                     phase="connecting",
                     authorized=False,
@@ -2239,7 +2247,6 @@ class Tel2TelDriveService:
 
         await broker.update_state(phase="stopped", authorized=False, needs_password=False, qr_image=None)
         logger.info("Tel2TelDrive 服务已停止")
-        self._running = False
 
     async def stop(self):
         self.stop_event.set()
