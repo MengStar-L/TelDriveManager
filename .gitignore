@@ -18,6 +18,7 @@ pikpak_token.json
 # IDE
 .vscode/
 .idea/
+.claude/
 
 # Temp tools
 patch_*.py
