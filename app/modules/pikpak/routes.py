@@ -1686,7 +1686,7 @@ async def _process_magnet_selected(root_file_ids: List[str], selected_ids: List[
                     _account, account_client = await pikpak_account_pool.client_for_account(account_id)
                     await account_client.delete_files(ids)
                 except Exception as e:
-                    logger.warning(f"娓呯悊纾侀摼涓存椂鏂囦欢澶辫触: account={account_id}, error={e}")
+                    logger.warning(f"清理磁链临时文件失败: account={account_id}, error={e}")
 
         await _broadcast({"type": "all_done", "total": 1})
     except Exception as e:
