@@ -8,6 +8,7 @@ import mimetypes
 import re
 import secrets
 import tomllib
+import traceback
 from collections import deque
 from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass
@@ -2210,7 +2211,10 @@ class Tel2TelDriveService:
                 if self.reload_event.is_set() and not self.stop_event.is_set():
                     logger.info("配置已更新，准备重新加载 Telegram 连接")
                 else:
-                    logger.error(f"服务运行异常: {exc}")
+                    logger.error(
+                        f"服务运行异常: {type(exc).__name__}: {exc}\n"
+                        f"{traceback.format_exc()}"
+                    )
                     await broker.update_state(
                         phase="error",
                         authorized=False,
