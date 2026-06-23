@@ -85,13 +85,13 @@ max_scan_messages = 10000
 confirm_cycles = 3
 
 # ─── 回源（视频检测→下载→重传 TelDrive→删源消息） ───
-# 回源复用主监听账号（同一个 Telegram 客户端，已登录且已缓存频道实体），
-# 无需单独登录/扫码。下方 proxy_* 与 session_name 字段当前不生效，仅为兼容旧配置保留。
+# 回源复用主监听账号（同一个 Telegram 客户端，已登录且已缓存频道实体），无需单独登录/扫码。
+# proxy_*：填了代理则主监听客户端（回源也复用之）走该代理；全部留空则直连。session_name 当前不生效。
 [telegram_relay]
 enabled = false
 session_name = "tel2teldrive_relay_session"
-proxy_type = "socks5"  # socks5 / http / https（当前不生效）
-proxy_host = ""
+proxy_type = "socks5"  # socks5 / http / https
+proxy_host = ""        # 留空=直连；填写则整个 Telegram 连接走此代理
 proxy_port = 1080
 proxy_username = ""
 proxy_password = ""

@@ -687,6 +687,31 @@ def state_config_payload(config: RuntimeConfig) -> dict[str, Any]:
     }
 
 
+def build_telegram_proxy(config: RuntimeConfig):
+    """根据代理配置构建 telethon 代理元组。
+
+    填了代理地址（relay_proxy_host）→ 返回 PySocks 代理元组，主监听客户端（回源也复用它）
+    全部走该代理；留空 → 返回 None，telethon 直连。
+    """
+    host = str(getattr(config, "relay_proxy_host", "") or "").strip()
+    if not host:
+        return None
+    try:
+        import socks
+    except ModuleNotFoundError as exc:
+        raise RuntimeError("PySocks is required for telegram proxy support") from exc
+    proxy_type = str(getattr(config, "relay_proxy_type", "socks5") or "socks5").strip().lower()
+    proxy_constant = socks.HTTP if proxy_type in ("http", "https") else socks.SOCKS5
+    return (
+        proxy_constant,
+        host,
+        int(getattr(config, "relay_proxy_port", 1080) or 1080),
+        True,
+        getattr(config, "relay_proxy_username", "") or None,
+        getattr(config, "relay_proxy_password", "") or None,
+    )
+
+
 def should_reload_service(old_config: RuntimeConfig, new_config: RuntimeConfig) -> bool:
     if old_config.is_ready != new_config.is_ready:
         return True
@@ -715,6 +740,12 @@ def should_reload_service(old_config: RuntimeConfig, new_config: RuntimeConfig) 
         "db_user",
         "db_password",
         "db_name",
+        # 代理作用于主监听客户端（回源复用之），改动需重建客户端
+        "relay_proxy_type",
+        "relay_proxy_host",
+        "relay_proxy_port",
+        "relay_proxy_username",
+        "relay_proxy_password",
     )
     return any(getattr(old_config, field) != getattr(new_config, field) for field in reload_fields)
 
@@ -2106,6 +2137,7 @@ class Tel2TelDriveService:
                 config.session_name,
                 config.telegram_api_id,
                 config.telegram_api_hash,
+                proxy=build_telegram_proxy(config),
             )
             try:
                 await broker.update_state(

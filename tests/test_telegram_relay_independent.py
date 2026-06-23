@@ -347,6 +347,47 @@ class TelegramRelayIndependentTests(unittest.IsolatedAsyncioTestCase):
         finally:
             await db.delete_telegram_relay_job(job_id)
 
+    def test_build_telegram_proxy_uses_host_only_when_set(self):
+        self.assertIsNone(service_module.build_telegram_proxy(make_runtime(relay_proxy_host="")))
+        proxied = service_module.build_telegram_proxy(make_runtime(
+            relay_proxy_type="http",
+            relay_proxy_host="1.2.3.4",
+            relay_proxy_port=7890,
+        ))
+        self.assertIsNotNone(proxied)
+        self.assertEqual(proxied[1], "1.2.3.4")
+        self.assertEqual(proxied[2], 7890)
+
+    async def test_retry_job_restarts_stuck_active_job(self):
+        manager = relay_module.TelegramRelayManager(FakeLogger(), FakeBroker())
+        config = make_runtime()
+        manager.config = config
+        manager._stopped = False
+        manager._semaphore = asyncio.Semaphore(1)
+        manager.bind_client_getter(lambda: None)  # 未授权 → 调度后的 _run_job 立即早退
+        job_id = relay_module.make_relay_job_id(config.telegram_channel_id, 444)
+        await db.add_telegram_relay_job(
+            job_id,
+            source_channel_id=config.telegram_channel_id,
+            source_message_id=444,
+            file_name="stuck.bin",
+            file_size=100,
+            mime_type="application/octet-stream",
+            local_path=str(Path(config.relay_download_dir) / job_id / "stuck.bin"),
+        )
+        try:
+            await db.update_telegram_relay_job(job_id, status="uploading", upload_progress=42.0)
+            result = await manager.retry_job(job_id)
+            self.assertTrue(result["success"])
+            self.assertEqual(result["data"]["status"], "pending")
+            self.assertEqual(result["data"]["upload_progress"], 0.0)
+        finally:
+            for task in list(manager._tasks.values()):
+                task.cancel()
+            await asyncio.gather(*manager._tasks.values(), return_exceptions=True)
+            manager._tasks.clear()
+            await db.delete_telegram_relay_job(job_id)
+
     def test_mapping_load_migrates_legacy_file_to_runtime_path(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

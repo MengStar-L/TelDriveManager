@@ -4225,7 +4225,8 @@ function getT2TDRelayProgressText(job) {
 function renderT2TDRelayJobActions(job) {
     const jobArg = escapeA2TDJsArg(job.job_id);
     const buttons = [];
-    if (job.status === 'failed' || job.status === 'cancelled') {
+    // 失败/取消，以及卡住的进行中任务都可手动重试（重启该任务）。
+    if (job.status !== 'completed') {
         buttons.push(`<button class="btn btn-ghost btn-sm btn-action btn-action-success" onclick="retryT2TDRelayJob(${jobArg})"><i class="ph ph-arrow-clockwise"></i> 重试</button>`);
     }
     if (T2TD_RELAY_ACTIVE_STATUSES.has(job.status)) {

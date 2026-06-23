@@ -158,8 +158,15 @@ class TelegramRelayManager:
         job = await db.get_telegram_relay_job(job_id)
         if not job:
             return {"success": False, "message": "relay job not found"}
-        if str(job.get("status")) not in {"failed", "cancelled"}:
-            return {"success": False, "message": "only failed or cancelled relay jobs can be retried"}
+        if str(job.get("status")) == "completed":
+            return {"success": False, "message": "completed relay jobs cannot be retried"}
+        # 允许对失败/取消，以及卡住的进行中任务（下载/上传/清理/等待）手动重试：
+        # 先取消可能在跑的任务，避免与重试竞争，再重置状态重新入队。
+        task = self._tasks.pop(job_id, None)
+        if task:
+            task.cancel()
+            with suppress(Exception):
+                await task
         await db.update_telegram_relay_job(
             job_id,
             status="pending",
