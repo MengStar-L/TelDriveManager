@@ -544,8 +544,6 @@ class ConfigStore:
             missing.append("TelDrive Access Token")
         if data["teldrive"]["channel_id"] is None:
             missing.append(FIELD_LABELS["teldrive.channel_id"])
-        if data.get("telegram_relay", {}).get("enabled") and not data.get("telegram_relay", {}).get("proxy_host"):
-            missing.append("Telegram Relay Proxy Host")
         return missing
 
     def _parse_string(self, value: Any, *, fallback: str = "") -> str:
@@ -687,29 +685,6 @@ def state_config_payload(config: RuntimeConfig) -> dict[str, Any]:
         "relay_concurrency": config.relay_concurrency,
         "log_file": config.log_file_path.name,
     }
-
-
-def build_telegram_proxy(config: RuntimeConfig):
-    if not config.relay_enabled:
-        return None
-    if not config.relay_proxy_host:
-        raise RuntimeError("telegram_relay.enabled=true but proxy_host is empty")
-    try:
-        import socks
-    except ModuleNotFoundError as exc:
-        raise RuntimeError("PySocks is required for telegram_relay proxy support") from exc
-    username = config.relay_proxy_username or None
-    password = config.relay_proxy_password or None
-    proxy_type = str(config.relay_proxy_type or "socks5").strip().lower()
-    proxy_constant = socks.HTTP if proxy_type in ("http", "https") else socks.SOCKS5
-    return (
-        proxy_constant,
-        config.relay_proxy_host,
-        int(config.relay_proxy_port),
-        True,
-        username,
-        password,
-    )
 
 
 def should_reload_service(old_config: RuntimeConfig, new_config: RuntimeConfig) -> bool:
@@ -2036,6 +2011,9 @@ class Tel2TelDriveService:
         self.refresh_qr_event = asyncio.Event()
         self.password_future: asyncio.Future[str] | None = None
         self.relay_manager = TelegramRelayManager(logger, broker)
+        # 回源复用主监听客户端：注入“取当前主客户端”的回调（主客户端每次重连会重建，
+        # 用 getter 而非一次性引用，保证重载后的任务重试也能拿到活的客户端）。
+        self.relay_manager.bind_client_getter(lambda: self.client)
         self._running = False
 
     def _start_sync_deletions(self, client: TelegramClient, config: RuntimeConfig):

@@ -60,23 +60,6 @@ class FakeRelayManager:
         return {"job_id": "fake-job"}
 
 
-class FakeConstructedClient:
-    created_args = None
-    created_kwargs = None
-
-    def __init__(self, *args, **kwargs):
-        type(self).created_args = args
-        type(self).created_kwargs = kwargs
-        self.session = SimpleNamespace(filename=f"{args[0]}.session")
-        self.connected = False
-
-    def is_connected(self):
-        return self.connected
-
-    async def connect(self):
-        self.connected = True
-
-
 def make_runtime(**overrides):
     base = dict(
         relay_enabled=True,
@@ -220,36 +203,40 @@ class TelegramRelayIndependentTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(first["source_message_id"], second["source_message_id"])
         self.assertEqual(schedule_calls, [first["job_id"]])
 
-    async def test_relay_client_construction_matches_main_listener_shape(self):
+    async def test_relay_uses_injected_main_client(self):
         manager = relay_module.TelegramRelayManager(FakeLogger(), FakeBroker())
-        config = make_runtime(relay_proxy_host="127.0.0.1")
-        manager.config = config
-        manager._stopped = False
+        sentinel = object()
+        # 回源不再构造独立客户端；它通过注入的 getter 复用主监听客户端。
+        self.assertIsNone(manager._current_client())
+        manager.bind_client_getter(lambda: sentinel)
+        self.assertIs(manager._current_client(), sentinel)
 
-        original_client = relay_module.TelegramClient
-        try:
-            FakeConstructedClient.created_args = None
-            FakeConstructedClient.created_kwargs = None
-            relay_module.TelegramClient = cast(Any, FakeConstructedClient)
-            client = await manager._ensure_client()
-        finally:
-            relay_module.TelegramClient = original_client
-
-        self.assertIsInstance(client, FakeConstructedClient)
-        self.assertEqual(FakeConstructedClient.created_args[:3], (config.relay_session_name, config.telegram_api_id, config.telegram_api_hash))
-        self.assertNotIn("proxy", FakeConstructedClient.created_kwargs)
-
-    async def test_relay_authorized_log_is_emitted_only_on_state_transition(self):
+    async def test_refresh_auth_state_tracks_main_client(self):
         manager = relay_module.TelegramRelayManager(FakeLogger(), FakeBroker())
 
-        await manager._mark_authorized()
-        await manager._mark_authorized()
+        class FakeAuthClient:
+            def __init__(self, connected, authorized):
+                self._connected = connected
+                self._authorized = authorized
 
-        success_logs = [
-            item for item in manager.logs_snapshot()
-            if item["message"] == "Telegram relay login successful"
-        ]
-        self.assertEqual(len(success_logs), 1)
+            def is_connected(self):
+                return self._connected
+
+            async def is_user_authorized(self):
+                return self._authorized
+
+        manager.bind_client_getter(lambda: FakeAuthClient(True, True))
+        await manager._refresh_auth_state()
+        self.assertTrue(manager.state_snapshot()["authorized"])
+        self.assertEqual(manager.state_snapshot()["phase"], "authorized")
+
+        manager.bind_client_getter(lambda: FakeAuthClient(True, False))
+        await manager._refresh_auth_state()
+        self.assertFalse(manager.state_snapshot()["authorized"])
+        self.assertEqual(manager.state_snapshot()["phase"], "waiting_main")
+
+        manager.bind_client_getter(lambda: None)
+        self.assertFalse(await manager._is_authorized())
 
     async def test_main_listener_enqueues_forwarded_video_when_relay_enabled(self):
         service = service_module.Tel2TelDriveService()
@@ -289,7 +276,7 @@ class TelegramRelayIndependentTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(file_info["name"], "video_3456.mp4")
         self.assertEqual(file_info["mime_type"], "video/mp4")
 
-    async def test_relay_job_uses_independent_client_for_download_and_delete(self):
+    async def test_relay_job_uses_main_client_for_download_and_delete(self):
         manager = relay_module.TelegramRelayManager(FakeLogger(), FakeBroker())
         fake_client = FakeRelayClient()
         config = make_runtime()
@@ -308,25 +295,20 @@ class TelegramRelayIndependentTests(unittest.IsolatedAsyncioTestCase):
         )
         remembered_ids = []
 
-        async def fake_ensure_client():
-            return fake_client
-
         async def fake_upload(path, runtime, current_job):
             self.assertEqual(Path(path).read_bytes(), fake_client.payload)
             return {"success": True, "data": {"id": "td-file-1"}}
 
-        original_ensure_client = manager._ensure_client
+        manager.bind_client_getter(lambda: fake_client)
         original_upload = manager._upload_local_file
         original_remember = service_module.remember_internal_deleted_message_ids
         try:
-            manager._ensure_client = cast(Any, fake_ensure_client)
             manager._upload_local_file = cast(Any, fake_upload)
             service_module.remember_internal_deleted_message_ids = cast(Any, lambda ids: remembered_ids.extend(ids))
 
             await manager._process_job(job)
             completed = await db.get_telegram_relay_job(job_id)
         finally:
-            manager._ensure_client = original_ensure_client
             manager._upload_local_file = original_upload
             service_module.remember_internal_deleted_message_ids = original_remember
             await db.delete_telegram_relay_job(job_id)
