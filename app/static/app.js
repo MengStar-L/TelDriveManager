@@ -3903,9 +3903,7 @@ function collectTelegramRelaySettingsPayload() {
         enabled: !!enabled?.checked,
         ...parsed,
     };
-    if (payload.enabled && !payload.proxy_host) {
-        throw new Error('启用回源时必须填写代理链接');
-    }
+    // 代理留空 → 回源直连 Telegram（云端服务器通常可直连）；启用回源不再强制填写代理。
     return payload;
 }
 
@@ -4000,6 +3998,11 @@ async function testTelegramRelayProxy() {
     const oldHtml = testBtn ? testBtn.innerHTML : '';
     const relayPayload = await saveTelegramRelaySocksSettings(null, { quiet: true });
     if (!relayPayload) return;
+
+    if (!String(relayPayload.proxy_host || '').trim()) {
+        setTelegramRelaySettingsStatus('未填写代理链接，回源将直连 Telegram，无需检测。', 'info');
+        return;
+    }
 
     try {
         if (testBtn) {
