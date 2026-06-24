@@ -1344,7 +1344,7 @@ def query_db_mapping(config: RuntimeConfig) -> dict[str, list[int]]:
             database=config.db_name,
         )
         cur = conn.cursor()
-        cur.execute("SELECT id, name, parts, channel_id FROM teldrive.files WHERE type='file' AND parts IS NOT NULL")
+        cur.execute("SELECT id, name, parts, channel_id FROM teldrive.files WHERE type='file' AND status='active' AND parts IS NOT NULL")
         result: dict[str, list[int]] = {}
         skipped = 0
         foreign = 0
@@ -1392,7 +1392,7 @@ def query_db_foreign_file_ids(config: RuntimeConfig) -> set[str]:
             database=config.db_name,
         )
         cur = conn.cursor()
-        cur.execute("SELECT id, channel_id FROM teldrive.files WHERE type='file' AND parts IS NOT NULL")
+        cur.execute("SELECT id, channel_id FROM teldrive.files WHERE type='file' AND status='active' AND parts IS NOT NULL")
         filter_enabled = bool(_channel_id_candidates(config.telegram_channel_id))
         if not filter_enabled:
             conn.close()
@@ -1424,7 +1424,7 @@ def query_db_channel_distribution(config: RuntimeConfig) -> dict[str, int]:
         cur = conn.cursor()
         cur.execute(
             "SELECT channel_id, count(*) FROM teldrive.files "
-            "WHERE type='file' AND parts IS NOT NULL GROUP BY channel_id"
+            "WHERE type='file' AND status='active' AND parts IS NOT NULL GROUP BY channel_id"
         )
         result = {str(row[0]): int(row[1]) for row in cur.fetchall()}
         conn.close()
@@ -1447,7 +1447,7 @@ def query_db_msg_ids(config: RuntimeConfig) -> set[int]:
             database=config.db_name,
         )
         cur = conn.cursor()
-        cur.execute("SELECT parts, channel_id FROM teldrive.files WHERE type='file' AND parts IS NOT NULL")
+        cur.execute("SELECT parts, channel_id FROM teldrive.files WHERE type='file' AND status='active' AND parts IS NOT NULL")
         all_ids: set[int] = set()
         filter_enabled = bool(_channel_id_candidates(config.telegram_channel_id))
         for parts, channel_id in cur.fetchall():
@@ -1703,7 +1703,7 @@ async def build_initial_mapping(client: TelegramClient, config: RuntimeConfig):
             logger.info(f"已从数据库刷新文件映射: {updated} 条")
             logger.info(f"当前文件映射共 {len(saved_mapping)} 条")
             return
-        logger.warning("数据库未返回可用映射，回退到频道扫描")
+        logger.info("数据库无新增映射需刷新（本地已最新或无匹配文件），转频道扫描兜底")
 
     target_names = [
         info.get("name", "")
