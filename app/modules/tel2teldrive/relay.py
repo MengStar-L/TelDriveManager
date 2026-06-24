@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import re
 import shutil
 from collections import deque
@@ -8,6 +9,9 @@ from contextlib import suppress
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
+
+from telethon import TelegramClient
+from telethon.sessions import StringSession
 
 from app import database as db
 from app.modules.aria2teldrive.teldrive_client import TelDriveClient
@@ -31,6 +35,137 @@ def sanitize_filename(name: str, fallback: str) -> str:
     return safe or fallback
 
 
+# 多 bot 并行下载触发下限：小文件单连接已足够，省去多 bot 建连开销
+MULTIBOT_MIN_SIZE = 8 * 1024 * 1024
+# 切片粒度：work-stealing 队列里每个块的大小（bots 抢着下，天然均衡快慢 bot）
+MULTIBOT_BLOCK_SIZE = 16 * 1024 * 1024
+# 单 bot 单块 getFile 请求大小（须为 4KB 倍数且 ≤1MB）
+MULTIBOT_REQUEST_SIZE = 512 * 1024
+# 多 bot 下载用 os.pwrite 定位写盘（POSIX）；非 POSIX（如 Windows）回退单连接
+_HAS_PWRITE = hasattr(os, "pwrite")
+
+
+class BotDownloadPool:
+    """回源专用的 bot 账号下载池（与主监听客户端完全解耦）。
+
+    复用 TelDrive 在 teldrive.bots 里的 bot token——每个 bot 是独立账号、独立限速桶，
+    并发拉取同一文件的不同字节区间后合并写盘，从而把单文件下载提到接近 N 倍。
+    bot 用 token 登录、无需扫码；惰性连接（首次下载才建立连接），跨任务复用。
+    """
+
+    def __init__(self, api_id: int, api_hash: str, tokens: list[str], *,
+                 proxy: Any = None, connections: int = 6, logger: Callable[[str, str], None] | None = None):
+        self.api_id = int(api_id or 0)
+        self.api_hash = str(api_hash or "")
+        self.tokens = [t for t in (tokens or []) if t]
+        self.proxy = proxy
+        self.connections = max(1, int(connections or 1))
+        self._log = logger or (lambda level, msg: None)
+        self._clients: list[Any] = []
+        self._cursor = 0           # 下一个待尝试的 token 下标（跳过坏 token，不回头）
+        self._lock = asyncio.Lock()
+
+    def signature(self) -> tuple:
+        """用于判断配置是否变化、是否需要重建池。"""
+        return (tuple(self.tokens), self.proxy, self.api_id, self.api_hash)
+
+    def usable(self) -> bool:
+        return _HAS_PWRITE and bool(self.tokens) and self.api_id > 0 and bool(self.api_hash)
+
+    async def _acquire(self, n: int) -> list[Any]:
+        """惰性连接，确保至多 n 个（受 token 数与 connections 上限约束）bot 在线。"""
+        async with self._lock:
+            target = min(n, self.connections, len(self.tokens))
+            while len(self._clients) < target and self._cursor < len(self.tokens):
+                tok = self.tokens[self._cursor]
+                self._cursor += 1
+                try:
+                    c = TelegramClient(StringSession(), self.api_id, self.api_hash, proxy=self.proxy)
+                    await c.start(bot_token=tok)
+                    self._clients.append(c)
+                except Exception as exc:
+                    self._log("WARN", f"回源 bot 启动失败已跳过: {type(exc).__name__}: {exc}")
+            return list(self._clients)
+
+    async def close(self):
+        async with self._lock:
+            for c in self._clients:
+                with suppress(Exception):
+                    await c.disconnect()
+            self._clients = []
+            self._cursor = 0
+
+    async def download(self, channel_id: int, msg_id: int, dest_path: str,
+                       file_size: int, want: int, on_progress: Callable[[int, int], None] | None) -> bool:
+        """用 bot 池并行下载单条消息的媒体到 dest_path。成功返回 True；失败/不可用返回 False（调用方回退单连接）。"""
+        if file_size <= 0:
+            return False  # 未知大小无法切片，交回退处理
+        clients = await self._acquire(want)
+        if not clients:
+            return False
+
+        # 每个 bot 各自取一份 document：拿到“对自己账号有效”的 file_reference，规避跨账号失效
+        live: list[Any] = []
+        docs: list[Any] = []
+        for c in clients:
+            try:
+                m = await c.get_messages(channel_id, ids=msg_id)
+                doc = getattr(m, "document", None) if m else None
+                if doc is not None:
+                    live.append(c)
+                    docs.append(doc)
+            except Exception as exc:
+                self._log("WARN", f"回源 bot 取源消息失败，跳过: {type(exc).__name__}: {exc}")
+        if not live:
+            return False
+
+        # 预分配文件，便于各 worker 用 pwrite 定位写入
+        with open(dest_path, "wb") as f:
+            f.truncate(file_size)
+
+        q: asyncio.Queue = asyncio.Queue()
+        for off in range(0, file_size, MULTIBOT_BLOCK_SIZE):
+            q.put_nowait((off, min(MULTIBOT_BLOCK_SIZE, file_size - off)))
+
+        fd = os.open(dest_path, os.O_WRONLY)
+        progress = {"done": 0}
+
+        async def worker(client: Any, doc: Any):
+            fails = 0
+            while True:
+                try:
+                    off, length = q.get_nowait()
+                except asyncio.QueueEmpty:
+                    return
+                try:
+                    pos = off
+                    # iter_download 的 limit 单位是“块数”而非字节；offset/file_size 才是字节。
+                    limit_chunks = (length + MULTIBOT_REQUEST_SIZE - 1) // MULTIBOT_REQUEST_SIZE
+                    async for part in client.iter_download(
+                        doc, offset=off, limit=limit_chunks,
+                        request_size=MULTIBOT_REQUEST_SIZE, file_size=file_size,
+                    ):
+                        os.pwrite(fd, part, pos)
+                        pos += len(part)
+                        progress["done"] += len(part)
+                        if on_progress:
+                            on_progress(progress["done"], file_size)
+                    fails = 0
+                except Exception as exc:
+                    q.put_nowait((off, length))     # 退回给其他 bot（FLOOD_WAIT/抖动）
+                    fails += 1
+                    self._log("WARN", f"回源 bot 分块下载失败，退回重试: {type(exc).__name__}: {exc}")
+                    if fails >= 3:
+                        return                       # 放弃这个 bot，让健康 bot 继续清空队列
+                    await asyncio.sleep(1)
+
+        try:
+            await asyncio.gather(*[worker(c, d) for c, d in zip(live, docs)])
+            return q.empty()
+        finally:
+            os.close(fd)
+
+
 class TelegramRelayManager:
     """回源（relay）队列管理器。
 
@@ -49,6 +184,7 @@ class TelegramRelayManager:
         self._tasks: dict[str, asyncio.Task[Any]] = {}
         self._semaphore: asyncio.Semaphore | None = None
         self._concurrency: int = 1
+        self._bot_pool: BotDownloadPool | None = None
         self._stopped = True
         self._watchdog_task: asyncio.Task[Any] | None = None
         self._download_speed: dict[str, float] = {}
@@ -97,9 +233,47 @@ class TelegramRelayManager:
             await self.stop()
             return
         self._stopped = False
+        await self._refresh_bot_pool(config)
         await self._refresh_auth_state()
         self._ensure_watchdog()
         await self._schedule_active_jobs()
+
+    async def _refresh_bot_pool(self, config: Any):
+        """根据配置（惰性）准备回源 bot 下载池：仅更新 token/代理/连接数，真正下载时才建连。"""
+        if not bool(getattr(config, "relay_multibot_enabled", False)):
+            if self._bot_pool is not None:
+                await self._bot_pool.close()
+                self._bot_pool = None
+            return
+        from app.modules.tel2teldrive.service import (
+            build_telegram_proxy,
+            query_db_bot_tokens,
+            run_blocking_io,
+        )
+
+        tokens = await run_blocking_io(query_db_bot_tokens, config)
+        proxy = build_telegram_proxy(config)
+        connections = max(1, int(getattr(config, "relay_download_connections", 6) or 6))
+        api_id = int(getattr(config, "telegram_api_id", 0) or 0)
+        api_hash = str(getattr(config, "telegram_api_hash", "") or "")
+        new_sig = (tuple(tokens), proxy, api_id, api_hash)
+        if self._bot_pool is not None and self._bot_pool.signature() == new_sig:
+            self._bot_pool.connections = connections  # 仅连接数变化，热更新即可
+            return
+        if self._bot_pool is not None:
+            await self._bot_pool.close()
+        if not tokens:
+            self._bot_pool = None
+            self._log("WARN", "多 bot 下载已开启，但 teldrive.bots 无可用 token，回源将回退单连接下载")
+            return
+        self._bot_pool = BotDownloadPool(
+            api_id, api_hash, tokens, proxy=proxy, connections=connections, logger=self._log
+        )
+        self._log(
+            "INFO",
+            f"回源多 bot 下载池就绪: {len(tokens)} 个 bot，目标并发 {min(connections, len(tokens))}"
+            f"{'，走代理' if proxy else '，直连'}",
+        )
 
     async def stop(self):
         self._stopped = True
@@ -115,6 +289,9 @@ class TelegramRelayManager:
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
         # 注意：绝不在此断开主监听客户端——它由主服务负责生命周期。
+        if self._bot_pool is not None:
+            await self._bot_pool.close()
+            self._bot_pool = None
         await self._update_state(
             phase="disabled",
             enabled=False,
@@ -388,8 +565,10 @@ class TelegramRelayManager:
         loop = asyncio.get_running_loop()
         last_report = {"time": loop.time(), "progress": -1.0, "bytes": 0}
         job_id = job["job_id"]
+        file_size = int(job.get("file_size") or 0)
 
         def progress_callback(current: int, total: int):
+            total = total or file_size
             progress = round((current / total) * 100, 1) if total else 0.0
             now = loop.time()
             if progress < 100 and progress - last_report["progress"] < 2.0 and now - last_report["time"] < 1.5:
@@ -401,12 +580,34 @@ class TelegramRelayManager:
             last_report["bytes"] = current
             loop.create_task(self._update_download_progress(job_id, progress, max(0.0, speed)))
 
-        downloaded = await client.download_media(message, file=str(path), progress_callback=progress_callback)
-        final_path = Path(downloaded) if downloaded else path
-        if final_path != path and final_path.exists():
-            if path.exists():
-                path.unlink()
-            final_path.replace(path)
+        # 优先走 bot 池并行下载（大文件）；不可用/失败则回退主客户端单连接下载
+        used_pool = False
+        pool = self._bot_pool
+        if pool is not None and pool.usable() and file_size >= MULTIBOT_MIN_SIZE:
+            want = max(1, int(getattr(self.config, "relay_download_connections", 6) or 6))
+            try:
+                used_pool = await pool.download(
+                    int(job["source_channel_id"]),
+                    int(job["source_message_id"]),
+                    str(path),
+                    file_size,
+                    want,
+                    progress_callback,
+                )
+                if not used_pool:
+                    self._log("WARN", f"多 bot 下载未完成，回退单连接: {job.get('file_name')}")
+            except Exception as exc:
+                self._log("WARN", f"多 bot 下载异常，回退单连接: {type(exc).__name__}: {exc}")
+                used_pool = False
+
+        if not used_pool:
+            downloaded = await client.download_media(message, file=str(path), progress_callback=progress_callback)
+            final_path = Path(downloaded) if downloaded else path
+            if final_path != path and final_path.exists():
+                if path.exists():
+                    path.unlink()
+                final_path.replace(path)
+
         if not path.exists():
             raise RuntimeError("Telegram download did not create local file")
         await db.update_telegram_relay_job(job_id, download_progress=100.0, local_path=str(path))

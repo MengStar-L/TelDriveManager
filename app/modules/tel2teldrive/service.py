@@ -112,6 +112,10 @@ DEFAULT_CONFIG: dict[str, dict[str, Any]] = {
         "download_dir": "./telegram_relay",
         "concurrency": 1,
         "max_retries": 3,
+        # 多 bot 并行下载：复用 TelDrive 在 teldrive.bots 里的 bot token，
+        # 每个 bot 是独立账号=独立限速桶，并发拉取不同字节区间，大幅提速回源下载。
+        "multibot_enabled": True,
+        "download_connections": 6,
     },
     "telegram_db": {
         "host": "",
@@ -187,6 +191,8 @@ class RuntimeConfig:
     relay_download_dir: str
     relay_concurrency: int
     relay_max_retries: int
+    relay_multibot_enabled: bool
+    relay_download_connections: int
     db_host: str
     db_port: int
     db_user: str
@@ -297,6 +303,8 @@ class ConfigStore:
             relay_download_dir=relay.get("download_dir", "./telegram_relay"),
             relay_concurrency=relay.get("concurrency", 1),
             relay_max_retries=relay.get("max_retries", 3),
+            relay_multibot_enabled=relay.get("multibot_enabled", DEFAULT_CONFIG["telegram_relay"]["multibot_enabled"]),
+            relay_download_connections=relay.get("download_connections", DEFAULT_CONFIG["telegram_relay"]["download_connections"]),
             db_host=data.get("telegram_db", {}).get("host", ""),
             db_port=data.get("telegram_db", {}).get("port", 5432),
             db_user=data.get("telegram_db", {}).get("user", ""),
@@ -357,6 +365,8 @@ class ConfigStore:
                 "download_dir": runtime.relay_download_dir,
                 "concurrency": runtime.relay_concurrency,
                 "max_retries": runtime.relay_max_retries,
+                "multibot_enabled": runtime.relay_multibot_enabled,
+                "download_connections": runtime.relay_download_connections,
             },
             "web": {
                 "host": runtime.web_host,
@@ -498,6 +508,16 @@ class ConfigStore:
             relay_payload.get("max_retries"),
             "relay max retries",
             default=DEFAULT_CONFIG["telegram_relay"]["max_retries"],
+            strict=strict,
+        )
+        relay["multibot_enabled"] = self._parse_bool(
+            relay_payload.get("multibot_enabled"),
+            default=DEFAULT_CONFIG["telegram_relay"]["multibot_enabled"],
+        )
+        relay["download_connections"] = self._parse_positive_int(
+            relay_payload.get("download_connections"),
+            "relay download connections",
+            default=DEFAULT_CONFIG["telegram_relay"]["download_connections"],
             strict=strict,
         )
 
@@ -684,15 +704,18 @@ def state_config_payload(config: RuntimeConfig) -> dict[str, Any]:
         "relay_enabled": config.relay_enabled,
         "relay_session_name": config.relay_session_name,
         "relay_concurrency": config.relay_concurrency,
+        "relay_multibot_enabled": config.relay_multibot_enabled,
+        "relay_download_connections": config.relay_download_connections,
         "log_file": config.log_file_path.name,
     }
 
 
 def build_telegram_proxy(config: RuntimeConfig):
-    """根据代理配置构建 telethon 代理元组。
+    """构建回源 bot 下载池使用的 telethon 代理元组。
 
-    填了代理地址（relay_proxy_host）→ 返回 PySocks 代理元组，主监听客户端（回源也复用它）
-    全部走该代理；留空 → 返回 None，telethon 直连。
+    填了代理地址（relay_proxy_host）→ 返回 PySocks 代理元组，bot 下载池走该代理；
+    留空 → 返回 None，bot 池直连。
+    注意：主监听客户端不受此影响，始终直连。
     """
     host = str(getattr(config, "relay_proxy_host", "") or "").strip()
     if not host:
@@ -741,12 +764,8 @@ def should_reload_service(old_config: RuntimeConfig, new_config: RuntimeConfig) 
         "db_user",
         "db_password",
         "db_name",
-        # 代理作用于主监听客户端（回源复用之），改动需重建客户端
-        "relay_proxy_type",
-        "relay_proxy_host",
-        "relay_proxy_port",
-        "relay_proxy_username",
-        "relay_proxy_password",
+        # 注意：relay_proxy_* 不在此列——代理现在只作用于回源 bot 下载池，
+        # 由 relay_manager.apply_config 热生效，无需重建主监听客户端（主客户端始终直连）。
     )
     return any(getattr(old_config, field) != getattr(new_config, field) for field in reload_fields)
 
@@ -1432,6 +1451,32 @@ def query_db_channel_distribution(config: RuntimeConfig) -> dict[str, int]:
     except Exception as exc:
         logger.warning(f"TelDrive 频道分布查询失败: {exc}")
         return {}
+
+
+def query_db_bot_tokens(config: RuntimeConfig) -> list[str]:
+    """从 TelDrive 数据库 teldrive.bots 读取 bot token，用于回源多 bot 并行下载。
+
+    这些 bot 是 TelDrive 上传分块时所用、已是存储频道的管理员，对分块消息有读取权限，
+    复用它们即可获得“多账号=多限速桶”的并行下载，无需新建/登录任何 bot。
+    """
+    if not config.db_enabled:
+        return []
+    try:
+        conn = psycopg2.connect(
+            host=config.db_host,
+            port=config.db_port,
+            user=config.db_user,
+            password=config.db_password,
+            database=config.db_name,
+        )
+        cur = conn.cursor()
+        cur.execute("SELECT DISTINCT token FROM teldrive.bots WHERE token IS NOT NULL AND token <> ''")
+        tokens = [str(row[0]).strip() for row in cur.fetchall() if str(row[0] or "").strip()]
+        conn.close()
+        return tokens
+    except Exception as exc:
+        logger.warning(f"TelDrive bot token 查询失败: {exc}")
+        return []
 
 
 def query_db_msg_ids(config: RuntimeConfig) -> set[int]:
@@ -2150,13 +2195,13 @@ class Tel2TelDriveService:
 
             self.reload_event.clear()
             try:
-                # 客户端构造（含 build_telegram_proxy）放进 try：代理缺依赖/配置错误时
-                # 走下面的异常重试分支，而不是逃出循环把服务焊死。
+                # 主监听客户端始终直连（不走代理）：监听轻量、对延迟敏感，且与回源解耦。
+                # 代理只作用于回源 bot 下载池（见 relay.py / build_telegram_proxy）。
                 self.client = TelegramClient(
                     config.session_name,
                     config.telegram_api_id,
                     config.telegram_api_hash,
-                    proxy=build_telegram_proxy(config),
+                    proxy=None,
                 )
                 await broker.update_state(
                     phase="connecting",

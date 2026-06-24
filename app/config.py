@@ -96,6 +96,8 @@ DEFAULTS: dict[str, Any] = {
         "download_dir": "./telegram_relay",
         "concurrency": 1,
         "max_retries": 3,
+        "multibot_enabled": True,
+        "download_connections": 6,
     },
     "telegram_db": {
         "host": "", "port": 5432, "user": "", "password": "", "name": "postgres",
@@ -339,6 +341,8 @@ def _normalize_config(merged: dict, raw: dict | None = None) -> dict:
     telegram_relay_cfg["download_dir"] = str(telegram_relay_cfg.get("download_dir") or "./telegram_relay").strip() or "./telegram_relay"
     telegram_relay_cfg["concurrency"] = max(1, int(telegram_relay_cfg.get("concurrency") or 1))
     telegram_relay_cfg["max_retries"] = max(1, int(telegram_relay_cfg.get("max_retries") or 3))
+    telegram_relay_cfg["multibot_enabled"] = bool(telegram_relay_cfg.get("multibot_enabled", True))
+    telegram_relay_cfg["download_connections"] = max(1, int(telegram_relay_cfg.get("download_connections") or 6))
 
     log_cfg["buffer_size"] = max(50, int(log_cfg.get("buffer_size") or 400))
     log_cfg["file"] = str(log_cfg.get("file") or "runtime.log").strip() or "runtime.log"

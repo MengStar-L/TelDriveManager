@@ -3189,7 +3189,9 @@ function collectSettingsConfig() {
             proxy_password: document.getElementById('cfgTelegramRelayProxyPassword')?.value || '',
             download_dir: document.getElementById('cfgTelegramRelayDownloadDir')?.value.trim() || currentRelay.download_dir || './telegram_relay',
             concurrency: Math.max(1, parseInt(document.getElementById('cfgTelegramRelayConcurrency')?.value, 10) || currentRelay.concurrency || 1),
-            max_retries: Math.max(1, parseInt(document.getElementById('cfgTelegramRelayMaxRetries')?.value, 10) || currentRelay.max_retries || 3)
+            max_retries: Math.max(1, parseInt(document.getElementById('cfgTelegramRelayMaxRetries')?.value, 10) || currentRelay.max_retries || 3),
+            multibot_enabled: !!document.getElementById('cfgTelegramRelayMultibotEnabled')?.checked,
+            download_connections: Math.max(1, parseInt(document.getElementById('cfgTelegramRelayDownloadConnections')?.value, 10) || currentRelay.download_connections || 6)
         },
         telegram_db: {
             host: document.getElementById('cfgDbHost').value,
@@ -3274,6 +3276,10 @@ async function loadConfig() {
         document.getElementById('cfgTelegramRelayDownloadDir').value = cfg.telegram_relay?.download_dir || './telegram_relay';
         document.getElementById('cfgTelegramRelayConcurrency').value = cfg.telegram_relay?.concurrency || 1;
         document.getElementById('cfgTelegramRelayMaxRetries').value = cfg.telegram_relay?.max_retries || 3;
+        const relayMultibot = document.getElementById('cfgTelegramRelayMultibotEnabled');
+        if (relayMultibot) relayMultibot.checked = cfg.telegram_relay?.multibot_enabled !== false;
+        const relayConns = document.getElementById('cfgTelegramRelayDownloadConnections');
+        if (relayConns) relayConns.value = cfg.telegram_relay?.download_connections || 6;
         if (document.getElementById('telegramRelaySettingsModal')?.classList.contains('show')) {
             fillTelegramRelaySettingsForm(cfg.telegram_relay || {});
         }
@@ -3863,10 +3869,13 @@ function applyTelegramRelayConfigToSettingsInputs(relay = {}) {
         ['cfgTelegramRelayProxyPassword', relay.proxy_password || ''],
         ['cfgTelegramRelayDownloadDir', relay.download_dir || './telegram_relay'],
         ['cfgTelegramRelayConcurrency', relay.concurrency || 1],
+        ['cfgTelegramRelayDownloadConnections', relay.download_connections || 6],
         ['cfgTelegramRelayMaxRetries', relay.max_retries || 3],
     ];
     const enabled = document.getElementById('cfgTelegramRelayEnabled');
     if (enabled) enabled.checked = !!relay.enabled;
+    const multibot = document.getElementById('cfgTelegramRelayMultibotEnabled');
+    if (multibot) multibot.checked = relay.multibot_enabled !== false;
     mappings.forEach(([id, value]) => {
         const el = document.getElementById(id);
         if (el) el.value = value;
