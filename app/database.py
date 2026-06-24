@@ -70,6 +70,9 @@ CREATE TABLE IF NOT EXISTS telegram_relay_jobs (
     local_path TEXT DEFAULT '',
     teldrive_file_id TEXT DEFAULT '',
     upload_id TEXT DEFAULT '',
+    upload_confirmed_parts_json TEXT DEFAULT '[]',
+    upload_remote_parts_json TEXT DEFAULT '[]',
+    upload_source_fingerprint TEXT DEFAULT '',
     error TEXT,
     retry_count INTEGER DEFAULT 0,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -151,6 +154,10 @@ async def init_db():
     await _ensure_column(conn, "tasks", "source_size_bytes", "INTEGER DEFAULT 0")
     await conn.execute(CREATE_PROGRESS_LOGS_TABLE_SQL)
     await conn.execute(CREATE_TELEGRAM_RELAY_JOBS_TABLE_SQL)
+    # 回源上传断点续传所需列（旧库迁移）
+    await _ensure_column(conn, "telegram_relay_jobs", "upload_confirmed_parts_json", "TEXT DEFAULT '[]'")
+    await _ensure_column(conn, "telegram_relay_jobs", "upload_remote_parts_json", "TEXT DEFAULT '[]'")
+    await _ensure_column(conn, "telegram_relay_jobs", "upload_source_fingerprint", "TEXT DEFAULT ''")
     await conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_telegram_relay_jobs_status ON telegram_relay_jobs(status, updated_at DESC)")
     await conn.execute(
@@ -620,6 +627,9 @@ async def update_telegram_relay_job(job_id: str, **kwargs) -> None:
         "local_path",
         "teldrive_file_id",
         "upload_id",
+        "upload_confirmed_parts_json",
+        "upload_remote_parts_json",
+        "upload_source_fingerprint",
         "error",
         "retry_count",
         "completed_at",

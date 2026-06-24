@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import re
 import shutil
+import uuid
 from collections import deque
 from contextlib import suppress
 from datetime import datetime
@@ -200,6 +202,7 @@ class TelegramRelayManager:
         self._watchdog_task: asyncio.Task[Any] | None = None
         self._download_speed: dict[str, float] = {}
         self._download_bots: dict[str, int] = {}
+        self._upload_workers: dict[str, int] = {}
         self._logs: deque[dict[str, Any]] = deque(maxlen=RELAY_LOG_LIMIT)
         self._state: dict[str, Any] = {
             "phase": "disabled",
@@ -563,6 +566,8 @@ class TelegramRelayManager:
             upload_progress=100.0,
             teldrive_file_id=file_id or "",
             upload_id=upload_id,
+            upload_confirmed_parts_json="[]",
+            upload_remote_parts_json="[]",
         )
         await self._broadcast_job_id(job_id)
 
@@ -640,6 +645,27 @@ class TelegramRelayManager:
         await db.update_telegram_relay_job(job_id, download_progress=100.0, local_path=str(path))
         await self._broadcast_job_id(job_id)
 
+    @staticmethod
+    def _calc_upload_fingerprint(path: Path, chunk_size: int) -> str:
+        """上传源指纹：chunk_size + 文件大小 + mtime。任一变化即判续传 checkpoint 失效
+        （chunk_size 变 → partNo 边界错位；文件变 → 内容错位），续传前丢弃重传。
+        mtime 用纳秒（st_mtime_ns），避免同秒内同尺寸内容替换被整秒截断成相同指纹。"""
+        try:
+            stat = path.stat()
+        except OSError:
+            return ""
+        return f"chunk={int(chunk_size or 0)}|size={stat.st_size}|mtime={stat.st_mtime_ns}"
+
+    @staticmethod
+    def _load_json_list(raw: Any) -> list:
+        if isinstance(raw, (list, tuple)):
+            return list(raw)
+        try:
+            data = json.loads(raw) if raw else []
+        except (TypeError, ValueError):
+            return []
+        return data if isinstance(data, list) else []
+
     async def _upload_local_file(self, path: Path, config: Any, job: dict) -> dict:
         teldrive = TelDriveClient(
             api_host=config.teldrive_url,
@@ -670,11 +696,74 @@ class TelegramRelayManager:
             await db.update_telegram_relay_job(job_id, upload_progress=progress)
             await self._broadcast_job_id(job_id)
 
-        return await teldrive.upload_file_chunked(
-            str(path),
-            str(config.teldrive_target_path or "/"),
-            progress_callback,
-        )
+        # 与正常文件上传一致：上报“当前并行上传分块数”，>1 时前端卡片展示一致的“N 路并行”徽标。
+        # 仅在并行上传（upload.parallel_chunk_upload）开启且多块文件时，TelDriveClient 才会回调 >1。
+        def report_workers(active: int):
+            try:
+                n = int(active or 0)
+            except (TypeError, ValueError):
+                n = 0
+            if n > 1:
+                self._upload_workers[job_id] = n
+            else:
+                self._upload_workers.pop(job_id, None)
+
+        # 断点续传：复用上次未完成上传的 upload_id + 已确认分块，避免每次失败整文件重传
+        # （回源常失败的根因）。源指纹（chunk_size+大小+mtime）变化即判 checkpoint 失效。
+        current_fp = self._calc_upload_fingerprint(path, teldrive.chunk_size)
+        stored_fp = str(job.get("upload_source_fingerprint") or "")
+        persisted_upload_id = str(job.get("upload_id") or "").strip()
+        resumable = bool(persisted_upload_id and current_fp and stored_fp == current_fp)
+        if resumable:
+            upload_id = persisted_upload_id
+            confirmed_part_numbers = self._load_json_list(job.get("upload_confirmed_parts_json"))
+            remote_parts = self._load_json_list(job.get("upload_remote_parts_json"))
+            if confirmed_part_numbers or remote_parts:
+                self._log(
+                    "INFO",
+                    f"回源上传续传: {job.get('file_name')} 复用 {len(confirmed_part_numbers)} 个已确认分块",
+                )
+        else:
+            # 指纹变了（chunk_size/本地文件变更）→ 丢弃服务端旧会话，换新 upload_id，避免错位旧块混入
+            if persisted_upload_id and stored_fp and stored_fp != current_fp:
+                with suppress(Exception):
+                    await teldrive.cleanup_upload_session(persisted_upload_id)
+            upload_id = str(uuid.uuid4())
+            confirmed_part_numbers = []
+            remote_parts = []
+            await db.update_telegram_relay_job(
+                job_id,
+                upload_id=upload_id,
+                upload_source_fingerprint=current_fp,
+                upload_confirmed_parts_json="[]",
+                upload_remote_parts_json="[]",
+            )
+
+        async def part_confirm_callback(part_no, part, confirmed_numbers, confirmed_remote_parts, total_parts):
+            # 每确认一个分块就落库（best-effort）；落库失败只是退化为不续传，绝不连累本次上传
+            try:
+                await db.update_telegram_relay_job(
+                    job_id,
+                    upload_id=upload_id,
+                    upload_confirmed_parts_json=json.dumps(confirmed_numbers, ensure_ascii=False),
+                    upload_remote_parts_json=json.dumps(confirmed_remote_parts, ensure_ascii=False),
+                )
+            except Exception as exc:
+                self._log("WARN", f"回源上传 checkpoint 落库失败（不影响本次上传）: {type(exc).__name__}: {exc}")
+
+        try:
+            return await teldrive.upload_file_chunked(
+                str(path),
+                str(config.teldrive_target_path or "/"),
+                progress_callback,
+                upload_id=upload_id,
+                confirmed_part_numbers=confirmed_part_numbers,
+                remote_parts=remote_parts,
+                part_confirm_callback=part_confirm_callback,
+                concurrency_callback=report_workers,
+            )
+        finally:
+            self._upload_workers.pop(job_id, None)
 
     async def _record_teldrive_mapping(self, config: Any, job: dict, result: dict) -> str:
         data = result.get("data") if isinstance(result.get("data"), dict) else {}
@@ -751,7 +840,8 @@ class TelegramRelayManager:
         # download_speed 为运行时瞬时值（不落库），仅下载中携带，其余状态归零并清理。
         payload = dict(job)
         job_id = payload.get("job_id")
-        if str(payload.get("status")) == "downloading":
+        status = str(payload.get("status"))
+        if status == "downloading":
             payload["download_speed"] = self._download_speed.get(job_id, 0.0)
             payload["download_bots"] = self._download_bots.get(job_id, 0)
         else:
@@ -759,6 +849,12 @@ class TelegramRelayManager:
             self._download_bots.pop(job_id, None)
             payload["download_speed"] = 0.0
             payload["download_bots"] = 0
+        # upload_workers 同为运行时瞬时值（不落库），仅上传中携带，其余状态归零并清理。
+        if status == "uploading":
+            payload["upload_workers"] = self._upload_workers.get(job_id, 0)
+        else:
+            self._upload_workers.pop(job_id, None)
+            payload["upload_workers"] = 0
         await self.broker._broadcast({"type": "relay_job_update", "payload": payload})
 
     async def _update_state(self, **kwargs: Any):

@@ -1,4 +1,5 @@
 import asyncio
+import json
 import tempfile
 import unittest
 from dataclasses import replace
@@ -316,6 +317,143 @@ class TelegramRelayIndependentTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(completed["status"], "completed")
         self.assertEqual(fake_client.deleted, [(config.telegram_channel_id, [222])])
         self.assertEqual(remembered_ids, [222])
+
+    async def test_relay_upload_resumes_with_persisted_checkpoint(self):
+        """上传失败后，重试复用同一 upload_id + 已确认分块续传，而非整文件重传。"""
+        manager = relay_module.TelegramRelayManager(FakeLogger(), FakeBroker())
+        config = make_runtime()
+        manager.config = config
+        job_id = relay_module.make_relay_job_id(config.telegram_channel_id, 555)
+        local_path = Path(config.relay_download_dir) / job_id / "resume.bin"
+        local_path.parent.mkdir(parents=True, exist_ok=True)
+        local_path.write_bytes(b"x" * 4096)
+        await db.add_telegram_relay_job(
+            job_id,
+            source_channel_id=config.telegram_channel_id,
+            source_message_id=555,
+            file_name="resume.bin",
+            file_size=4096,
+            local_path=str(local_path),
+        )
+
+        calls: list[dict] = []
+        cleanup: list[str] = []
+        attempt = {"n": 0}
+        remote_p1 = {"partNo": 1, "partId": 101, "size": 4096}
+        remote_p2 = {"partNo": 2, "partId": 102, "size": 4096}
+
+        class FakeTelDrive:
+            def __init__(self, **kwargs):
+                self.chunk_size = 100 * 1024 * 1024
+
+            async def cleanup_upload_session(self, upload_id):
+                cleanup.append(upload_id)
+
+            async def upload_file_chunked(self, p, target, progress_callback, *,
+                                          upload_id=None, confirmed_part_numbers=None,
+                                          remote_parts=None, part_confirm_callback=None,
+                                          concurrency_callback=None):
+                calls.append({
+                    "upload_id": upload_id,
+                    "confirmed": list(confirmed_part_numbers or []),
+                    "remote": list(remote_parts or []),
+                })
+                attempt["n"] += 1
+                if attempt["n"] == 1:
+                    await part_confirm_callback(1, remote_p1, [1], [remote_p1], 2)
+                    raise RuntimeError("simulated chunk failure")
+                await part_confirm_callback(2, remote_p2, [1, 2], [remote_p1, remote_p2], 2)
+                return {"success": True, "data": {"id": "td-resume-1"}}
+
+        original = relay_module.TelDriveClient
+        relay_module.TelDriveClient = cast(Any, FakeTelDrive)
+        try:
+            job1 = await db.get_telegram_relay_job(job_id)
+            with self.assertRaises(RuntimeError):
+                await manager._upload_local_file(local_path, config, job1)
+
+            after1 = await db.get_telegram_relay_job(job_id)
+            first_uid = after1["upload_id"]
+            self.assertTrue(first_uid)
+            self.assertEqual(json.loads(after1["upload_confirmed_parts_json"]), [1])
+            self.assertEqual(json.loads(after1["upload_remote_parts_json"]), [remote_p1])
+            self.assertTrue(after1["upload_source_fingerprint"])
+
+            # 第二次（重试）：同一 job 行带着 checkpoint 进来，必须续传
+            result = await manager._upload_local_file(local_path, config, after1)
+            self.assertTrue(result["success"])
+        finally:
+            relay_module.TelDriveClient = original
+            await db.delete_telegram_relay_job(job_id)
+
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(calls[1]["upload_id"], first_uid)      # 复用 upload_id
+        self.assertEqual(calls[1]["confirmed"], [1])            # 跳过已确认的块 1
+        self.assertEqual(calls[1]["remote"], [remote_p1])
+        self.assertEqual(cleanup, [])                           # 指纹未变，不清服务端会话
+
+    async def test_relay_upload_discards_stale_checkpoint_on_fingerprint_change(self):
+        """源指纹（chunk_size/文件）变更时，丢弃旧 checkpoint、清旧会话、换新 upload_id 重传。"""
+        manager = relay_module.TelegramRelayManager(FakeLogger(), FakeBroker())
+        config = make_runtime()
+        manager.config = config
+        job_id = relay_module.make_relay_job_id(config.telegram_channel_id, 556)
+        local_path = Path(config.relay_download_dir) / job_id / "stale.bin"
+        local_path.parent.mkdir(parents=True, exist_ok=True)
+        local_path.write_bytes(b"y" * 4096)
+        await db.add_telegram_relay_job(
+            job_id,
+            source_channel_id=config.telegram_channel_id,
+            source_message_id=556,
+            file_name="stale.bin",
+            file_size=4096,
+            local_path=str(local_path),
+        )
+        # 注入一个不可能匹配当前文件的旧指纹 + 旧 checkpoint
+        await db.update_telegram_relay_job(
+            job_id,
+            upload_id="stale-upload-id",
+            upload_source_fingerprint="chunk=1|size=1|mtime=1",
+            upload_confirmed_parts_json="[1]",
+            upload_remote_parts_json=json.dumps([{"partNo": 1, "partId": 9, "size": 1}]),
+        )
+
+        calls: list[dict] = []
+        cleanup: list[str] = []
+
+        class FakeTelDrive:
+            def __init__(self, **kwargs):
+                self.chunk_size = 100 * 1024 * 1024
+
+            async def cleanup_upload_session(self, upload_id):
+                cleanup.append(upload_id)
+
+            async def upload_file_chunked(self, p, target, progress_callback, *,
+                                          upload_id=None, confirmed_part_numbers=None,
+                                          remote_parts=None, part_confirm_callback=None,
+                                          concurrency_callback=None):
+                calls.append({
+                    "upload_id": upload_id,
+                    "confirmed": list(confirmed_part_numbers or []),
+                    "remote": list(remote_parts or []),
+                })
+                return {"success": True, "data": {"id": "td-stale-1"}}
+
+        original = relay_module.TelDriveClient
+        relay_module.TelDriveClient = cast(Any, FakeTelDrive)
+        try:
+            job = await db.get_telegram_relay_job(job_id)
+            result = await manager._upload_local_file(local_path, config, job)
+            self.assertTrue(result["success"])
+        finally:
+            relay_module.TelDriveClient = original
+            await db.delete_telegram_relay_job(job_id)
+
+        self.assertEqual(cleanup, ["stale-upload-id"])          # 旧服务端会话被清理
+        self.assertEqual(len(calls), 1)
+        self.assertNotEqual(calls[0]["upload_id"], "stale-upload-id")  # 换了新 upload_id
+        self.assertEqual(calls[0]["confirmed"], [])             # 旧已确认分块被丢弃
+        self.assertEqual(calls[0]["remote"], [])
 
     async def test_download_speed_broadcast_only_while_downloading(self):
         broker = FakeBroker()

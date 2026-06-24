@@ -4058,6 +4058,7 @@ function normalizeT2TDRelayJob(item = {}) {
         upload_progress: Math.max(0, Math.min(100, Number(item.upload_progress || 0) || 0)),
         download_speed: Math.max(0, Number(item.download_speed || 0) || 0),
         download_bots: Math.max(0, Number(item.download_bots || 0) || 0),
+        upload_workers: Math.max(0, Number(item.upload_workers || 0) || 0),
         local_path: String(item.local_path || '').trim(),
         teldrive_file_id: String(item.teldrive_file_id || '').trim(),
         upload_id: String(item.upload_id || '').trim(),
@@ -4274,6 +4275,9 @@ function buildT2TDRelayJobCardContent(rawJob) {
     if (job.status === 'downloading' && job.download_bots > 0) {
         pushMetaItem(`${escapeA2TDHtml(job.download_bots)} 个 bot 并发`, 'primary');
     }
+    if (job.status === 'uploading' && job.upload_workers > 1) {
+        pushMetaItem(`<i class="ph-fill ph-lightning"></i> ${escapeA2TDHtml(job.upload_workers)} 路并行`, 'parallel');
+    }
     if (job.source_message_id) {
         pushMetaItem(`源消息 ${escapeA2TDHtml(job.source_channel_id)} / ${escapeA2TDHtml(job.source_message_id)}`, 'secondary');
     }
@@ -4436,6 +4440,7 @@ async function loadT2TDRelayJobs(force = false) {
         // REST 不含瞬时下载速度/并发 bot 数（不落库）；下载中任务沿用内存里上一次 SSE 值，避免每次轮询闪回 0。
         const prevSpeeds = new Map(t2tdRelayJobs.map(j => [j.job_id, j.download_speed]));
         const prevBots = new Map(t2tdRelayJobs.map(j => [j.job_id, j.download_bots]));
+        const prevWorkers = new Map(t2tdRelayJobs.map(j => [j.job_id, j.upload_workers]));
         t2tdRelayJobs = Array.isArray(data.items) ? data.items.map(item => {
             const job = normalizeT2TDRelayJob(item);
             if (job.status === 'downloading' && !job.download_speed) {
@@ -4443,6 +4448,9 @@ async function loadT2TDRelayJobs(force = false) {
             }
             if (job.status === 'downloading' && !job.download_bots) {
                 job.download_bots = prevBots.get(job.job_id) || 0;
+            }
+            if (job.status === 'uploading' && !job.upload_workers) {
+                job.upload_workers = prevWorkers.get(job.job_id) || 0;
             }
             return job;
         }) : [];
