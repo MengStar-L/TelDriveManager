@@ -14,7 +14,8 @@ from typing import Any, Callable
 
 from telethon import TelegramClient
 from telethon.sessions import StringSession
-from telethon.tl.types import InputPeerChannel
+from telethon.tl.functions.channels import GetChannelsRequest
+from telethon.tl.types import InputChannel, InputPeerChannel
 from telethon.utils import resolve_id
 
 from app import database as db
@@ -109,17 +110,25 @@ class BotDownloadPool:
         if not clients:
             return False
 
-        # bot 用空 session 登录，没有频道实体缓存，直接传裸 channel_id 会报
-        # “Could not find the input entity”。显式构造 InputPeerChannel(real_id, 0)：
-        # 成员/管理员 bot 允许 access_hash=0，绕过实体解析。
+        # bot 用空 session 登录，没有任何频道实体缓存。关键：不能直接拿 access_hash=0 调
+        # get_messages（→ channels.GetMessages → CHANNEL_INVALID）。须仿照 teldrive 两步式：
+        # 先用 access_hash=0 调 channels.GetChannels 把频道“解析”出来——access_hash=0 只是
+        # “请按我的成员身份帮我查”的引导值，且仅 GetChannels 接受它，解析成功的前提是该 bot
+        # 是源频道成员/管理员。拿到对自己账号有效的真实 access_hash 后，才能用它取消息。
         real_id, _ = resolve_id(int(channel_id))
-        peer = InputPeerChannel(real_id, 0)
 
-        # 每个 bot 各自取一份 document：拿到“对自己账号有效”的 file_reference，规避跨账号失效
+        # access_hash 与 file_reference 都按账号发放、跨账号失效，因此逐 bot 解析频道 +
+        # 逐 bot 取一份 document。非源频道成员的 bot 会在此失败并被跳过（回退单连接）。
         live: list[Any] = []
         docs: list[Any] = []
         for c in clients:
             try:
+                resolved = await c(GetChannelsRequest([InputChannel(real_id, 0)]))
+                chats = getattr(resolved, "chats", None) or []
+                if not chats:
+                    raise RuntimeError("频道未解析出（该 bot 可能不是源频道成员/管理员）")
+                chat = chats[0]
+                peer = InputPeerChannel(chat.id, chat.access_hash)
                 m = await c.get_messages(peer, ids=msg_id)
                 doc = getattr(m, "document", None) if m else None
                 if doc is not None:

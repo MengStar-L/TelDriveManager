@@ -485,6 +485,58 @@ class TelegramRelayIndependentTests(unittest.IsolatedAsyncioTestCase):
         finally:
             await db.delete_telegram_relay_job(job_id)
 
+    async def test_bot_pool_resolves_channel_before_fetching_messages(self):
+        """多 bot 下载必须先 GetChannels 解析真实 access_hash，再用它取消息——
+        绝不能直接拿 access_hash=0 调 get_messages（否则 Telegram 报 CHANNEL_INVALID）。
+        这正是 teldrive 能用、旧实现不能用的关键差异。"""
+        from telethon.tl.functions.channels import GetChannelsRequest
+        from telethon.utils import resolve_id
+
+        real_hash = 998877
+        marked_channel_id = -1001234567890
+        real_id, _ = resolve_id(marked_channel_id)
+
+        class FakeChat:
+            def __init__(self, cid, ah):
+                self.id = cid
+                self.access_hash = ah
+
+        class FakeResolved:
+            def __init__(self, chats):
+                self.chats = chats
+
+        class FakeBot:
+            def __init__(self):
+                self.resolve_calls = []
+                self.get_messages_peers = []
+
+            async def __call__(self, request):
+                # 模拟 channels.GetChannels：要求用 access_hash=0 引导，回填该账号的真实 hash
+                assert isinstance(request, GetChannelsRequest)
+                inp = request.id[0]
+                self.resolve_calls.append((inp.channel_id, inp.access_hash))
+                return FakeResolved([FakeChat(inp.channel_id, real_hash)])
+
+            async def get_messages(self, peer, ids):
+                self.get_messages_peers.append(peer)
+                return None  # 无 document → live 为空 → download 在写盘(pwrite)前即返回
+
+        pool = relay_module.BotDownloadPool(1, "hash", ["tok"])
+        bot = FakeBot()
+        pool._clients = [bot]   # 直接注入“已连接”的假 bot，跳过真实 token 建连
+        pool._cursor = 1
+
+        ok = await pool.download(
+            marked_channel_id, 42, str(Path(tempfile.mkdtemp()) / "x.bin"),
+            file_size=1024, want=1, on_progress=None,
+        )
+
+        self.assertFalse(ok)  # 无 document，回退单连接
+        self.assertEqual(bot.resolve_calls, [(real_id, 0)])          # 用 0 引导解析
+        self.assertEqual(len(bot.get_messages_peers), 1)
+        self.assertEqual(bot.get_messages_peers[0].channel_id, real_id)
+        self.assertEqual(bot.get_messages_peers[0].access_hash, real_hash)  # 用真实 hash 取消息
+
     def test_build_telegram_proxy_uses_host_only_when_set(self):
         self.assertIsNone(service_module.build_telegram_proxy(make_runtime(relay_proxy_host="")))
         proxied = service_module.build_telegram_proxy(make_runtime(
