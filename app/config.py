@@ -98,6 +98,7 @@ DEFAULTS: dict[str, Any] = {
         "max_retries": 3,
         "multibot_enabled": True,
         "download_connections": 6,
+        "bot_tokens": [],
     },
     "telegram_db": {
         "host": "", "port": 5432, "user": "", "password": "", "name": "postgres",
@@ -343,6 +344,18 @@ def _normalize_config(merged: dict, raw: dict | None = None) -> dict:
     telegram_relay_cfg["max_retries"] = max(1, int(telegram_relay_cfg.get("max_retries") or 3))
     telegram_relay_cfg["multibot_enabled"] = bool(telegram_relay_cfg.get("multibot_enabled", True))
     telegram_relay_cfg["download_connections"] = max(1, int(telegram_relay_cfg.get("download_connections") or 6))
+    _raw_tokens = telegram_relay_cfg.get("bot_tokens")
+    if isinstance(_raw_tokens, str):
+        import re as _re
+        _raw_tokens = _re.split(r"[\n,]+", _raw_tokens)
+    _seen_tokens: set = set()
+    _clean_tokens: list = []
+    for _tok in (_raw_tokens or []):
+        _t = str(_tok or "").strip()
+        if _t and _t not in _seen_tokens:
+            _seen_tokens.add(_t)
+            _clean_tokens.append(_t)
+    telegram_relay_cfg["bot_tokens"] = _clean_tokens
 
     log_cfg["buffer_size"] = max(50, int(log_cfg.get("buffer_size") or 400))
     log_cfg["file"] = str(log_cfg.get("file") or "runtime.log").strip() or "runtime.log"

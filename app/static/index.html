@@ -1988,6 +1988,10 @@
                                         <div class="form-group"><label>下载连接数（单文件用几个 bot）</label><input class="form-input" type="number" id="cfgTelegramRelayDownloadConnections" min="1" max="16" placeholder="6"></div>
                                         <div class="form-group"><label>失败重试次数</label><input class="form-input" type="number" id="cfgTelegramRelayMaxRetries" min="1" max="20" placeholder="3"></div>
                                     </div>
+                                    <div class="form-group" style="margin-top:14px">
+                                        <label>回源 bot tokens（每行一个，留空则复用 TelDrive 的 bot）</label>
+                                        <textarea class="form-input" id="cfgTelegramRelayBotTokens" rows="4" placeholder="123456:AAxxxx...（每行一个 bot token）&#10;这些 bot 必须是存储频道的管理员，才能下载分块"></textarea>
+                                    </div>
                                 </div>
                             </div>
                         </div>

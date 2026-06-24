@@ -116,6 +116,9 @@ DEFAULT_CONFIG: dict[str, dict[str, Any]] = {
         # 每个 bot 是独立账号=独立限速桶，并发拉取不同字节区间，大幅提速回源下载。
         "multibot_enabled": True,
         "download_connections": 6,
+        # 用户自填 bot token（每个一行/逗号分隔）；留空则回退读取 teldrive.bots。
+        # 这些 bot 必须是存储频道的成员/管理员，才能下载分块消息。
+        "bot_tokens": [],
     },
     "telegram_db": {
         "host": "",
@@ -193,6 +196,7 @@ class RuntimeConfig:
     relay_max_retries: int
     relay_multibot_enabled: bool
     relay_download_connections: int
+    relay_bot_tokens: list[str]
     db_host: str
     db_port: int
     db_user: str
@@ -305,6 +309,7 @@ class ConfigStore:
             relay_max_retries=relay.get("max_retries", 3),
             relay_multibot_enabled=relay.get("multibot_enabled", DEFAULT_CONFIG["telegram_relay"]["multibot_enabled"]),
             relay_download_connections=relay.get("download_connections", DEFAULT_CONFIG["telegram_relay"]["download_connections"]),
+            relay_bot_tokens=list(relay.get("bot_tokens", []) or []),
             db_host=data.get("telegram_db", {}).get("host", ""),
             db_port=data.get("telegram_db", {}).get("port", 5432),
             db_user=data.get("telegram_db", {}).get("user", ""),
@@ -367,6 +372,7 @@ class ConfigStore:
                 "max_retries": runtime.relay_max_retries,
                 "multibot_enabled": runtime.relay_multibot_enabled,
                 "download_connections": runtime.relay_download_connections,
+                "bot_tokens": runtime.relay_bot_tokens,
             },
             "web": {
                 "host": runtime.web_host,
@@ -520,6 +526,7 @@ class ConfigStore:
             default=DEFAULT_CONFIG["telegram_relay"]["download_connections"],
             strict=strict,
         )
+        relay["bot_tokens"] = self._parse_token_list(relay_payload.get("bot_tokens"))
 
         data.setdefault("telegram_db", {})
         telegram_db = data["telegram_db"]
@@ -572,6 +579,23 @@ class ConfigStore:
             return fallback
         text = str(value).strip()
         return text or fallback
+
+    def _parse_token_list(self, value: Any) -> list[str]:
+        """bot token 列表：接受 list 或换行/逗号分隔的字符串，去空白、去重、保序。"""
+        if isinstance(value, str):
+            items: list[Any] = re.split(r"[\n,]+", value)
+        elif isinstance(value, (list, tuple)):
+            items = list(value)
+        else:
+            items = []
+        out: list[str] = []
+        seen: set[str] = set()
+        for item in items:
+            token = str(item or "").strip()
+            if token and token not in seen:
+                seen.add(token)
+                out.append(token)
+        return out
 
     def _parse_proxy_type(self, value: Any) -> str:
         proxy_type = str(value or DEFAULT_CONFIG["telegram_relay"]["proxy_type"]).strip().lower()

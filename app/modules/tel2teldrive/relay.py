@@ -12,6 +12,8 @@ from typing import Any, Callable
 
 from telethon import TelegramClient
 from telethon.sessions import StringSession
+from telethon.tl.types import InputPeerChannel
+from telethon.utils import resolve_id
 
 from app import database as db
 from app.modules.aria2teldrive.teldrive_client import TelDriveClient
@@ -96,7 +98,8 @@ class BotDownloadPool:
             self._cursor = 0
 
     async def download(self, channel_id: int, msg_id: int, dest_path: str,
-                       file_size: int, want: int, on_progress: Callable[[int, int], None] | None) -> bool:
+                       file_size: int, want: int, on_progress: Callable[[int, int], None] | None,
+                       report_bots: Callable[[int], None] | None = None) -> bool:
         """用 bot 池并行下载单条消息的媒体到 dest_path。成功返回 True；失败/不可用返回 False（调用方回退单连接）。"""
         if file_size <= 0:
             return False  # 未知大小无法切片，交回退处理
@@ -104,12 +107,18 @@ class BotDownloadPool:
         if not clients:
             return False
 
+        # bot 用空 session 登录，没有频道实体缓存，直接传裸 channel_id 会报
+        # “Could not find the input entity”。显式构造 InputPeerChannel(real_id, 0)：
+        # 成员/管理员 bot 允许 access_hash=0，绕过实体解析。
+        real_id, _ = resolve_id(int(channel_id))
+        peer = InputPeerChannel(real_id, 0)
+
         # 每个 bot 各自取一份 document：拿到“对自己账号有效”的 file_reference，规避跨账号失效
         live: list[Any] = []
         docs: list[Any] = []
         for c in clients:
             try:
-                m = await c.get_messages(channel_id, ids=msg_id)
+                m = await c.get_messages(peer, ids=msg_id)
                 doc = getattr(m, "document", None) if m else None
                 if doc is not None:
                     live.append(c)
@@ -118,6 +127,8 @@ class BotDownloadPool:
                 self._log("WARN", f"回源 bot 取源消息失败，跳过: {type(exc).__name__}: {exc}")
         if not live:
             return False
+        if report_bots:
+            report_bots(len(live))
 
         # 预分配文件，便于各 worker 用 pwrite 定位写入
         with open(dest_path, "wb") as f:
@@ -188,6 +199,7 @@ class TelegramRelayManager:
         self._stopped = True
         self._watchdog_task: asyncio.Task[Any] | None = None
         self._download_speed: dict[str, float] = {}
+        self._download_bots: dict[str, int] = {}
         self._logs: deque[dict[str, Any]] = deque(maxlen=RELAY_LOG_LIMIT)
         self._state: dict[str, Any] = {
             "phase": "disabled",
@@ -251,7 +263,15 @@ class TelegramRelayManager:
             run_blocking_io,
         )
 
-        tokens = await run_blocking_io(query_db_bot_tokens, config)
+        # token 来源：优先用户在前端自填的 bot_tokens（可移植，换服务器/频道也能用）；
+        # 留空才回退读取 TelDrive 的 teldrive.bots。
+        user_tokens = [t for t in (getattr(config, "relay_bot_tokens", []) or []) if str(t).strip()]
+        if user_tokens:
+            tokens = [str(t).strip() for t in user_tokens]
+            token_source = "用户自填"
+        else:
+            tokens = await run_blocking_io(query_db_bot_tokens, config)
+            token_source = "TelDrive 数据库"
         proxy = build_telegram_proxy(config)
         connections = max(1, int(getattr(config, "relay_download_connections", 6) or 6))
         api_id = int(getattr(config, "telegram_api_id", 0) or 0)
@@ -264,14 +284,14 @@ class TelegramRelayManager:
             await self._bot_pool.close()
         if not tokens:
             self._bot_pool = None
-            self._log("WARN", "多 bot 下载已开启，但 teldrive.bots 无可用 token，回源将回退单连接下载")
+            self._log("WARN", "多 bot 下载已开启，但没有可用 bot token（自填为空且 teldrive.bots 也没有），回源将回退单连接下载")
             return
         self._bot_pool = BotDownloadPool(
             api_id, api_hash, tokens, proxy=proxy, connections=connections, logger=self._log
         )
         self._log(
             "INFO",
-            f"回源多 bot 下载池就绪: {len(tokens)} 个 bot，目标并发 {min(connections, len(tokens))}"
+            f"回源多 bot 下载池就绪: {len(tokens)} 个 bot（来源: {token_source}），目标并发 {min(connections, len(tokens))}"
             f"{'，走代理' if proxy else '，直连'}",
         )
 
@@ -585,6 +605,10 @@ class TelegramRelayManager:
         pool = self._bot_pool
         if pool is not None and pool.usable() and file_size >= MULTIBOT_MIN_SIZE:
             want = max(1, int(getattr(self.config, "relay_download_connections", 6) or 6))
+
+            def report_bots(n: int):
+                self._download_bots[job_id] = int(n)
+
             try:
                 used_pool = await pool.download(
                     int(job["source_channel_id"]),
@@ -593,12 +617,15 @@ class TelegramRelayManager:
                     file_size,
                     want,
                     progress_callback,
+                    report_bots,
                 )
                 if not used_pool:
                     self._log("WARN", f"多 bot 下载未完成，回退单连接: {job.get('file_name')}")
             except Exception as exc:
                 self._log("WARN", f"多 bot 下载异常，回退单连接: {type(exc).__name__}: {exc}")
                 used_pool = False
+            finally:
+                self._download_bots.pop(job_id, None)
 
         if not used_pool:
             downloaded = await client.download_media(message, file=str(path), progress_callback=progress_callback)
@@ -726,9 +753,12 @@ class TelegramRelayManager:
         job_id = payload.get("job_id")
         if str(payload.get("status")) == "downloading":
             payload["download_speed"] = self._download_speed.get(job_id, 0.0)
+            payload["download_bots"] = self._download_bots.get(job_id, 0)
         else:
             self._download_speed.pop(job_id, None)
+            self._download_bots.pop(job_id, None)
             payload["download_speed"] = 0.0
+            payload["download_bots"] = 0
         await self.broker._broadcast({"type": "relay_job_update", "payload": payload})
 
     async def _update_state(self, **kwargs: Any):

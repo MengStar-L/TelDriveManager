@@ -3191,7 +3191,8 @@ function collectSettingsConfig() {
             concurrency: Math.max(1, parseInt(document.getElementById('cfgTelegramRelayConcurrency')?.value, 10) || currentRelay.concurrency || 1),
             max_retries: Math.max(1, parseInt(document.getElementById('cfgTelegramRelayMaxRetries')?.value, 10) || currentRelay.max_retries || 3),
             multibot_enabled: !!document.getElementById('cfgTelegramRelayMultibotEnabled')?.checked,
-            download_connections: Math.max(1, parseInt(document.getElementById('cfgTelegramRelayDownloadConnections')?.value, 10) || currentRelay.download_connections || 6)
+            download_connections: Math.max(1, parseInt(document.getElementById('cfgTelegramRelayDownloadConnections')?.value, 10) || currentRelay.download_connections || 6),
+            bot_tokens: (document.getElementById('cfgTelegramRelayBotTokens')?.value || '').split(/[\n,]+/).map(s => s.trim()).filter(Boolean)
         },
         telegram_db: {
             host: document.getElementById('cfgDbHost').value,
@@ -3280,6 +3281,8 @@ async function loadConfig() {
         if (relayMultibot) relayMultibot.checked = cfg.telegram_relay?.multibot_enabled !== false;
         const relayConns = document.getElementById('cfgTelegramRelayDownloadConnections');
         if (relayConns) relayConns.value = cfg.telegram_relay?.download_connections || 6;
+        const relayBotTokens = document.getElementById('cfgTelegramRelayBotTokens');
+        if (relayBotTokens) relayBotTokens.value = (cfg.telegram_relay?.bot_tokens || []).join('\n');
         if (document.getElementById('telegramRelaySettingsModal')?.classList.contains('show')) {
             fillTelegramRelaySettingsForm(cfg.telegram_relay || {});
         }
@@ -4054,6 +4057,7 @@ function normalizeT2TDRelayJob(item = {}) {
         download_progress: Math.max(0, Math.min(100, Number(item.download_progress || 0) || 0)),
         upload_progress: Math.max(0, Math.min(100, Number(item.upload_progress || 0) || 0)),
         download_speed: Math.max(0, Number(item.download_speed || 0) || 0),
+        download_bots: Math.max(0, Number(item.download_bots || 0) || 0),
         local_path: String(item.local_path || '').trim(),
         teldrive_file_id: String(item.teldrive_file_id || '').trim(),
         upload_id: String(item.upload_id || '').trim(),
@@ -4267,6 +4271,9 @@ function buildT2TDRelayJobCardContent(rawJob) {
     if (job.status === 'downloading' && job.download_speed > 0) {
         pushMetaItem(`速度 ${escapeA2TDHtml(formatBytes(job.download_speed, 1))}/s`, 'primary');
     }
+    if (job.status === 'downloading' && job.download_bots > 0) {
+        pushMetaItem(`${escapeA2TDHtml(job.download_bots)} 个 bot 并发`, 'primary');
+    }
     if (job.source_message_id) {
         pushMetaItem(`源消息 ${escapeA2TDHtml(job.source_channel_id)} / ${escapeA2TDHtml(job.source_message_id)}`, 'secondary');
     }
@@ -4426,12 +4433,16 @@ async function loadT2TDRelayJobs(force = false) {
         const resp = await fetch('/api/t2td/relay-jobs', { cache: 'no-store' });
         const data = await readJsonSafe(resp);
         if (!resp.ok) throw new Error(data.detail || data.message || '读取回源任务失败');
-        // REST 不含瞬时下载速度（不落库）；下载中任务沿用内存里上一次 SSE 速度，避免每次轮询闪回 0。
+        // REST 不含瞬时下载速度/并发 bot 数（不落库）；下载中任务沿用内存里上一次 SSE 值，避免每次轮询闪回 0。
         const prevSpeeds = new Map(t2tdRelayJobs.map(j => [j.job_id, j.download_speed]));
+        const prevBots = new Map(t2tdRelayJobs.map(j => [j.job_id, j.download_bots]));
         t2tdRelayJobs = Array.isArray(data.items) ? data.items.map(item => {
             const job = normalizeT2TDRelayJob(item);
             if (job.status === 'downloading' && !job.download_speed) {
                 job.download_speed = prevSpeeds.get(job.job_id) || 0;
+            }
+            if (job.status === 'downloading' && !job.download_bots) {
+                job.download_bots = prevBots.get(job.job_id) || 0;
             }
             return job;
         }) : [];
