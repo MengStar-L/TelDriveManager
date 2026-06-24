@@ -1808,6 +1808,10 @@ async def build_initial_mapping(client: TelegramClient, config: RuntimeConfig):
         if msg_ids:
             mapping[file_id] = merge_message_ids(mapping.get(file_id), msg_ids)
             matched_count += 1
+        elif normalize_message_ids(mapping.get(file_id)):
+            # 已由数据库/历史映射覆盖，只是名字扫描复现不出
+            # （TelDrive 分块消息带的是分块名而非原始文件名）→ 不算缺失
+            matched_count += 1
         else:
             missing_count += 1
 
