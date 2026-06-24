@@ -2106,6 +2106,15 @@ class Tel2TelDriveService:
         logger.info("=" * 56)
         logger.info("Telegram 监听中转服务启动")
         logger.info("=" * 56)
+        # cryptg 缺失时 telethon 退回纯 Python AES，下载/上传解密会被拖慢数倍。
+        try:
+            import cryptg  # noqa: F401
+            logger.info("cryptg 已启用，Telegram 传输使用原生 AES 加速")
+        except ModuleNotFoundError:
+            logger.warning(
+                "cryptg 未安装，Telegram 下载/上传将退回纯 Python AES（明显更慢）；"
+                "建议在服务器执行 pip install cryptg 后重启服务"
+            )
         # _running 必须无论如何都复位：循环体内若在 try 外抛异常（如代理构造失败），
         # 否则标志会泄漏成 True，看门狗重启时被 "already running" 拦截导致服务焊死。
         try:
