@@ -68,6 +68,7 @@ class BotDownloadPool:
         self._log = logger or (lambda level, msg: None)
         self._clients: list[Any] = []
         self._cursor = 0           # 下一个待尝试的 token 下标（跳过坏 token，不回头）
+        self._labels: dict[int, str] = {}   # id(client) -> 可读 bot 标识（@username 或 bot id）
         self._lock = asyncio.Lock()
 
     def signature(self) -> tuple:
@@ -77,19 +78,39 @@ class BotDownloadPool:
     def usable(self) -> bool:
         return _HAS_PWRITE and bool(self.tokens) and self.api_id > 0 and bool(self.api_hash)
 
+    @staticmethod
+    def _token_label(tok: str) -> str:
+        """从 bot token 提取可读且不泄密的标识：冒号前的 bot 数字 id（token 私密部分不展示）。"""
+        head = str(tok or "").split(":", 1)[0].strip()
+        return f"bot#{head}" if head else "bot#?"
+
+    def _label_of(self, client: Any) -> str:
+        return self._labels.get(id(client), "bot#?")
+
     async def _acquire(self, n: int) -> list[Any]:
-        """惰性连接，确保至多 n 个（受 token 数与 connections 上限约束）bot 在线。"""
+        """惰性连接，确保至多 n 个（仅受 token 总数约束）bot 在线，返回当前全部在线 bot。
+
+        上限刻意只取 token 总数、而非 connections——这样在「部分 bot 不是源频道成员」时，
+        调用方还能继续启用备用 bot 凑够下载并发数。真正并发下载的路数由调用方按 connections 截断。
+        """
         async with self._lock:
-            target = min(n, self.connections, len(self.tokens))
+            target = min(n, len(self.tokens))
             while len(self._clients) < target and self._cursor < len(self.tokens):
                 tok = self.tokens[self._cursor]
                 self._cursor += 1
+                label = self._token_label(tok)
                 try:
                     c = TelegramClient(StringSession(), self.api_id, self.api_hash, proxy=self.proxy)
                     await c.start(bot_token=tok)
+                    with suppress(Exception):
+                        me = await c.get_me()
+                        uname = getattr(me, "username", None)
+                        if uname:
+                            label = f"@{uname}"
+                    self._labels[id(c)] = label
                     self._clients.append(c)
                 except Exception as exc:
-                    self._log("WARN", f"回源 bot 启动失败已跳过: {type(exc).__name__}: {exc}")
+                    self._log("WARN", f"回源 bot 启动失败已跳过 [{label}]: {type(exc).__name__}: {exc}")
             return list(self._clients)
 
     async def close(self):
@@ -98,7 +119,35 @@ class BotDownloadPool:
                 with suppress(Exception):
                     await c.disconnect()
             self._clients = []
+            self._labels = {}
             self._cursor = 0
+
+    async def _resolve_doc(self, client: Any, real_id: int, msg_id: int) -> Any | None:
+        """逐 bot 解析源频道实体并取出该消息的 document；失败返回 None 并记录是哪个 bot。
+
+        bot 用空 session 登录，没有任何频道实体缓存。关键：不能直接拿 access_hash=0 调
+        get_messages（→ channels.GetMessages → CHANNEL_INVALID）。须仿照 teldrive 两步式：
+        先用 access_hash=0 调 channels.GetChannels 把频道“解析”出来——access_hash=0 只是
+        “请按我的成员身份帮我查”的引导值，且仅 GetChannels 接受它，解析成功的前提是该 bot
+        是源频道成员/管理员。拿到对自己账号有效的真实 access_hash 后，才能用它取消息。
+        access_hash 与 file_reference 都按账号发放、跨账号失效，因此必须逐 bot 各取一份 document。
+        """
+        label = self._label_of(client)
+        try:
+            resolved = await client(GetChannelsRequest([InputChannel(real_id, 0)]))
+            chats = getattr(resolved, "chats", None) or []
+            if not chats:
+                raise RuntimeError("频道未解析出（该 bot 可能不是源频道成员/管理员）")
+            chat = chats[0]
+            peer = InputPeerChannel(chat.id, chat.access_hash)
+            m = await client.get_messages(peer, ids=msg_id)
+            doc = getattr(m, "document", None) if m else None
+            if doc is None:
+                self._log("WARN", f"回源 bot 取下载信息失败，跳过 [{label}]: 源消息无可下载 document")
+            return doc
+        except Exception as exc:
+            self._log("WARN", f"回源 bot 取下载信息失败，跳过 [{label}]: {type(exc).__name__}: {exc}")
+            return None
 
     async def download(self, channel_id: int, msg_id: int, dest_path: str,
                        file_size: int, want: int, on_progress: Callable[[int, int], None] | None,
@@ -106,38 +155,45 @@ class BotDownloadPool:
         """用 bot 池并行下载单条消息的媒体到 dest_path。成功返回 True；失败/不可用返回 False（调用方回退单连接）。"""
         if file_size <= 0:
             return False  # 未知大小无法切片，交回退处理
-        clients = await self._acquire(want)
-        if not clients:
-            return False
 
-        # bot 用空 session 登录，没有任何频道实体缓存。关键：不能直接拿 access_hash=0 调
-        # get_messages（→ channels.GetMessages → CHANNEL_INVALID）。须仿照 teldrive 两步式：
-        # 先用 access_hash=0 调 channels.GetChannels 把频道“解析”出来——access_hash=0 只是
-        # “请按我的成员身份帮我查”的引导值，且仅 GetChannels 接受它，解析成功的前提是该 bot
-        # 是源频道成员/管理员。拿到对自己账号有效的真实 access_hash 后，才能用它取消息。
+        target = min(want, self.connections, len(self.tokens))
+        if target <= 0:
+            return False
         real_id, _ = resolve_id(int(channel_id))
 
-        # access_hash 与 file_reference 都按账号发放、跨账号失效，因此逐 bot 解析频道 +
-        # 逐 bot 取一份 document。非源频道成员的 bot 会在此失败并被跳过（回退单连接）。
+        # 逐批启用 bot 并「并行」解析各自的源频道实体 + document：非源频道成员的 bot 会解析
+        # 失败被跳过；只要还有备用 token，就继续启用，直到凑够 target 路或备用 bot 用尽。
         live: list[Any] = []
         docs: list[Any] = []
-        for c in clients:
-            try:
-                resolved = await c(GetChannelsRequest([InputChannel(real_id, 0)]))
-                chats = getattr(resolved, "chats", None) or []
-                if not chats:
-                    raise RuntimeError("频道未解析出（该 bot 可能不是源频道成员/管理员）")
-                chat = chats[0]
-                peer = InputPeerChannel(chat.id, chat.access_hash)
-                m = await c.get_messages(peer, ids=msg_id)
-                doc = getattr(m, "document", None) if m else None
+        tried: set[int] = set()
+        while len(live) < target:
+            # 需在线的连接数 = 已试过的 + 还差的，据此惰性启用恰好够用的新 bot。
+            need = len(tried) + (target - len(live))
+            clients = await self._acquire(need)
+            new_clients = [c for c in clients if id(c) not in tried]
+            if not new_clients:
+                break  # 无备用 bot 可试了
+            for c in new_clients:
+                tried.add(id(c))
+            results = await asyncio.gather(
+                *[self._resolve_doc(c, real_id, msg_id) for c in new_clients]
+            )
+            for c, doc in zip(new_clients, results):
                 if doc is not None:
                     live.append(c)
                     docs.append(doc)
-            except Exception as exc:
-                self._log("WARN", f"回源 bot 取源消息失败，跳过: {type(exc).__name__}: {exc}")
+
         if not live:
             return False
+        # 池可能跨任务复用，单批解析出的可用 bot 或多于目标——按 connections 截断，绝不超配。
+        if len(live) > target:
+            live = live[:target]
+            docs = docs[:target]
+        if len(live) < target:
+            self._log(
+                "WARN",
+                f"回源可用 bot 不足：目标 {target} 路，实际仅 {len(live)} 路（备用 bot 已用尽）",
+            )
         if report_bots:
             report_bots(len(live))
 
