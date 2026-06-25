@@ -4083,8 +4083,22 @@ function getT2TDRelayStatusView(status) {
     return map[String(status || '').trim()] || map.pending;
 }
 
+// 卡片排序：下载中 → 上传中 → 清理中 → 等待中 → 成功 → 失败/取消；同组内按最近活动倒序。
+const T2TD_RELAY_STATUS_ORDER = {
+    downloading: 0,
+    uploading: 1,
+    cleaning: 2,
+    pending: 3,
+    completed: 4,
+    failed: 5,
+    cancelled: 6,
+};
+
 function sortT2TDRelayJobs(items) {
     return [...items].sort((a, b) => {
+        const aRank = T2TD_RELAY_STATUS_ORDER[String(a.status || 'pending')] ?? 99;
+        const bRank = T2TD_RELAY_STATUS_ORDER[String(b.status || 'pending')] ?? 99;
+        if (aRank !== bRank) return aRank - bRank;
         const aTime = Date.parse(a.created_at || a.updated_at || '') || 0;
         const bTime = Date.parse(b.created_at || b.updated_at || '') || 0;
         return bTime - aTime;
@@ -4283,7 +4297,6 @@ function buildT2TDRelayJobCardContent(rawJob) {
     }
     if (job.retry_count > 0) pushMetaItem(`重试 ${escapeA2TDHtml(job.retry_count)}`, 'warning');
     if (job.teldrive_file_id) pushMetaItem(`TelDrive ${escapeA2TDHtml(job.teldrive_file_id)}`, 'secondary');
-    pushMetaItem(`最近活动 ${escapeA2TDHtml(formatA2TDRelativeTime(job.updated_at || job.created_at))}`, 'secondary');
 
     const errorNote = job.error
         ? `<div class="task-note error"><i class="ph ph-warning-circle"></i><span>${escapeA2TDHtml(job.error)}</span></div>`

@@ -1052,6 +1052,31 @@
             padding: 16px 18px;
             border-bottom: 1px solid var(--border);
         }
+        .relay-modal-close {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            flex: 0 0 auto;
+            width: 32px;
+            height: 32px;
+            padding: 0;
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            background: transparent;
+            color: var(--text-secondary, #94a3b8);
+            font-size: 16px;
+            line-height: 1;
+            cursor: pointer;
+            transition: background .15s ease, color .15s ease, border-color .15s ease;
+        }
+        .relay-modal-close:hover {
+            background: var(--surface-muted, rgba(148, 163, 184, .12));
+            color: var(--text-primary, #f8fafc);
+            border-color: var(--text-secondary, #94a3b8);
+        }
+        .relay-modal-close:active {
+            transform: scale(.94);
+        }
         .telegram-relay-settings-body {
             display: grid;
             gap: 16px;
@@ -2068,7 +2093,7 @@
         <div class="telegram-relay-settings-dialog" role="dialog" aria-modal="true" aria-labelledby="telegramRelayLogTitle" onclick="event.stopPropagation()" style="width:min(860px, calc(100vw - 32px));">
             <div class="telegram-relay-settings-header">
                 <h3 id="telegramRelayLogTitle"><i class="ph ph-terminal-window"></i> 回源监控日志</h3>
-                <button class="icon-btn" type="button" onclick="closeTelegramRelayLogModal()" aria-label="关闭"><i class="ph ph-x"></i></button>
+                <button class="relay-modal-close" type="button" onclick="closeTelegramRelayLogModal()" aria-label="关闭"><i class="ph ph-x"></i></button>
             </div>
             <div class="telegram-relay-settings-body">
                 <div class="log-container" id="telegramRelayLogContainer" style="height:min(62vh, 560px); max-height:none;">
