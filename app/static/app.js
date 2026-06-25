@@ -5243,7 +5243,8 @@ async function downloadMagnetFiles() {
                 root_accounts: magnetRootAccounts,
                 selected_ids: selectedIds,
                 keep_structure: keepStructure,
-                teldrive_path: teldrivePath
+                teldrive_path: teldrivePath,
+                name_overrides: buildJellyfinOverrides('magnet')
             })
         });
         const data = await resp.json();
@@ -5290,7 +5291,8 @@ async function downloadUnifiedShareFiles() {
                 keep_structure: keepStructure,
                 file_paths: filePaths,
                 rename_by_folder: false,
-                teldrive_path: teldrivePath
+                teldrive_path: teldrivePath,
+                name_overrides: buildJellyfinOverrides('share')
             })
         });
         const data = await resp.json();
@@ -5339,6 +5341,205 @@ function comparePickerItemsByName(a = {}, b = {}) {
 
     return getPickerItemIdentity(a).localeCompare(getPickerItemIdentity(b));
 }
+
+// === Jellyfin Rename (Auto_Bangumi port) start ===
+// 移植自 EstrellaXD/Auto_Bangumi backend raw_parser.py，把字幕组原始文件名解析成
+// Jellyfin 友好的 "标题 SxxExx[.lang].ext"。本块为纯函数、无 DOM 依赖，
+// 便于 tests/ 用 vm 切片单独运行（参考 test_unified_parse_input.js）。
+const JF_TITLE_RE = /^(.*?|\[.*])((?: ?-) ?\d+ |\[\d+]|\[\d+.?[vV]\d]|第\d+[话話集]|\[第?\d+[话話集]]|\[\d+.?END]|[Ee][Pp]?\d+)(.*)/;
+const JF_EPISODE_RE = /\d+/;
+const JF_PREFIX_RE = /[^\w\s一-鿿぀-ゟ゠-ヿ-]/g;
+const JF_FALLBACK_EP_PATTERNS = [
+    / (\d+) ?(?=\[)/,        // #876/#910: 形如 " 876 [" 的裸集数
+    /\[(\d+)\(\d+\)\]/,       // #773: [02(57)]
+];
+const JF_CHINESE_NUMBER_MAP = { '一': 1, '二': 2, '三': 3, '四': 4, '五': 5, '六': 6, '七': 7, '八': 8, '九': 9, '十': 10 };
+const JF_SUBTITLE_EXTS = new Set(['ass', 'ssa', 'srt', 'sub', 'vtt', 'idx', 'sup', 'pgs', 'lrc']);
+
+function jfEscapeRegExp(s) {
+    return String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function jfPad2(n) {
+    const num = Number.isFinite(n) ? n : 0;
+    return String(num).padStart(2, '0');
+}
+
+function jfGetGroup(name) {
+    const parts = String(name).split(/[\[\]]/);
+    return parts.length > 1 ? parts[1] : '';
+}
+
+function jfPreProcess(rawName) {
+    return String(rawName).replace(/【/g, '[').replace(/】/g, ']');
+}
+
+function jfPrefixProcess(raw, group) {
+    // 去字幕组前缀（AB 用 ".group." 连同两侧括号一起删；group 为空时跳过避免误删）
+    if (group) raw = raw.replace(new RegExp('.' + jfEscapeRegExp(group) + '.', 'g'), '');
+    const rawProcess = raw.replace(JF_PREFIX_RE, '/');
+    let argGroup = rawProcess.split('/').filter(s => s !== '');
+    if (argGroup.length === 1) argGroup = argGroup[0].split(' ');
+    for (const arg of argGroup) {
+        if (!arg) continue;
+        if (/新番|月?番/.test(arg) && arg.length <= 5) {
+            raw = raw.replace(new RegExp('.' + jfEscapeRegExp(arg) + '.', 'g'), '');
+        } else if (/港澳台地区/.test(arg)) {
+            raw = raw.replace(new RegExp('.' + jfEscapeRegExp(arg) + '.', 'g'), '');
+        }
+    }
+    return raw;
+}
+
+function jfSeasonProcess(seasonInfo) {
+    let nameSeason = String(seasonInfo).replace(/[\[\]]/g, ' ');
+    const seasonRule = /S\d{1,2}|Season \d{1,2}|[第].[季期]/g;
+    const seasons = nameSeason.match(seasonRule);
+    if (!seasons) return [nameSeason, '', 1];
+    const name = nameSeason.replace(seasonRule, '');
+    let seasonRaw = '';
+    let season = 1;
+    for (const s of seasons) {
+        seasonRaw = s;
+        if (/Season|S/.test(s)) {
+            season = parseInt(s.replace(/Season|S/g, ''), 10);
+            break;
+        } else if (/[第 ].*[季期(部分)]|部分/.test(s)) {
+            const seasonPro = s.replace(/[第季期 ]/g, '');
+            const n = parseInt(seasonPro, 10);
+            season = Number.isNaN(n) ? (JF_CHINESE_NUMBER_MAP[seasonPro] || 1) : n;
+            break;
+        }
+    }
+    if (!Number.isFinite(season)) season = 1;
+    return [name, seasonRaw, season];
+}
+
+function jfNameProcess(name) {
+    let nameEn = null, nameZh = null, nameJp = null;
+    name = String(name).trim().replace(/[(（]仅限港澳台地区[）)]/g, '');
+    let split = name.split(/\/|\s{2}|-\s{2}/).filter(s => s !== '');
+    if (split.length === 1) {
+        if (/_/.test(name)) split = name.split('_');
+        else if (/ - /.test(name)) split = name.split('-');
+    }
+    if (split.length === 1) {
+        if (/^\d+\s[一-龥]/.test(split[0])) {
+            return [nameEn, split[0].trim(), nameJp];
+        }
+        const splitSpace = split[0].split(' ');
+        for (const idx of [0, splitSpace.length - 1]) {
+            if (/^[一-龥]{2,}/.test(splitSpace[idx] || '')) {
+                const chs = splitSpace[idx];
+                const pos = splitSpace.indexOf(chs);
+                if (pos !== -1) splitSpace.splice(pos, 1);
+                split = [chs, splitSpace.join(' ')];
+                break;
+            }
+        }
+    }
+    for (const item of split) {
+        if (/[ࠀ-一]{2,}/.test(item) && !nameJp) nameJp = item.trim();
+        else if (/[一-龥]{2,}/.test(item) && !nameZh) nameZh = item.trim();
+        else if (/[a-zA-Z]{3,}/.test(item) && !nameEn) nameEn = item.trim();
+    }
+    return [nameEn, nameZh, nameJp];
+}
+
+function jfFindSub(other) {
+    const elements = String(other).replace(/[\[\]()（）]/g, ' ').split(' ');
+    for (const el of elements) {
+        if (el !== '' && /[简繁日字幕]|CH|BIG5|GB/.test(el)) {
+            return el.replace(/_MP4|_MKV/g, '');
+        }
+    }
+    return null;
+}
+
+function jfFallbackParse(contentTitle) {
+    for (const pattern of JF_FALLBACK_EP_PATTERNS) {
+        const m = pattern.exec(contentTitle);
+        if (m) {
+            return [
+                contentTitle.slice(0, m.index).trim(),
+                m[1],
+                contentTitle.slice(m.index + m[0].length).trim(),
+            ];
+        }
+    }
+    return null;
+}
+
+// 解析单个番剧标题/文件名（不含扩展名更佳）。返回 {titleEn,titleZh,titleJp,season,episode,sub} 或 null。
+function parseAnimeEpisode(rawTitle) {
+    const contentTitle = jfPreProcess(String(rawTitle).trim().replace(/\n/g, ' '));
+    const group = jfGetGroup(contentTitle);
+    let seasonInfo, episodeInfo, other;
+    const m = JF_TITLE_RE.exec(contentTitle);
+    if (m) {
+        seasonInfo = (m[1] || '').trim();
+        episodeInfo = (m[2] || '').trim();
+        other = (m[3] || '').trim();
+    } else {
+        const fb = jfFallbackParse(contentTitle);
+        if (!fb) return null;
+        [seasonInfo, episodeInfo, other] = fb;
+    }
+    const [rawName, seasonRaw, season] = jfSeasonProcess(jfPrefixProcess(seasonInfo, group));
+    let titleEn = null, titleZh = null, titleJp = null;
+    try { [titleEn, titleZh, titleJp] = jfNameProcess(rawName); } catch (e) { /* noop */ }
+    const epMatch = JF_EPISODE_RE.exec(episodeInfo);
+    const episode = epMatch ? parseInt(epMatch[0], 10) : 0;
+    return { titleEn, titleZh, titleJp, season, seasonRaw, episode, sub: jfFindSub(other) };
+}
+
+// 中文 → 英文/罗马音 → 日文 优先级取番剧标题。
+function pickJellyfinTitle(parsed) {
+    if (!parsed) return '';
+    return (parsed.titleZh || parsed.titleEn || parsed.titleJp || '').trim();
+}
+
+// 输出不含扩展名的基名："进击的巨人 S01E01"，无法识别返回 null。
+function formatJellyfinBaseName(rawTitle) {
+    const parsed = parseAnimeEpisode(rawTitle);
+    if (!parsed) return null;
+    const title = pickJellyfinTitle(parsed);
+    if (!title) return null;
+    return `${title} S${jfPad2(parsed.season)}E${jfPad2(parsed.episode)}`;
+}
+
+function jfSplitExt(fileName) {
+    const name = String(fileName);
+    const dot = name.lastIndexOf('.');
+    if (dot > 0 && /^[A-Za-z0-9]{1,4}$/.test(name.slice(dot + 1))) {
+        return { base: name.slice(0, dot), ext: name.slice(dot + 1) };
+    }
+    return { base: name, ext: '' };
+}
+
+// 从原文件名探测字幕语言标记，用 '-' 连接，避免简/繁分轨同名碰撞（Jellyfin 友好）。
+function jfDetectSubLang(rawName) {
+    const s = String(rawName);
+    const tags = [];
+    if (/繁|cht|big5|繁體|繁体/i.test(s)) tags.push('cht');
+    if (/简|chs|gb2312|简体|簡体/i.test(s) || /\bgb\b/i.test(s)) tags.push('chs');
+    if (/日語|日文|\bjpn?\b/i.test(s)) tags.push('jpn');
+    return tags.join('-');
+}
+
+// 输出含扩展名的完整文件名："进击的巨人 S01E01.mkv" / 字幕 "...S01E01.chs.ass"，无法识别返回 null。
+function formatJellyfinFileName(fileName) {
+    const { base, ext } = jfSplitExt(fileName);
+    const baseName = formatJellyfinBaseName(base);
+    if (!baseName) return null;
+    if (!ext) return baseName;
+    if (JF_SUBTITLE_EXTS.has(ext.toLowerCase())) {
+        const lang = jfDetectSubLang(fileName);
+        return lang ? `${baseName}.${lang}.${ext}` : `${baseName}.${ext}`;
+    }
+    return `${baseName}.${ext}`;
+}
+// === Jellyfin Rename (Auto_Bangumi port) end ===
 
 function sortPickerItemsByName(files = []) {
     return Array.isArray(files) ? [...files].sort(comparePickerItemsByName) : [];
@@ -5432,7 +5633,8 @@ async function downloadShareFiles() {
                 keep_structure: keepStructure,
                 file_paths: filePaths,
                 rename_by_folder: renameByFolder,
-                teldrive_path: teldrivePath
+                teldrive_path: teldrivePath,
+                name_overrides: buildJellyfinOverrides('share')
             })
 
         });
@@ -5512,7 +5714,7 @@ async function downloadRssItems() {
         const resp = await fetch('/api/pikpak/rss/download', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ urls: selectedUrls, teldrive_path: teldrivePath })
+            body: JSON.stringify({ urls: selectedUrls, teldrive_path: teldrivePath, name_overrides: buildJellyfinOverrides('rss') })
         });
         const data = await resp.json();
         if(!resp.ok) throw new Error(data.error || '提交失败');
@@ -5529,6 +5731,123 @@ async function downloadRssItems() {
 
 
 // === File Picker UI Utils ===
+
+function getPickerDataArray(prefix) {
+    if (prefix === 'magnet') return magnetFileData;
+    if (prefix === 'share') return shareFileData;
+    if (prefix === 'rss') return rssFileData;
+    return [];
+}
+
+function jfBasename(p) {
+    const s = String(p || '').replace(/\\/g, '/');
+    const idx = s.lastIndexOf('/');
+    return idx >= 0 ? s.slice(idx + 1) : s;
+}
+
+function jfDirname(p) {
+    const s = String(p || '').replace(/\\/g, '/');
+    const idx = s.lastIndexOf('/');
+    return idx >= 0 ? s.slice(0, idx) : '';
+}
+
+function jfReplaceBasename(p, newBase) {
+    const s = String(p || '').replace(/\\/g, '/');
+    const idx = s.lastIndexOf('/');
+    return idx >= 0 ? s.slice(0, idx + 1) + newBase : newBase;
+}
+
+function jfWithDedupeSuffix(name, n) {
+    const { base, ext } = jfSplitExt(name);
+    return ext ? `${base} - ${n}.${ext}` : `${name} - ${n}`;
+}
+
+// 一键 Jellyfin 格式化：就地把可识别的番剧叶子文件重命名为「标题 SxxExx[.lang].ext」，
+// 立即重渲染文件树并保留当前勾选。非剧集文件保持原名。可重复点击（基于原名幂等）。
+function formatPickerNamesJellyfin(prefix) {
+    const data = getPickerDataArray(prefix);
+    if (!Array.isArray(data) || !data.length) {
+        showA2TDToast('暂无可格式化的内容', 'info');
+        return;
+    }
+    const isRss = prefix === 'rss';
+    let renamed = 0;
+    let skipped = 0;
+    const usedByDir = new Map(); // parentDir -> Set(已用新名) 用于同目录去重
+
+    data.forEach(item => {
+        if (!item || isPickerFolder(item)) return;
+        if (isRss) {
+            if (item._jfOriginalTitle === undefined) item._jfOriginalTitle = item.title || '';
+            const src = item._jfOriginalTitle;
+            let next = formatJellyfinBaseName(src);
+            if (!next) { item.title = src; skipped++; return; }
+            const set = usedByDir.get('') || new Set();
+            if (set.has(next)) {
+                let n = 2;
+                while (set.has(jfWithDedupeSuffix(next, n))) n++;
+                next = jfWithDedupeSuffix(next, n);
+            }
+            set.add(next); usedByDir.set('', set);
+            item.title = next;
+            renamed++;
+        } else {
+            if (item._jfOriginalName === undefined) {
+                item._jfOriginalName = item.name || '';
+                item._jfOriginalPath = item.path || '';
+            }
+            const src = item._jfOriginalName;
+            let next = formatJellyfinFileName(src);
+            if (!next) { item.name = src; item.path = item._jfOriginalPath; skipped++; return; }
+            const dir = jfDirname(item._jfOriginalPath);
+            const set = usedByDir.get(dir) || new Set();
+            if (set.has(next)) {
+                let n = 2;
+                while (set.has(jfWithDedupeSuffix(next, n))) n++;
+                next = jfWithDedupeSuffix(next, n);
+            }
+            set.add(next); usedByDir.set(dir, set);
+            item.name = next;
+            item.path = jfReplaceBasename(item._jfOriginalPath, next);
+            renamed++;
+        }
+    });
+
+    // 重渲染并恢复勾选（checkbox value = id / download_url，重命名不改变它）
+    const checkedValues = new Set(getPickerFileCheckboxes(prefix).filter(cb => cb.checked).map(cb => cb.value));
+    renderPickerTree(getPickerContainerId(prefix), data, prefix);
+    getPickerFileCheckboxes(prefix).forEach(cb => { cb.checked = checkedValues.has(cb.value); });
+    syncPickerFolderStates(prefix);
+    updatePickerSelection(prefix);
+
+    if (renamed === 0) {
+        showA2TDToast(skipped ? `未识别到番剧文件，${skipped} 项保持原名` : '没有可格式化的文件', 'info');
+    } else {
+        showA2TDToast(`已格式化 ${renamed} 项${skipped ? `，${skipped} 项无法识别保持原名` : ''}`, 'success');
+    }
+}
+
+// 收集「被格式化改名」的项，作为 name_overrides 下发后端（未改名/未点格式化则为空对象）。
+function buildJellyfinOverrides(prefix) {
+    const data = getPickerDataArray(prefix);
+    const overrides = {};
+    if (!Array.isArray(data)) return overrides;
+    data.forEach(item => {
+        if (!item || isPickerFolder(item)) return;
+        if (prefix === 'rss') {
+            if (item._jfOriginalTitle !== undefined && item.title && item.title !== item._jfOriginalTitle) {
+                const key = String(item.download_url || '');
+                if (key) overrides[key] = item.title; // 无扩展名 base，后端补真实扩展名
+            }
+        } else if (item._jfOriginalName !== undefined && item.name && item.name !== item._jfOriginalName) {
+            const key = prefix === 'share'
+                ? jfBasename(item._jfOriginalPath || item._jfOriginalName) // 后端按原 basename 匹配
+                : String(item.id || '');                                   // 磁链按 file_id 匹配
+            if (key) overrides[key] = item.name;
+        }
+    });
+    return overrides;
+}
 
 function getPickerContainerId(prefix) {
     if (prefix === 'magnet') return 'magnetFileList';

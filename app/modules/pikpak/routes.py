@@ -1203,9 +1203,12 @@ async def api_magnet_download(request: Request):
             root_accounts = {}
         keep_structure = body.get("keep_structure", True)
         teldrive_path = body.get("teldrive_path", "/")
+        name_overrides = body.get("name_overrides") or {}
+        if not isinstance(name_overrides, dict):
+            name_overrides = {}
         if not root_ids:
             return JSONResponse({"error": "缺少 file_id"}, status_code=400)
-        asyncio.create_task(_process_magnet_selected(root_ids, selected_ids, keep_structure, teldrive_path, root_accounts))
+        asyncio.create_task(_process_magnet_selected(root_ids, selected_ids, keep_structure, teldrive_path, root_accounts, name_overrides))
         return {"message": f"开始下载 {len(selected_ids)} 个文件"}
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
@@ -1311,9 +1314,12 @@ async def api_rss_download(request: Request):
         body = await request.json()
         urls = body.get("urls", [])
         teldrive_path = body.get("teldrive_path", "/")
+        name_overrides = body.get("name_overrides") or {}
+        if not isinstance(name_overrides, dict):
+            name_overrides = {}
         if not urls:
             return JSONResponse({"error": "没有选中的链接"}, status_code=400)
-        asyncio.create_task(_process_magnets(urls, teldrive_path))
+        asyncio.create_task(_process_magnets(urls, teldrive_path, name_overrides))
         return {"message": f"已提交 {len(urls)} 个链接，处理中...", "count": len(urls)}
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
@@ -1355,6 +1361,9 @@ async def api_share_download(request: Request):
         file_paths = body.get("file_paths", {})
         rename_by_folder = body.get("rename_by_folder", False)
         teldrive_path = body.get("teldrive_path", "/")
+        name_overrides = body.get("name_overrides") or {}
+        if not isinstance(name_overrides, dict):
+            name_overrides = {}
         if not share_id or not file_ids:
             return JSONResponse({"error": "缺少参数"}, status_code=400)
 
@@ -1372,6 +1381,7 @@ async def api_share_download(request: Request):
                 rename_by_folder,
                 teldrive_path=teldrive_path,
                 job_key=job_key,
+                name_overrides=name_overrides,
             ))
         except Exception:
             await _release_share_download_job(job_key)
@@ -1396,6 +1406,26 @@ def _maybe_rename_by_folder(url_info: dict, rename: bool, original_path: str = "
         dot_idx = name.rfind(".")
         return f"{folder_name}{name[dot_idx:]}" if dot_idx != -1 else folder_name
     return name
+
+
+def _override_files_with_base(files: List[dict], base: str) -> None:
+    """RSS：用前端传来的无扩展名 base 重命名解析出的文件，保留各文件真实扩展名；
+    同一 base 命中多个文件（字幕/多文件种子）时追加 ' - N' 去重。"""
+    base = str(base or "").strip()
+    if not base or not files:
+        return
+    used: set[str] = set()
+    for f in files:
+        orig = str(f.get("name", "") or "")
+        m = re.search(r"\.[A-Za-z0-9]{1,4}$", orig)
+        ext = m.group(0) if m else ""
+        candidate = f"{base}{ext}"
+        n = 2
+        while candidate in used:
+            candidate = f"{base} - {n}{ext}"
+            n += 1
+        used.add(candidate)
+        f["name"] = candidate
 
 
 async def _aria2_push_only(files: List[dict], index: int, delete_pikpak_ids: List[str] = None,
@@ -1496,7 +1526,8 @@ async def _aria2_push_only(files: List[dict], index: int, delete_pikpak_ids: Lis
             pass
 
 
-async def _process_magnets(magnets: List[str], teldrive_path: Optional[str] = None):
+async def _process_magnets(magnets: List[str], teldrive_path: Optional[str] = None,
+                           name_overrides: Dict[str, str] | None = None):
     from pikpakapi.enums import DownloadStatus
     import time
 
@@ -1596,6 +1627,12 @@ async def _process_magnets(magnets: List[str], teldrive_path: Optional[str] = No
             await _broadcast({"type": "task_error", "index": i, "message": "未找到可下载的文件"})
             continue
 
+        # Jellyfin 一键格式化（RSS）：按链接覆盖文件名，base 无扩展名，补真实扩展名
+        if name_overrides:
+            base = name_overrides.get(magnet)
+            if base:
+                _override_files_with_base(files, base)
+
         await _broadcast({"type": "files_found", "index": i, "files": [f["name"] for f in files]})
         await _broadcast_resolved_files(i, files)
 
@@ -1619,7 +1656,8 @@ async def _process_magnets(magnets: List[str], teldrive_path: Optional[str] = No
 
 async def _process_magnet_selected(root_file_ids: List[str], selected_ids: List[str],
                                     keep_structure: bool = True, teldrive_path: Optional[str] = None,
-                                    root_accounts: Dict[str, str] | None = None):
+                                    root_accounts: Dict[str, str] | None = None,
+                                    name_overrides: Dict[str, str] | None = None):
     try:
         cfg = load_config()
         delete_after = cfg.get("pikpak", {}).get("delete_after_download", False)
@@ -1663,6 +1701,12 @@ async def _process_magnet_selected(root_file_ids: List[str], selected_ids: List[
         if not files:
             await _broadcast({"type": "task_error", "index": 1, "message": "选中的文件不存在"})
             return
+        # Jellyfin 一键格式化：按 file_id 覆盖文件名（完整名，含扩展名），下载/上传同步生效
+        if name_overrides:
+            for f in files:
+                ov = name_overrides.get(str(f.get("file_id") or ""))
+                if ov:
+                    f["name"] = ov
         await _broadcast({"type": "files_found", "index": 1, "files": [f["name"] for f in files]})
         await _broadcast_resolved_files(1, files)
         push_target = _get_push_target_label("aria2")
@@ -1696,7 +1740,7 @@ async def _process_magnet_selected(root_file_ids: List[str], selected_ids: List[
 async def _process_share_download(share_id: str, file_ids: List[str], pass_code_token: str,
                                    keep_structure: bool = True, file_paths: Dict[str, str] = None,
                                     rename_by_folder: bool = False, teldrive_path: Optional[str] = None,
-                                    job_key: str = ""):
+                                    job_key: str = "", name_overrides: Dict[str, str] | None = None):
     saved_ids: List[str] = []
     account: PikPakAccountContext | None = None
     pikpak = None
@@ -1790,6 +1834,9 @@ async def _process_share_download(share_id: str, file_ids: List[str], pass_code_
         aria2_cfg = cfg.get("aria2", {})
         success_count = 0
         download_dir = aria2_cfg.get("download_dir", "")
+        # 确保 aria2 客户端已初始化（分享流程此前未经 _ensure_aria2_client，
+        # 全新进程首个动作若为分享下载会导致 _aria2 为 None → 'NoneType' has no attribute 'add_uri'）
+        aria2 = await _ensure_aria2_client()
         for sequence, url_info in enumerate(all_urls, 1):
             try:
                 opts = {}
@@ -1811,6 +1858,11 @@ async def _process_share_download(share_id: str, file_ids: List[str], pass_code_
                         original_path = orig_paths_by_name[name].pop(0)
 
                 output_name = _maybe_rename_by_folder(url_info, rename_by_folder, original_path)
+                # Jellyfin 一键格式化（分享）：按原 basename 覆盖（完整名，含扩展名），优先于层级重命名
+                if name_overrides:
+                    override_name = name_overrides.get(str(url_info.get("name", "") or ""))
+                    if override_name:
+                        output_name = override_name
                 display_info = dict(url_info)
                 if output_name:
                     opts["out"] = output_name
@@ -1834,7 +1886,7 @@ async def _process_share_download(share_id: str, file_ids: List[str], pass_code_
 
                 defer = task_manager.should_defer_new_downloads()
                 submit_opts = dict(opts, pause="true") if defer else opts
-                gid = await _aria2.add_uri(url_info["url"], submit_opts)
+                gid = await aria2.add_uri(url_info["url"], submit_opts)
                 if gid:
                     if defer:
                         task_manager.hold_gids_for_disk_gate([gid])
