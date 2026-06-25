@@ -1533,13 +1533,6 @@
                                         <span class="toggle-slider"></span>
                                     </div>
                                 </label>
-                                <label class="toggle-row" data-tooltip="试验功能：单个文件的多个分块并行上传（并发数 = 并发上传策略），可显著提速；网络/Telegram 限流时可能触发 flood-wait" style="margin-left: 8px; padding: 6px 12px; border-radius: 999px; background: rgba(168, 85, 247, 0.08); color: #9333ea; border: 1px solid rgba(168,85,247,0.18); font-size:13px; font-weight:600;">
-                                    <i class="ph-fill ph-lightning"></i> 并行上传
-                                    <div class="toggle-switch">
-                                        <input type="checkbox" id="monitorParallelChunkUpload" onchange="toggleMonitorParallelMode(this.checked)">
-                                        <span class="toggle-slider"></span>
-                                    </div>
-                                </label>
                             </div>
                             <div class="page-actions" style="display:flex; flex-wrap: wrap; gap:8px;">
                                 <button class="btn btn-ghost btn-sm btn-action btn-action-success" data-bulk-action="resume-all" onclick="a2tdBulkAction('resume-all')"><i class="ph ph-play"></i> 恢复全部</button>
@@ -1926,7 +1919,7 @@
                                     <div class="form-group"><label>应用 Token</label><input class="form-input" type="password" id="cfgTeldriveToken" placeholder="获取于 Cookie"></div>
                                     <div class="form-group"><label>同步频道 ID</label><input class="form-input" type="number" id="cfgTeldriveChannel" placeholder="0"></div>
                                     <div class="form-group"><label>默认上传目录</label><input class="form-input" type="text" id="cfgTeldriveTargetPath" placeholder="/"></div>
-                                    <div class="form-group"><label>并发上传策略</label><input class="form-input" type="number" id="cfgTeldriveConcurrency" placeholder="4"></div>
+                                    <div class="form-group"><label>并发上传线程数</label><input class="form-input" type="number" id="cfgTeldriveConcurrency" placeholder="4"></div>
                                     <div class="form-group">
                                         <label>上传分块大小</label>
                                         <div class="custom-select" data-target="cfgTeldriveChunkSize">
@@ -2103,7 +2096,7 @@
         </div>
     </div>
 
-    <script src="/static/app.js?v=20260623a"></script>
+    <script src="/static/app.js?v=20260625a"></script>
 
 
 

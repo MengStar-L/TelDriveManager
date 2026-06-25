@@ -2721,20 +2721,7 @@ async function toggleMonitorSerialMode(checked) {
 }
 
 async function toggleMonitorParallelMode(checked) {
-    // 试验功能：单文件多分块并行上传。仅发送增量补丁，避免全量覆盖
-    const patch = { upload: { parallel_chunk_upload: !!checked } };
-    try {
-        const resp = await fetch('/api/settings', {
-            method: 'PUT',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(patch)
-        });
-        if (resp.ok && window.currentConfig) {
-            window.currentConfig.upload = { ...(window.currentConfig.upload || {}), parallel_chunk_upload: !!checked };
-        }
-    } catch (e) {
-        console.error('并行上传开关保存失败:', e);
-    }
+    // 并行上传已默认常开，监控页不再提供开关；保留空实现以兼容历史调用。
 }
 
 // 远程推送开关出现在磁链解析、PikPak 分享、RSS 订阅三处工具栏，共享同一状态
@@ -3259,8 +3246,6 @@ async function loadConfig() {
         document.getElementById('cfgUploadSerialTransferMode').checked = !!cfg.upload?.serial_transfer_mode;
         const monitorToggle = document.getElementById('monitorSerialTransferMode');
         if (monitorToggle) monitorToggle.checked = !!cfg.upload?.serial_transfer_mode;
-        const monitorParallelToggle = document.getElementById('monitorParallelChunkUpload');
-        if (monitorParallelToggle) monitorParallelToggle.checked = !!cfg.upload?.parallel_chunk_upload;
         applyRemotePushToggleState(!!cfg.remote_aria2?.enabled);
 
         document.getElementById('cfgTelegramApiId').value = cfg.telegram?.api_id || '';
@@ -3314,10 +3299,6 @@ async function syncMonitorSerialToggle() {
             const monitorToggle = document.getElementById('monitorSerialTransferMode');
             if (monitorToggle) {
                 monitorToggle.checked = !!window.currentConfig.upload?.serial_transfer_mode;
-            }
-            const parallelToggle = document.getElementById('monitorParallelChunkUpload');
-            if (parallelToggle) {
-                parallelToggle.checked = !!window.currentConfig.upload?.parallel_chunk_upload;
             }
         }
     } catch (e) {

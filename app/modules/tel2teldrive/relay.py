@@ -741,7 +741,8 @@ class TelegramRelayManager:
             random_chunk_name=bool(config.teldrive_random_chunk_name),
             max_retries=max(1, int(config.upload_max_retries or 1)),
             min_throughput_kbps=max(16, int(config.upload_min_throughput_kbps or 100)),
-            parallel_chunk_upload=bool(config.upload_parallel_chunk_upload),
+            # 并行上传已稳定，回源路径同样默认常开，不再受配置开关控制。
+            parallel_chunk_upload=True,
         )
         job_id = job["job_id"]
         last_report = {"time": 0.0, "progress": -1.0}

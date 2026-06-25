@@ -123,7 +123,8 @@ class TaskManager:
             random_chunk_name=cfg["teldrive"].get("random_chunk_name", True),
             max_retries=cfg.get("upload", {}).get("max_retries", 3),
             min_throughput_kbps=cfg.get("upload", {}).get("min_throughput_kbps", 100),
-            parallel_chunk_upload=cfg.get("upload", {}).get("parallel_chunk_upload", False),
+            # 并行上传已稳定，普通下载路径默认常开，不再受配置开关控制。
+            parallel_chunk_upload=True,
         )
 
     def _require_aria2(self) -> Aria2Client:
