@@ -2864,6 +2864,33 @@ function getPikpakAccountVipView(account) {
     };
 }
 
+function getPikpakAccountHealthView(account) {
+    const status = String(account?.health_status || 'pending').toLowerCase();
+    const checkedAt = formatPikpakAccountDate(account?.health_checked_at || '', true);
+    if (status === 'available') {
+        return {
+            className: 'is-available',
+            icon: 'ph-shield-check',
+            title: checkedAt ? `可用 · ${checkedAt}` : '可用',
+            detail: account?.health_error || '',
+        };
+    }
+    if (status === 'failed') {
+        return {
+            className: 'is-error',
+            icon: 'ph-warning-circle',
+            title: checkedAt ? `不可用 · ${checkedAt}` : '不可用',
+            detail: account?.health_error || '',
+        };
+    }
+    return {
+        className: 'is-pending',
+        icon: 'ph-circle-dashed',
+        title: checkedAt ? `待检测 · ${checkedAt}` : '待检测',
+        detail: account?.health_error || '',
+    };
+}
+
 function renderPikpakAccountCards(errorMessage = '') {
     const list = document.getElementById('pikpakAccountList');
     if (!list) return;
@@ -2880,16 +2907,18 @@ function renderPikpakAccountCards(errorMessage = '') {
         const enabled = account.enabled !== false;
         const errorCount = Number(account.error_count || 0) || 0;
         const vipView = getPikpakAccountVipView(account);
+        const healthView = getPikpakAccountHealthView(account);
         const errorButton = errorCount > 0
             ? `<button class="btn btn-ghost btn-sm pikpak-error-chip" onclick="openPikpakAccountErrorsModal(${escapeA2TDJsArg(account.id)})"><i class="ph ph-warning-circle"></i> 出现 ${errorCount} 个错误</button>`
             : '';
         return `
-            <div class="pikpak-account-card ${enabled ? 'is-enabled' : 'is-disabled'} ${errorCount > 0 ? 'has-errors' : ''}">
+            <div class="pikpak-account-card ${enabled ? 'is-enabled' : 'is-disabled'} ${healthView.className === 'is-error' ? 'health-failed' : ''} ${errorCount > 0 ? 'has-errors' : ''}">
                 <div class="pikpak-account-head">
                     <div class="pikpak-account-title">
                         <i class="ph ${enabled ? 'ph-cloud-check' : 'ph-cloud-slash'}"></i>
                         <span class="pikpak-account-name">${escapeA2TDHtml(account.name || 'PikPak 账号')}</span>
                         <span class="pikpak-vip-pill ${escapeA2TDHtml(vipView.className)}"><i class="ph ${escapeA2TDHtml(vipView.icon)}"></i> ${escapeA2TDHtml(vipView.title)}</span>
+                        <span class="pikpak-health-pill ${escapeA2TDHtml(healthView.className)}" title="${escapeA2TDHtml(healthView.detail || '')}"><i class="ph ${escapeA2TDHtml(healthView.icon)}"></i> ${escapeA2TDHtml(healthView.title)}</span>
                     </div>
                     <span class="wizard-status-badge ${enabled ? 'success' : 'info'}">${enabled ? '启用' : '停用'}</span>
                 </div>

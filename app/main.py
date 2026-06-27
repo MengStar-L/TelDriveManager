@@ -23,6 +23,7 @@ from app.auth import is_auth_enabled, verify_token
 from app import database as db
 from app.aria2_service import aria2_service
 from app.modules.aria2teldrive.task_manager import task_manager
+from app.modules.pikpak.account_health import account_health_monitor
 from app.modules.pikpak import routes as pikpak_routes
 
 # 路由
@@ -71,6 +72,7 @@ async def lifespan(app: FastAPI):
     # 启动 Aria2TelDrive 任务管理器
     await task_manager.start()
     await pikpak_routes.init_runtime_state()
+    await account_health_monitor.start()
 
     # 启动 Tel2TelDrive 服务
     t2td_task = None
@@ -85,6 +87,7 @@ async def lifespan(app: FastAPI):
 
     # 关闭
     logger.info("TelDriveManager 关闭中...")
+    await account_health_monitor.stop()
     await task_manager.stop()
     await aria2_service.stop()
 

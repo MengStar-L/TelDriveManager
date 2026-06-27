@@ -38,14 +38,18 @@ class PikPakAccountPool:
         accounts = cfg.get("pikpak", {}).get("accounts", [])
         return [
             account for account in accounts
-            if isinstance(account, dict) and bool(account.get("enabled", True))
+            if (
+                isinstance(account, dict)
+                and bool(account.get("enabled", True))
+                and str(account.get("health_status") or "").strip().lower() != "failed"
+            )
         ]
 
     async def next_client(self) -> tuple[PikPakAccountContext, PikPakClient]:
         async with self._lock:
             accounts = self.enabled_accounts()
             if not accounts:
-                raise RuntimeError("请先添加并启用至少一个 PikPak 账号")
+                raise RuntimeError("没有可用的 PikPak 账号，请检查账号启用状态或健康检查结果")
             if self._cursor >= len(accounts):
                 self._cursor = 0
             account = accounts[self._cursor]

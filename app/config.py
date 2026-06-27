@@ -44,6 +44,9 @@ DEFAULTS: dict[str, Any] = {
         "accounts": [],
         "magnet_parse_timeout": 300,
         "share_parse_timeout": 45, "share_download_url_timeout": 60, "share_download_url_poll_interval": 3,
+        "account_health_check_interval": 21600,
+        "account_health_check_timeout": 60,
+        "account_health_check_url": "https://mypikpak.com/s/VOveL7ZI01ViAz9VVKGgSWDlo2",
     },
     "aria2": {
         "managed": True,
@@ -239,6 +242,12 @@ def _normalize_pikpak_account(raw_account: Any, fallback_index: int = 0) -> dict
         account["vip"] = dict(raw_account["vip"])
     if raw_account.get("last_login_refresh_at"):
         account["last_login_refresh_at"] = str(raw_account.get("last_login_refresh_at") or "")
+    health_status = str(raw_account.get("health_status") or "").strip().lower()
+    if health_status in {"available", "failed", "pending"}:
+        account["health_status"] = health_status
+    for key in ("health_checked_at", "health_next_check_at", "health_error"):
+        if raw_account.get(key):
+            account[key] = str(raw_account.get(key) or "")
     return account if _has_pikpak_account_auth(account) else None
 
 

@@ -869,6 +869,10 @@ def _public_account(account: dict, error_counts: dict[str, int] | None = None) -
         "created_at": account.get("created_at") or "",
         "updated_at": account.get("updated_at") or "",
         "last_login_refresh_at": account.get("last_login_refresh_at") or "",
+        "health_status": account.get("health_status") or "pending",
+        "health_checked_at": account.get("health_checked_at") or "",
+        "health_next_check_at": account.get("health_next_check_at") or "",
+        "health_error": account.get("health_error") or "",
         "vip": account.get("vip") if isinstance(account.get("vip"), dict) else {},
         "error_count": int((error_counts or {}).get(account_id, 0) or 0),
     }
@@ -901,6 +905,13 @@ def _build_account_config(payload: dict, existing: dict | None = None) -> dict:
         account["vip"] = existing["vip"]
     if existing.get("last_login_refresh_at"):
         account["last_login_refresh_at"] = existing["last_login_refresh_at"]
+    if existing:
+        for key in ("health_status", "health_checked_at", "health_next_check_at", "health_error"):
+            if existing.get(key):
+                account[key] = str(existing.get(key) or "")
+    else:
+        account["health_status"] = "pending"
+        account["health_next_check_at"] = now
     if mode == "token":
         session = str(payload.get("session", existing.get("session", "")) or "").strip()
         if not session:
@@ -916,6 +927,24 @@ def _build_account_config(payload: dict, existing: dict | None = None) -> dict:
         account["password"] = password
         account["session"] = str(payload.get("session", existing.get("session", "")) or "").strip()
         account["name"] = account["name"] or username
+    if existing:
+        old_auth = (
+            str(existing.get("login_mode") or "password").strip().lower(),
+            str(existing.get("username") or "").strip(),
+            str(existing.get("password") or ""),
+            str(existing.get("session") or "").strip(),
+        )
+        new_auth = (
+            account["login_mode"],
+            account["username"],
+            account["password"],
+            account["session"],
+        )
+        if old_auth != new_auth:
+            account["health_status"] = "pending"
+            account["health_next_check_at"] = now
+            account["health_error"] = ""
+            account.pop("health_checked_at", None)
     return account
 
 
@@ -1096,6 +1125,9 @@ async def api_refresh_pikpak_account(account_id: str):
         account = dict(accounts[account_index])
         account["vip"] = vip
         account["last_login_refresh_at"] = _now_iso()
+        account["health_status"] = "pending"
+        account["health_next_check_at"] = _now_iso()
+        account["health_error"] = ""
         encoded_token = getattr(pikpak.client, "encoded_token", "") or ""
         if encoded_token:
             account["session"] = encoded_token

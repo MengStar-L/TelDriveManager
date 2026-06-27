@@ -5,6 +5,7 @@ import unittest
 from typing import Any, cast
 
 from app import config as config_module
+from app.modules.pikpak import account_health as account_health_module
 from app.modules.pikpak import account_pool as account_pool_module
 from app.modules.pikpak import routes as pikpak_routes
 from app.modules.pikpak.account_pool import PikPakAccountPool
@@ -48,6 +49,10 @@ class PikPakConfigMigrationTests(unittest.TestCase):
                 "enabled": True,
                 "vip": {"expire": "2030-01-02T03:04:05Z", "is_vip": True},
                 "last_login_refresh_at": "2026-06-21T10:00:00+00:00",
+                "health_status": "failed",
+                "health_checked_at": "2026-06-21T11:00:00+00:00",
+                "health_next_check_at": "2026-06-21T17:00:00+00:00",
+                "health_error": "login failed",
             }],
         })
 
@@ -55,6 +60,10 @@ class PikPakConfigMigrationTests(unittest.TestCase):
         self.assertEqual(account["session"], "encoded-token")
         self.assertEqual(account["vip"]["expire"], "2030-01-02T03:04:05Z")
         self.assertEqual(account["last_login_refresh_at"], "2026-06-21T10:00:00+00:00")
+        self.assertEqual(account["health_status"], "failed")
+        self.assertEqual(account["health_checked_at"], "2026-06-21T11:00:00+00:00")
+        self.assertEqual(account["health_next_check_at"], "2026-06-21T17:00:00+00:00")
+        self.assertEqual(account["health_error"], "login failed")
 
 
 class PikPakAccountPoolTests(unittest.IsolatedAsyncioTestCase):
@@ -66,6 +75,7 @@ class PikPakAccountPoolTests(unittest.IsolatedAsyncioTestCase):
                 "accounts": [
                     {"id": "a", "name": "A", "login_mode": "password", "username": "a", "password": "p", "enabled": True},
                     {"id": "b", "name": "B", "login_mode": "password", "username": "b", "password": "p", "enabled": False},
+                    {"id": "f", "name": "F", "login_mode": "password", "username": "f", "password": "p", "enabled": True, "health_status": "failed"},
                     {"id": "c", "name": "C", "login_mode": "password", "username": "c", "password": "p", "enabled": True},
                 ],
             }
@@ -88,6 +98,85 @@ class PikPakAccountPoolTests(unittest.IsolatedAsyncioTestCase):
             account_pool_module.load_config = original_load_config
 
         self.assertEqual(sequence, [("a", "a"), ("c", "c"), ("a", "a"), ("c", "c")])
+
+
+class PikPakAccountHealthTests(unittest.IsolatedAsyncioTestCase):
+    async def test_probe_account_by_transfer_cleans_restored_file(self):
+        class FakeRawClient:
+            async def get_share_info(self, _url, _pass_code):
+                return {"pass_code_token": "pass-token", "files": [{"id": "share-file"}]}
+
+            async def restore(self, share_id, pass_code_token, file_ids):
+                self.restore_call = (share_id, pass_code_token, file_ids)
+                return {"file_id": "restored-file"}
+
+        class FakePikPakClient:
+            def __init__(self):
+                self.client = FakeRawClient()
+                self.deleted_ids = []
+
+            async def delete_files(self, ids):
+                self.deleted_ids.extend(ids)
+
+        client = FakePikPakClient()
+
+        result = await account_health_module.probe_account_by_transfer(
+            cast(Any, client),
+            account_health_module.DEFAULT_HEALTH_CHECK_URL,
+        )
+
+        self.assertEqual(result.restored_ids, ["restored-file"])
+        self.assertEqual(result.cleanup_error, "")
+        self.assertEqual(client.deleted_ids, ["restored-file"])
+        self.assertEqual(client.client.restore_call, ("VOveL7ZI01ViAz9VVKGgSWDlo2", "pass-token", ["share-file"]))
+
+    async def test_probe_account_by_transfer_treats_cleanup_failure_as_warning(self):
+        class FakeRawClient:
+            async def get_share_info(self, _url, _pass_code):
+                return {"pass_code_token": "pass-token", "files": [{"id": "share-file"}]}
+
+            async def restore(self, _share_id, _pass_code_token, _file_ids):
+                return {"task_info": [{"file_id": "restored-file"}]}
+
+        class FakePikPakClient:
+            client = FakeRawClient()
+
+            async def delete_files(self, _ids):
+                raise RuntimeError("delete failed")
+
+        result = await account_health_module.probe_account_by_transfer(
+            cast(Any, FakePikPakClient()),
+            account_health_module.DEFAULT_HEALTH_CHECK_URL,
+        )
+
+        self.assertEqual(result.restored_ids, ["restored-file"])
+        self.assertIn("delete failed", result.cleanup_error)
+
+
+class PikPakAccountRouteHelperTests(unittest.TestCase):
+    def test_build_account_config_resets_health_when_auth_changes(self):
+        existing = {
+            "id": "account-1",
+            "name": "Account",
+            "login_mode": "password",
+            "username": "old@example.test",
+            "password": "old-password",
+            "session": "old-session",
+            "enabled": True,
+            "health_status": "failed",
+            "health_checked_at": "2026-06-21T11:00:00+00:00",
+            "health_next_check_at": "2026-06-21T17:00:00+00:00",
+            "health_error": "old failure",
+        }
+
+        account = pikpak_routes._build_account_config(
+            {"username": "new@example.test", "password": "new-password"},
+            existing,
+        )
+
+        self.assertEqual(account["health_status"], "pending")
+        self.assertNotIn("health_checked_at", account)
+        self.assertEqual(account["health_error"], "")
 
 
 class MagnetParseSchedulerTests(unittest.IsolatedAsyncioTestCase):
