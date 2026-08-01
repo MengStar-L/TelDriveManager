@@ -154,7 +154,10 @@ class MissingMessageDeletionGuardTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("file-foreign", saved_mappings[-1])
 
 
-class ChannelIdMatchTests(unittest.TestCase):
+class ChannelIdMatchTests(unittest.IsolatedAsyncioTestCase):
+    make_config = MissingMessageDeletionGuardTests.make_config
+    _run_with_fakes = MissingMessageDeletionGuardTests._run_with_fakes
+
     def test_equivalent_forms_match(self):
         # TelDrive DB 存裸 ID，Telethon 配置常带 -100 前缀
         self.assertTrue(service_module.channel_ids_match(3854656012, -1003854656012))

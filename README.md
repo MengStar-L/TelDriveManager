@@ -70,6 +70,8 @@ TelDriveManager 是一个面向 TelDrive 生态的 Web 管理面板。它把 Pik
 - 基于 Telethon 监听 Telegram 频道文件消息。
 - 支持扫码登录和二次密码登录流程。
 - 可根据 Telegram 缺失或删除事件，辅助清理 TelDrive 中的对应文件。
+- TelDrive 分片存储、Telegram 监听和自动清理统一使用 `[teldrive].channel_id`；旧版双字段冲突时自动删除会被阻止。
+- Telegram 删除决策会记录完整时间、频道、消息 ID、原因及成功、失败或阻止状态。
 - 提供 TelDrive 文件夹扫描，便于检查目录结构与文件状态。
 
 ## 快速开始
@@ -111,9 +113,9 @@ http://localhost:8888
 | `[pikpak]` | PikPak 账号、密码或 encoded token |
 | `[aria2]` | 本地 aria2 托管、RPC、并发、磁盘保护 |
 | `[remote_aria2]` | 远程 aria2 镜像推送 |
-| `[teldrive]` | TelDrive API、Token、频道 ID、上传分块 |
+| `[teldrive]` | TelDrive API、Token、共享 Telegram 存储/监听频道 ID、上传分块 |
 | `[upload]` | 自动上传、重试、串行模式、分块并行上传 |
-| `[telegram]` | Telegram API、监听频道、同步开关 |
+| `[telegram]` | Telegram API、会话与同步开关 |
 | `[telegram_db]` | TelDrive / Telegram 同步所需 PostgreSQL |
 | `[log]` | 面板日志缓冲与日志文件 |
 

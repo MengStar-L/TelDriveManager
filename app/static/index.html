@@ -123,6 +123,31 @@
         .segmented-btn:hover { color: var(--text-primary); background: rgba(255,255,255,0.62); }
         .segmented-btn.active { background: #ffffff; color: var(--accent); box-shadow: 0 10px 24px rgba(15, 23, 42, 0.08), 0 2px 6px rgba(0, 102, 255, 0.08); }
         .segmented-btn:focus-visible { outline: none; box-shadow: 0 0 0 3px rgba(0, 102, 255, 0.14); }
+        .t2td-view-switch { width: 520px; max-width: 100%; padding: 3px; gap: 3px; border-radius: 6px; background: var(--bg-secondary); }
+        .t2td-view-switch .segmented-btn { min-height: 34px; padding: 7px 10px; border-radius: 4px; font-size: 12px; white-space: nowrap; }
+        .t2td-view-switch .segmented-btn.active { box-shadow: 0 1px 4px rgba(15, 23, 42, 0.12); }
+        @media (max-width: 620px) {
+            :root { --sidebar-w: 56px; }
+            body .layout { padding: 8px; gap: 8px; }
+            body .sidebar { padding: 12px 0; gap: 8px; border-radius: 24px; }
+            body .sidebar-logo { width: 40px; height: 40px; margin-bottom: 8px; font-size: 20px; }
+            .nav-item { width: 36px; height: 36px; font-size: 20px; }
+            body .main-wrapper { border-radius: 24px; transform: none; }
+            #page-tel2teldrive .card-header { padding: 14px; align-items: flex-start !important; }
+            #page-tel2teldrive .card-header > div { width: 100%; margin-left: 0 !important; }
+            #page-tel2teldrive .card-body { padding-inline: 14px !important; }
+            .t2td-view-switch { order: 1; width: 100%; }
+            .t2td-view-switch .segmented-btn { min-height: 52px; padding: 6px 4px; gap: 4px; white-space: normal; line-height: 1.25; }
+            .t2td-view-switch .segmented-btn span { overflow-wrap: anywhere; text-align: center; }
+            #t2tdClearDeletedBtn,
+            #t2tdClearTelegramDeleteBtn { order: 2; }
+            #page-tel2teldrive .log-container { padding-inline: 14px; }
+            #page-tel2teldrive .log-entry { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 6px 10px; }
+            #page-tel2teldrive .log-time { grid-column: 2; }
+            #page-tel2teldrive .log-text,
+            #page-tel2teldrive .log-meta-item,
+            #page-tel2teldrive .log-path { min-width: 0; overflow-wrap: anywhere; }
+        }
 
         /* ── Pages ── */
 
@@ -1349,6 +1374,10 @@
                                         <div class="toggle-switch"><input type="checkbox" id="magnetKeepStructure" checked><span class="toggle-slider"></span></div>
                                         维持目录结构映射
                                     </label>
+                                    <label class="toggle-row" id="magnetRenameByFolderControl" hidden>
+                                        <div class="toggle-switch"><input type="checkbox" id="magnetRenameByFolder"><span class="toggle-slider"></span></div>
+                                        层级重命名
+                                    </label>
                                 </div>
                                 <div class="target-folder-field">
                                     <label class="target-folder-label" for="magnetTeldrivePath"><i class="ph ph-folder-simple-dashed"></i> 保存到</label>
@@ -1650,8 +1679,13 @@
                         <div class="card-header" style="flex-wrap: wrap; gap: 12px; align-items: center;">
                             <h3><i class="ph ph-telegram-logo"></i> Telegram 监听中转服务</h3>
                             <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap; margin-left:auto;">
-                                <button class="btn btn-ghost btn-sm" id="t2tdClearDeletedBtn" onclick="clearT2TDDeletedFilesLogs()" style="display:none;"><i class="ph ph-trash"></i> 清空删除日志</button>
-                                <button class="btn btn-ghost btn-sm" id="t2tdViewToggleBtn" onclick="toggleT2TDPanelMode()"><i class="ph ph-files"></i> 查看被删除文件</button>
+                                <div class="segmented-control t2td-view-switch" role="tablist" aria-label="日志视图">
+                                    <button type="button" class="segmented-btn active" data-t2td-mode="logs" onclick="setT2TDPanelMode('logs')" role="tab" aria-selected="true"><i class="ph ph-terminal-window"></i><span>运行日志</span></button>
+                                    <button type="button" class="segmented-btn" data-t2td-mode="deleted" onclick="setT2TDPanelMode('deleted')" role="tab" aria-selected="false"><i class="ph ph-files"></i><span>TelDrive 删除日志</span></button>
+                                    <button type="button" class="segmented-btn" data-t2td-mode="telegram-deletions" onclick="setT2TDPanelMode('telegram-deletions')" role="tab" aria-selected="false"><i class="ph ph-telegram-logo"></i><span>Telegram 删除日志</span></button>
+                                </div>
+                                <button class="btn btn-ghost btn-sm" id="t2tdClearDeletedBtn" onclick="clearT2TDDeletedFilesLogs()" style="display:none;"><i class="ph ph-trash"></i> 清空 TelDrive 日志</button>
+                                <button class="btn btn-ghost btn-sm" id="t2tdClearTelegramDeleteBtn" onclick="clearT2TDTelegramDeleteLogs()" style="display:none;"><i class="ph ph-trash"></i> 清空 Telegram 日志</button>
                             </div>
                         </div>
                         <div class="card-body" style="padding: 18px 20px 20px; min-height: 0; display: flex; flex-direction: column;">
@@ -1933,7 +1967,11 @@
                                 <div class="field-grid">
                                     <div class="form-group"><label>API Endpoint</label><input class="form-input" type="text" id="cfgTeldriveHost" placeholder="http://localhost:8080"></div>
                                     <div class="form-group"><label>应用 Token</label><input class="form-input" type="password" id="cfgTeldriveToken" placeholder="获取于 Cookie"></div>
-                                    <div class="form-group"><label>同步频道 ID</label><input class="form-input" type="number" id="cfgTeldriveChannel" placeholder="0"></div>
+                                    <div class="form-group">
+                                        <label>Telegram 存储/监听频道 ID</label>
+                                        <input class="form-input" type="number" id="cfgTeldriveChannel" placeholder="例如 -1001234567890">
+                                        <div class="wizard-note" id="cfgTelegramChannelConflict" style="display:none; color:var(--warning);"></div>
+                                    </div>
                                     <div class="form-group"><label>默认上传目录</label><input class="form-input" type="text" id="cfgTeldriveTargetPath" placeholder="/"></div>
                                     <div class="form-group"><label>并发上传线程数</label><input class="form-input" type="number" id="cfgTeldriveConcurrency" placeholder="4"></div>
                                     <div class="form-group">
@@ -1986,7 +2024,6 @@
                                 <div class="field-grid">
                                     <div class="form-group"><label>API ID</label><input class="form-input" type="number" id="cfgTelegramApiId" placeholder="在 my.telegram.org 获取"></div>
                                     <div class="form-group"><label>API Hash</label><input class="form-input" type="text" id="cfgTelegramApiHash" placeholder="在 my.telegram.org 获取"></div>
-                                    <div class="form-group"><label>频道 ID</label><input class="form-input" type="number" id="cfgTelegramChannelId" placeholder="0"></div>
                                     <div class="form-group"><label>同步间隔 (秒)</label><input class="form-input" type="number" id="cfgTelegramSyncInterval" placeholder="10"></div>
                                 </div>
                                 <div style="margin-top:20px; padding-top:20px; border-top:1px solid var(--border)">
@@ -2112,7 +2149,7 @@
         </div>
     </div>
 
-    <script src="/static/app.js?v=20260625a"></script>
+    <script src="/static/app.js?v=20260731a"></script>
 
 
 
@@ -2290,9 +2327,9 @@
                         <input class="form-input" type="password" id="wTdToken" placeholder="浏览器登录后从 Cookie / 请求头中获取 access_token">
                     </div>
                     <div class="form-group">
-                        <label>TelDrive 同步频道 ID (必填)</label>
+                        <label>Telegram 存储/监听频道 ID (必填)</label>
                         <input class="form-input" type="number" id="wTdChannel" placeholder="例如 -1001234567890">
-                        <div class="wizard-note">这里填写 TelDrive 实际存储分片消息的 Telegram 频道 ID，通常是以 <code>-100</code> 开头的负数。</div>
+                        <div class="wizard-note">TelDrive 分片存储、Telegram 消息监听和自动清理统一使用此频道。</div>
                     </div>
                 </div>
                 <div class="wizard-footer">
@@ -2311,11 +2348,6 @@
                     <div class="form-group">
                         <label>Telegram API Hash</label>
                         <input class="form-input" type="text" id="wTgHash" placeholder="前往 my.telegram.org 获取，例如 0123456789abcdef0123456789abcdef">
-                    </div>
-                    <div class="form-group">
-                        <label>Telegram 监听频道 ID (必填)</label>
-                        <input class="form-input" type="number" id="wTgChannel" placeholder="例如 -1001234567890">
-                        <div class="wizard-note">填写需要监听并同步到 TelDrive 的频道 ID。频道 ID 通常也是 <code>-100</code> 开头的负数。</div>
                     </div>
                 </div>
                 <div class="wizard-footer">

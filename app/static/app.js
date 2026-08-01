@@ -130,11 +130,11 @@ function getWizardPendingSteps(data = {}, healthDetails = {}) {
 
     const teldriveReady = typeof healthDetails?.teldrive === 'boolean'
         ? healthDetails.teldrive
-        : !!(data.teldrive?.api_host && data.teldrive?.access_token && String(data.teldrive?.channel_id ?? '').trim() !== '');
+        : !!(data.teldrive?.api_host && data.teldrive?.access_token && Number(data.teldrive?.channel_id));
 
     const telegramReady = typeof healthDetails?.telegram === 'boolean'
         ? healthDetails.telegram
-        : !!(data.telegram?.api_id && data.telegram?.api_hash && String(data.telegram?.channel_id ?? '').trim() !== '');
+        : !!(data.telegram?.api_id && data.telegram?.api_hash && String(data.teldrive?.channel_id ?? '').trim() !== '');
 
     const databaseReady = typeof healthDetails?.database === 'boolean'
         ? healthDetails.database
@@ -275,7 +275,6 @@ function fillWizardInputs(data = {}) {
         document.getElementById('wTdChannel').value = data.teldrive?.channel_id || '';
         document.getElementById('wTgId').value = data.telegram?.api_id || '';
         document.getElementById('wTgHash').value = data.telegram?.api_hash || '';
-        document.getElementById('wTgChannel').value = data.telegram?.channel_id || '';
         document.getElementById('wDbHost').value = data.telegram_db?.host || '';
 
         document.getElementById('wDbPort').value = data.telegram_db?.port || 5432;
@@ -654,7 +653,7 @@ async function wizardNext(current, next, btn = null) {
             const tTok = document.getElementById('wTdToken').value.trim();
             const tChannel = parseInt(document.getElementById('wTdChannel').value, 10);
             if (!tUrl || !tTok) throw new Error('TelDrive API 和 Token 为必填');
-            if (!tChannel) throw new Error('请填写 TelDrive 同步频道 ID');
+            if (!tChannel) throw new Error('请填写 Telegram 存储/监听频道 ID');
             const tdPayload = { api_host: tUrl, access_token: tTok, channel_id: tChannel };
             const r = await fetch('/api/settings/test/teldrive', {
                 method: 'POST',
@@ -667,10 +666,8 @@ async function wizardNext(current, next, btn = null) {
         } else if (current === 5) {
             const tid = document.getElementById('wTgId').value.trim();
             const tHash = document.getElementById('wTgHash').value.trim();
-            const tChannel = parseInt(document.getElementById('wTgChannel').value, 10);
             if (!tid || !tHash) throw new Error('必须提供 Telegram 授权参数');
-            if (!tChannel) throw new Error('请填写 Telegram 监听频道 ID');
-            const tgPayload = { api_id: parseInt(tid, 10), api_hash: tHash, channel_id: tChannel };
+            const tgPayload = { api_id: parseInt(tid, 10), api_hash: tHash };
             const r = await fetch('/api/settings/test/telegram', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
@@ -1992,9 +1989,17 @@ function setParseButtonsState(job = activeParseJob) {
     updateActiveParseJobPolling();
 }
 
+function setUnifiedShareRenameVisibility(visible) {
+    const control = document.getElementById('magnetRenameByFolderControl');
+    const checkbox = document.getElementById('magnetRenameByFolder');
+    if (control) control.hidden = !visible;
+    if (checkbox) checkbox.checked = false;
+}
+
 function renderMagnetParseResult(result = {}) {
     if (!result || typeof result !== 'object') return;
     magnetResultMode = 'magnet';
+    setUnifiedShareRenameVisibility(false);
     magnetCurrentFileId = result.file_id || null;
     magnetRoots = Array.isArray(result.roots) && result.roots.length
         ? result.roots.filter(Boolean)
@@ -2025,6 +2030,7 @@ function renderMagnetParseResult(result = {}) {
 function renderUnifiedShareParseResult(result = {}) {
     if (!result || typeof result !== 'object') return;
     magnetResultMode = 'share';
+    setUnifiedShareRenameVisibility(true);
     magnetCurrentFileId = null;
     magnetRoots = [];
     magnetRootAccounts = {};
@@ -3191,7 +3197,6 @@ function collectSettingsConfig() {
         telegram: {
             api_id: parseInt(document.getElementById('cfgTelegramApiId').value, 10) || 0,
             api_hash: document.getElementById('cfgTelegramApiHash').value,
-            channel_id: parseInt(document.getElementById('cfgTelegramChannelId').value, 10) || 0,
             sync_interval: parseInt(document.getElementById('cfgTelegramSyncInterval').value, 10) || 10,
             sync_enabled: document.getElementById('cfgTelegramSyncEnabled').checked
         },
@@ -3267,6 +3272,14 @@ async function loadConfig() {
         document.getElementById('cfgTeldriveHost').value = cfg.teldrive?.api_host || '';
         document.getElementById('cfgTeldriveToken').value = cfg.teldrive?.access_token || '';
         document.getElementById('cfgTeldriveChannel').value = cfg.teldrive?.channel_id || 0;
+        const channelConflict = document.getElementById('cfgTelegramChannelConflict');
+        if (channelConflict) {
+            const conflicted = cfg._meta?.telegram_channel_conflict === true;
+            channelConflict.style.display = conflicted ? 'block' : 'none';
+            channelConflict.textContent = conflicted
+                ? `检测到旧监听频道 ${cfg._meta?.legacy_telegram_channel_id || '--'} 与当前频道冲突。自动删除已停止，请确认上方频道并保存。`
+                : '';
+        }
         document.getElementById('cfgTeldriveTargetPath').value = cfg.teldrive?.target_path || '/';
         document.getElementById('cfgTeldriveConcurrency').value = cfg.teldrive?.upload_concurrency || 4;
         document.getElementById('cfgTeldriveChunkSize').value = cfg.teldrive?.chunk_size || '250M';
@@ -3279,7 +3292,6 @@ async function loadConfig() {
 
         document.getElementById('cfgTelegramApiId').value = cfg.telegram?.api_id || '';
         document.getElementById('cfgTelegramApiHash').value = cfg.telegram?.api_hash || '';
-        document.getElementById('cfgTelegramChannelId').value = cfg.telegram?.channel_id || 0;
         document.getElementById('cfgTelegramSyncInterval').value = cfg.telegram?.sync_interval || 10;
         document.getElementById('cfgTelegramSyncEnabled').checked = cfg.telegram?.sync_enabled !== false;
         document.getElementById('cfgTelegramRelayEnabled').checked = !!cfg.telegram_relay?.enabled;
@@ -3579,6 +3591,8 @@ window.onload = async () => {
                 if (t2tdPanelMode === 'deleted' && isT2TDAutoDeleteLog(data.payload || data)) {
                     loadT2TDDeletedFiles(true);
                 }
+            } else if (data.type === 'telegram_delete_audit') {
+                upsertT2TDTelegramDeleteLog(data.payload || data);
             } else if(data.type === "relay_job_update") {
                 upsertT2TDRelayJob(data.payload || data);
             } else if(data.type === "relay_job_deleted") {
@@ -3600,6 +3614,9 @@ let t2tdRuntimeLogs = [];
 let t2tdDeletedFiles = [];
 let t2tdDeletedFilesLoaded = false;
 let t2tdDeletedFilesRefreshPending = false;
+let t2tdTelegramDeleteLogs = [];
+let t2tdTelegramDeleteLogsLoaded = false;
+let t2tdTelegramDeleteLogsRefreshPending = false;
 let t2tdRelayJobs = [];
 let t2tdRelayJobsLoaded = false;
 let t2tdRelayJobsRefreshPending = false;
@@ -3643,21 +3660,24 @@ function setT2TDPlaceholder(message, icon = 'ph-ghost') {
 }
 
 function syncT2TDPanelToggleButton() {
-    const button = document.getElementById('t2tdViewToggleBtn');
     const clearButton = document.getElementById('t2tdClearDeletedBtn');
-    if (t2tdPanelMode === 'deleted') {
-        if (button) {
-            button.innerHTML = '<i class="ph ph-terminal-window"></i> 返回运行日志';
-            button.setAttribute('aria-pressed', 'true');
-        }
-        if (clearButton) clearButton.style.display = 'inline-flex';
-    } else {
-        if (button) {
-            button.innerHTML = '<i class="ph ph-files"></i> 查看被删除文件';
-            button.setAttribute('aria-pressed', 'false');
-        }
-        if (clearButton) clearButton.style.display = 'none';
+    const clearTelegramButton = document.getElementById('t2tdClearTelegramDeleteBtn');
+    document.querySelectorAll('[data-t2td-mode]').forEach(button => {
+        const active = button.dataset.t2tdMode === t2tdPanelMode;
+        button.classList.toggle('active', active);
+        button.setAttribute('aria-selected', active ? 'true' : 'false');
+    });
+    if (clearButton) clearButton.style.display = t2tdPanelMode === 'deleted' ? 'inline-flex' : 'none';
+    if (clearTelegramButton) {
+        clearTelegramButton.style.display = t2tdPanelMode === 'telegram-deletions' ? 'inline-flex' : 'none';
     }
+}
+
+function formatT2TDFullTimestamp(value) {
+    const date = value ? new Date(String(value).includes(' ') ? String(value).replace(' ', 'T') : value) : new Date();
+    if (Number.isNaN(date.getTime())) return String(value || '--');
+    const pad = number => String(number).padStart(2, '0');
+    return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
 }
 
 function getT2TDDeleteReasonLabel(reason) {
@@ -3774,6 +3794,146 @@ async function loadT2TDDeletedFiles(force = false) {
         if (t2tdPanelMode === 'deleted') setT2TDPlaceholder(e.message || '读取删除记录失败', 'ph-warning');
     } finally {
         t2tdDeletedFilesRefreshPending = false;
+    }
+}
+
+function normalizeT2TDTelegramDeleteLog(item = {}) {
+    const normalizeIds = values => Array.isArray(values)
+        ? [...new Set(values.map(value => Number(value)).filter(value => Number.isInteger(value) && value > 0))]
+        : [];
+    const normalizeTexts = values => Array.isArray(values)
+        ? values.map(value => String(value || '').trim()).filter(Boolean)
+        : [];
+    return {
+        id: String(item.id || `${item.reason || 'unknown'}-${item.occurred_at || item.created_at || Date.now()}`),
+        status: ['deleted', 'failed', 'blocked'].includes(item.status) ? item.status : 'failed',
+        reason: String(item.reason || 'unknown').trim() || 'unknown',
+        channel_id: item.channel_id == null ? null : Number(item.channel_id),
+        message_ids: normalizeIds(item.message_ids),
+        deleted_message_ids: normalizeIds(item.deleted_message_ids),
+        protected_final_ids: normalizeIds(item.protected_final_ids),
+        protected_active_ids: normalizeIds(item.protected_active_ids),
+        file_names: normalizeTexts(item.file_names),
+        file_ids: normalizeTexts(item.file_ids),
+        task_id: String(item.task_id || '').trim(),
+        job_id: String(item.job_id || '').trim(),
+        upload_id: String(item.upload_id || '').trim(),
+        detail: String(item.detail || '').trim(),
+        occurred_at: item.occurred_at || item.created_at || null,
+        created_at: item.created_at || item.occurred_at || null,
+    };
+}
+
+function getT2TDTelegramDeleteReasonLabel(reason) {
+    const labels = {
+        duplicate_incoming_message: '重复文件消息',
+        relay_source_after_upload: '回源完成后清理源消息',
+        teldrive_file_removed: 'TelDrive 文件删除后清理分块',
+        upload_orphan_parts: '上传重复或越界分块',
+        polluted_upload_parts: '污染上传会话分块',
+    };
+    return labels[String(reason || '').trim()] || String(reason || '未知原因');
+}
+
+function renderT2TDTelegramDeleteLogs(items = t2tdTelegramDeleteLogs) {
+    const container = document.getElementById('t2tdLogContainer');
+    if (!container) return;
+    container.innerHTML = '';
+    if (!Array.isArray(items) || items.length === 0) {
+        setT2TDPlaceholder('暂无 Telegram 删除记录', 'ph-telegram-logo');
+        return;
+    }
+
+    const statusView = {
+        deleted: { label: '已删除', icon: 'ph-check-circle', color: '#22c55e', className: 'success' },
+        failed: { label: '删除失败', icon: 'ph-warning-circle', color: '#f87171', className: 'error' },
+        blocked: { label: '已阻止', icon: 'ph-shield-warning', color: '#f59e0b', className: 'warning' },
+    };
+    items.forEach(rawItem => {
+        const item = normalizeT2TDTelegramDeleteLog(rawItem);
+        const view = statusView[item.status];
+        const entry = document.createElement('div');
+        entry.className = 'log-entry';
+        const filePreview = item.file_names.slice(0, 3).join('、');
+        const idPreview = item.message_ids.slice(0, 8).join('、');
+        const contextId = item.task_id
+            ? `任务：<span class="log-path">${escapeA2TDHtml(item.task_id)}</span>`
+            : item.job_id
+                ? `作业：<span class="log-path">${escapeA2TDHtml(item.job_id)}</span>`
+                : '';
+        const text = `<span class="${view.className}">${escapeA2TDHtml(view.label)}</span> · ${escapeA2TDHtml(getT2TDTelegramDeleteReasonLabel(item.reason))}`
+            + renderProgressLogMeta([
+                item.channel_id != null ? `频道：<span class="log-path">${escapeA2TDHtml(item.channel_id)}</span>` : '',
+                idPreview ? `候选消息：${escapeA2TDHtml(idPreview)}${item.message_ids.length > 8 ? ' ...' : ''}` : '',
+                item.deleted_message_ids.length ? `实际删除：${escapeA2TDHtml(item.deleted_message_ids.length)} 条` : '',
+                item.protected_final_ids.length ? `最终文件保护：${escapeA2TDHtml(item.protected_final_ids.join('、'))}` : '',
+                item.protected_active_ids.length ? `活动文件保护：${escapeA2TDHtml(item.protected_active_ids.join('、'))}` : '',
+                filePreview ? `文件：${escapeA2TDHtml(filePreview)}${item.file_names.length > 3 ? ' ...' : ''}` : '',
+                contextId,
+                item.upload_id ? `上传：<span class="log-path">${escapeA2TDHtml(item.upload_id)}</span>` : '',
+                item.detail ? `详情：${escapeA2TDHtml(item.detail)}` : '',
+            ]);
+        entry.innerHTML = `<span class="log-icon" style="color:${view.color};"><i class="ph ${view.icon}"></i></span><span class="log-text">${text}</span><span class="log-time">${escapeA2TDHtml(formatT2TDFullTimestamp(item.occurred_at || item.created_at))}</span>`;
+        container.appendChild(entry);
+    });
+    container.scrollTop = 0;
+}
+
+function upsertT2TDTelegramDeleteLog(rawItem = {}) {
+    const item = normalizeT2TDTelegramDeleteLog(rawItem);
+    const existingIndex = t2tdTelegramDeleteLogs.findIndex(current => String(current.id) === item.id);
+    if (existingIndex >= 0) t2tdTelegramDeleteLogs.splice(existingIndex, 1);
+    t2tdTelegramDeleteLogs.unshift(item);
+    t2tdTelegramDeleteLogs = t2tdTelegramDeleteLogs.slice(0, 500);
+    t2tdTelegramDeleteLogsLoaded = true;
+    if (t2tdPanelMode === 'telegram-deletions') renderT2TDTelegramDeleteLogs();
+}
+
+async function loadT2TDTelegramDeleteLogs(force = false) {
+    if (t2tdTelegramDeleteLogsRefreshPending) return;
+    if (t2tdTelegramDeleteLogsLoaded && !force) {
+        if (t2tdPanelMode === 'telegram-deletions') renderT2TDTelegramDeleteLogs();
+        return;
+    }
+    try {
+        t2tdTelegramDeleteLogsRefreshPending = true;
+        if (t2tdPanelMode === 'telegram-deletions') setT2TDPlaceholder('正在加载 Telegram 删除记录...', 'ph-spinner-gap');
+        const resp = await fetch('/api/t2td/telegram-delete-logs');
+        const data = await readJsonSafe(resp);
+        if (!resp.ok) throw new Error(data.detail || data.message || '读取 Telegram 删除记录失败');
+        t2tdTelegramDeleteLogs = Array.isArray(data.items) ? data.items.map(normalizeT2TDTelegramDeleteLog) : [];
+        t2tdTelegramDeleteLogsLoaded = true;
+        if (t2tdPanelMode === 'telegram-deletions') renderT2TDTelegramDeleteLogs();
+    } catch (e) {
+        if (t2tdPanelMode === 'telegram-deletions') setT2TDPlaceholder(e.message || '读取 Telegram 删除记录失败', 'ph-warning');
+    } finally {
+        t2tdTelegramDeleteLogsRefreshPending = false;
+    }
+}
+
+async function clearT2TDTelegramDeleteLogs() {
+    if (!confirm('确认清空 Telegram 删除日志吗？此操作不会删除 Telegram 消息。')) return;
+    const button = document.getElementById('t2tdClearTelegramDeleteBtn');
+    const originalText = button ? button.innerHTML : '';
+    try {
+        if (button) {
+            button.disabled = true;
+            button.innerHTML = '<i class="ph ph-spinner-gap"></i> 清空中...';
+        }
+        const resp = await fetch('/api/t2td/telegram-delete-logs', { method: 'DELETE' });
+        const data = await readJsonSafe(resp);
+        if (!resp.ok || data.success === false) throw new Error(data.detail || data.message || '清空 Telegram 删除日志失败');
+        t2tdTelegramDeleteLogs = [];
+        t2tdTelegramDeleteLogsLoaded = true;
+        if (t2tdPanelMode === 'telegram-deletions') renderT2TDTelegramDeleteLogs();
+        if (typeof showA2TDToast === 'function') showA2TDToast(`已清空 ${data.count || 0} 条 Telegram 删除日志`, 'success');
+    } catch (e) {
+        alert(e.message || '清空 Telegram 删除日志失败');
+    } finally {
+        if (button) {
+            button.disabled = false;
+            button.innerHTML = originalText || '<i class="ph ph-trash"></i> 清空 Telegram 日志';
+        }
     }
 }
 
@@ -4599,11 +4759,16 @@ async function t2tdRelayBulkAction(action) {
     }
 }
 
-async function toggleT2TDPanelMode(forceRefresh = true) {
-    t2tdPanelMode = t2tdPanelMode === 'deleted' ? 'logs' : 'deleted';
+async function setT2TDPanelMode(mode, forceRefresh = true) {
+    const allowedModes = new Set(['logs', 'deleted', 'telegram-deletions']);
+    t2tdPanelMode = allowedModes.has(mode) ? mode : 'logs';
     syncT2TDPanelToggleButton();
     if (t2tdPanelMode === 'deleted') {
         await loadT2TDDeletedFiles(forceRefresh);
+        return;
+    }
+    if (t2tdPanelMode === 'telegram-deletions') {
+        await loadT2TDTelegramDeleteLogs(forceRefresh);
         return;
     }
     renderT2TDLogs();
@@ -5299,6 +5464,7 @@ async function downloadUnifiedShareFiles() {
     if (!selectedIds.length) return alert('请先选择需要下载的文件');
 
     const keepStructure = document.getElementById('magnetKeepStructure')?.checked ?? true;
+    const renameByFolder = document.getElementById('magnetRenameByFolder')?.checked ?? false;
     const teldrivePath = getTelDriveTargetPath('magnetTeldrivePath');
     const filePaths = Object.fromEntries(
         orderedSelectedItems.map(item => [item.id, item.path || item.name || ''])
@@ -5319,7 +5485,7 @@ async function downloadUnifiedShareFiles() {
                 pass_code_token: shareCurrentData.pass_code_token,
                 keep_structure: keepStructure,
                 file_paths: filePaths,
-                rename_by_folder: false,
+                rename_by_folder: renameByFolder,
                 teldrive_path: teldrivePath,
                 name_overrides: buildJellyfinOverrides('share')
             })

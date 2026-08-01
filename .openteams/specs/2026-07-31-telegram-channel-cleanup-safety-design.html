@@ -1,0 +1,237 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>TelDriveManager Telegram 频道与分块清理安全设计</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --ink: #17211b;
+      --muted: #59645d;
+      --line: #d8ddd9;
+      --paper: #ffffff;
+      --wash: #f4f7f5;
+      --green: #176b4d;
+      --red: #a2372d;
+      --amber: #93620c;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: var(--wash);
+      color: var(--ink);
+      font: 16px/1.68 "Segoe UI", "Microsoft YaHei", sans-serif;
+      letter-spacing: 0;
+    }
+    main {
+      width: min(980px, calc(100% - 32px));
+      margin: 32px auto;
+      background: var(--paper);
+      border: 1px solid var(--line);
+      border-top: 5px solid var(--green);
+      padding: clamp(24px, 5vw, 56px);
+    }
+    h1, h2, h3 { line-height: 1.28; letter-spacing: 0; }
+    h1 { margin: 0 0 10px; font-size: 32px; }
+    h2 { margin: 42px 0 14px; font-size: 23px; border-bottom: 1px solid var(--line); padding-bottom: 8px; }
+    h3 { margin: 24px 0 8px; font-size: 18px; }
+    p, ul, ol, table, pre { margin: 10px 0 16px; }
+    .meta { color: var(--muted); margin-bottom: 30px; }
+    .decision {
+      border-left: 4px solid var(--green);
+      background: #eef8f2;
+      padding: 14px 18px;
+    }
+    .warning {
+      border-left: 4px solid var(--amber);
+      background: #fff8e8;
+      padding: 14px 18px;
+    }
+    .danger { color: var(--red); font-weight: 650; }
+    code {
+      background: #edf1ee;
+      border: 1px solid #dfe5e1;
+      border-radius: 3px;
+      padding: 1px 5px;
+      font-family: Consolas, "Cascadia Mono", monospace;
+      font-size: 0.92em;
+    }
+    table { width: 100%; border-collapse: collapse; }
+    th, td { border: 1px solid var(--line); padding: 10px 12px; text-align: left; vertical-align: top; }
+    th { background: #edf2ef; }
+    li + li { margin-top: 6px; }
+    .flow { font-family: Consolas, "Cascadia Mono", monospace; background: #15231c; color: #eef7f1; padding: 16px; overflow-x: auto; }
+    footer { margin-top: 44px; padding-top: 18px; border-top: 1px solid var(--line); color: var(--muted); font-size: 14px; }
+  </style>
+</head>
+<body>
+<main>
+  <h1>Telegram 频道与分块清理安全设计</h1>
+  <p class="meta">项目：TelDriveManager · 日期：2026-07-31 · 状态：待书面审阅</p>
+
+  <div class="decision">
+    <strong>核心决策：</strong>TelDrive 存储频道与 Telegram 监听频道是同一个资源边界，系统只保留一个权威配置
+    <code>[teldrive].channel_id</code>。前三条已确认需要的删除行为保持不变；上传分块清理改为“证据不足时绝不删除”；
+    四类 Telegram 删除操作全部写入带完整时间和结果状态的独立审计日志。
+  </div>
+
+  <h2>1. 背景与问题</h2>
+  <p>当前系统要求分别填写 <code>[teldrive].channel_id</code> 和 <code>[telegram].channel_id</code>，但产品语义要求它们指向同一频道。双配置没有提供能力，只引入了漂移和误操作风险。</p>
+  <p>此外，上传去重和污染会话恢复会从 TelDrive 返回的 part 数据提取消息 ID，却固定向 Telegram 监听频道执行删除。即使当前两个频道相同，这条路径仍缺少对“该消息是否正在被有效文件引用”和“候选 ID 是否来自当前上传会话”的强校验。</p>
+
+  <h2>2. 目标与非目标</h2>
+  <h3>目标</h3>
+  <ul>
+    <li>网页、初始化向导和配置文件只暴露一个频道 ID。</li>
+    <li>保留同名消息删除、回源成功后删除源消息、TelDrive 文件删除后同步清理 Telegram 消息三项现有功能。</li>
+    <li>第四条分块清理只有在当前上传会话、最终文件保护集合和活跃文件引用三方面均可确认时才执行。</li>
+    <li>任何查询失败、配置冲突或数据不一致均保守退化为“记录待清理项，不删除 Telegram 消息”。</li>
+    <li>四类 Telegram 删除操作均具有结构化审计信息，可定位时间、结果、原因、文件、任务、上传会话、频道和消息 ID。</li>
+    <li>在 Telegram 监听中转页面提供独立的 Telegram 删除日志视图，并能实时看到新记录。</li>
+  </ul>
+
+  <h3>非目标</h3>
+  <ul>
+    <li>不取消前三项业务删除能力。</li>
+    <li>不自动清理历史遗留的 <code>upload_orphans</code> 记录。</li>
+    <li>不修改 TelDrive 服务端协议或 Telegram 权限模型。</li>
+    <li>不承诺外部系统、人工管理员或 Telegram 自身绝不会删除消息。</li>
+  </ul>
+
+  <h2>3. 单一频道配置</h2>
+  <h3>权威字段</h3>
+  <p><code>[teldrive].channel_id</code> 是唯一保存和运行时读取的频道 ID。Telegram 新消息监听、删除同步、回源源消息处理及上传分块清理均使用这一权威值。</p>
+
+  <h3>旧配置迁移</h3>
+  <table>
+    <thead><tr><th>旧配置状态</th><th>加载行为</th><th>下次保存</th></tr></thead>
+    <tbody>
+      <tr><td>只有 <code>teldrive.channel_id</code></td><td>直接使用</td><td>只保存权威字段</td></tr>
+      <tr><td>只有 <code>telegram.channel_id</code></td><td>迁移为权威字段并记录一次迁移日志</td><td>删除旧字段，只保存权威字段</td></tr>
+      <tr><td>两个值等价，包括 <code>-100</code> 前缀差异</td><td>规范化后使用 TelDrive 值</td><td>删除旧字段</td></tr>
+      <tr><td>两个有效值不等价</td><td class="danger">进入配置冲突状态，不启动 Telegram 删除能力，也不执行第四条清理</td><td>用户在单一输入框确认后保存</td></tr>
+    </tbody>
+  </table>
+
+  <h3>界面</h3>
+  <ul>
+    <li>TelDrive 配置区保留一个“Telegram 存储/监听频道 ID”输入。</li>
+    <li>Telegram 配置区和初始化向导的 Telegram 步骤移除重复频道输入。</li>
+    <li>连接测试、配置健康检查和设置保存均读取同一个输入值。</li>
+    <li><code>config.example.toml</code> 和 README 不再展示 <code>[telegram].channel_id</code>。</li>
+    <li>Telegram 监听中转页面顶部使用三个互斥视图选项：运行日志、TelDrive 删除日志、Telegram 删除日志。</li>
+    <li>Telegram 删除日志按最新删除时间优先展示；清空按钮只清除当前日志流，不触发任何文件或消息删除。</li>
+  </ul>
+
+  <h2>4. 第四条清理的安全边界</h2>
+  <p>第四条包含两种不同操作：</p>
+  <ol>
+    <li><strong>成功上传后的重复块回收：</strong>文件记录已成功创建，只删除未被最终文件选中的重复或越界块。</li>
+    <li><strong>污染上传会话重置：</strong>文件记录未成功创建，当前上传会话需废弃后重传。</li>
+  </ol>
+
+  <h3>统一删除前置条件</h3>
+  <ol>
+    <li>权威频道 ID 有效，且不存在旧配置冲突。</li>
+    <li>候选 ID 是正整数、去重后非空，并明确关联当前 <code>task_id</code> 与 <code>upload_id</code>。</li>
+    <li>成功取得当前上传会话的实时 part 列表；不得仅凭内存缓存或数据库中的旧 checkpoint 删除。</li>
+    <li>成功取得权威频道中所有活跃 TelDrive 文件引用的 part ID；查询失败返回“未知”，不得当作空集合。</li>
+    <li>候选 ID 不在活跃文件引用集合中。</li>
+    <li>成功上传后的清理还必须保证候选 ID 不在本次最终文件的 <code>remote_parts</code> 保护集合中。</li>
+  </ol>
+
+  <div class="flow">候选 part IDs
+  - 当前文件 remote_parts IDs
+  - 全部 active 文件引用 IDs
+  = 可删除 IDs
+
+任一证据查询失败或集合关系异常 -> 记录 upload_orphans -> 不调用 Telegram delete_messages</div>
+
+  <h3>重复块回收</h3>
+  <p>文件创建成功后，<code>upload_meta.remote_parts</code> 是最终文件使用的保护集合，<code>upload_meta.orphan_parts</code> 是候选集合。即使服务端把同一个消息 ID 重复返回，集合相减也会保护最终文件正在使用的消息。</p>
+
+  <h3>污染会话重置</h3>
+  <p>必须用当前 <code>upload_id</code> 实时查询分块。若查询失败、上传 ID 缺失、活跃引用查询失败或 part 数据与当前任务不一致，则跳过 Telegram 删除，写入 <code>upload_orphans</code> 审计记录，清理服务端上传会话状态并继续既有重试流程。保守失败最多留下无用分块，不会阻塞正常上传。</p>
+
+  <h2>5. 前三项功能保持</h2>
+  <table>
+    <thead><tr><th>功能</th><th>保持的行为</th><th>新增约束</th></tr></thead>
+    <tbody>
+      <tr><td>同名消息删除</td><td>新媒体与已映射文件同名时仍立即删除新消息</td><td>频道来源改为单一权威值</td></tr>
+      <tr><td>Telegram 回源</td><td>重传 TelDrive 成功后仍删除源消息</td><td>源频道必须等于权威频道</td></tr>
+      <tr><td>删除同步</td><td>TelDrive 文件确认消失后仍清理对应 Telegram 消息</td><td>映射、确认轮次和现有保护逻辑不变</td></tr>
+    </tbody>
+  </table>
+
+  <h2>6. Telegram 删除审计与错误处理</h2>
+  <p>所有 Telegram <code>delete_messages</code> 调用和被安全规则阻止的删除决策统一写入独立的
+    <code>telegram_deletions</code> 进度日志流。每次操作只产生一条最终审计记录，结果分为
+    <code>deleted</code>、<code>failed</code> 和 <code>blocked</code>。</p>
+  <p>审计覆盖以下四类来源：</p>
+  <ol>
+    <li>新媒体与已映射文件同名时删除重复消息。</li>
+    <li>Telegram 回源重传成功后删除源消息。</li>
+    <li>TelDrive 文件确认消失后同步清理对应 Telegram 消息。</li>
+    <li>成功上传后的重复块回收及污染上传会话分块清理。</li>
+  </ol>
+  <p>每条记录至少包含：</p>
+  <ul>
+    <li><code>occurred_at</code>：操作结束时间，持久化为带时区的 ISO 时间；页面显示完整的本地日期和时间 <code>YYYY-MM-DD HH:mm:ss</code>。</li>
+    <li><code>status</code>：<code>deleted</code>、<code>failed</code> 或 <code>blocked</code>。</li>
+    <li><code>reason</code>：稳定的机器可读原因码，并在页面映射为中文说明。</li>
+    <li><code>channel_id</code>、候选消息 ID、实际删除 ID、文件名列表和文件 ID列表。</li>
+    <li>可用时记录 <code>task_id</code>、<code>job_id</code>、<code>upload_id</code>、最终文件保护 ID和活跃文件保护 ID。</li>
+    <li>失败错误或阻止原因，例如配置冲突、实时查询失败、活跃引用查询失败或候选全部受保护。</li>
+  </ul>
+  <p>后端提供独立的查询和清空接口；前端在 Telegram 删除日志视图打开时通过现有实时事件连接接收新审计记录，
+    无需刷新整页。日志沿用现有容量策略进行裁剪，含义是覆盖所有删除来源和结果，而不是无限期增长。</p>
+  <div class="warning"><strong>保守原则：</strong>删除失败或验证失败不应让上传任务永久失败。系统保留现有“记录孤儿块后继续重试”的恢复能力。</div>
+
+  <h2>7. 代码范围</h2>
+  <table>
+    <thead><tr><th>文件</th><th>职责</th></tr></thead>
+    <tbody>
+      <tr><td><code>app/config.py</code></td><td>全局配置规范化、旧字段迁移、单一频道保存</td></tr>
+      <tr><td><code>app/modules/tel2teldrive/service.py</code></td><td>运行时频道派生、旧配置冲突检测、活跃 part 引用查询、统一 Telegram 删除审计入口</td></tr>
+      <tr><td><code>app/modules/tel2teldrive/relay.py</code></td><td>回源源消息删除改用统一审计入口并提供任务上下文</td></tr>
+      <tr><td><code>app/modules/aria2teldrive/task_manager.py</code></td><td>第四条清理的候选/保护集合校验、保守退化和审计</td></tr>
+      <tr><td><code>app/modules/tel2teldrive/routes.py</code></td><td>Telegram 删除审计查询和独立清空接口</td></tr>
+      <tr><td><code>app/static/index.html</code>、<code>app/static/app.js</code></td><td>移除重复输入，统一设置收集、回填和向导流程，增加三态日志视图</td></tr>
+      <tr><td><code>config.example.toml</code>、<code>README.md</code></td><td>配置示例和部署说明同步</td></tr>
+      <tr><td><code>tests/</code></td><td>迁移、冲突、保护集合、查询失败及前三项回归测试</td></tr>
+    </tbody>
+  </table>
+
+  <h2>8. 验收标准</h2>
+  <ol>
+    <li>新保存的配置文件只含一个频道 ID，页面和向导也只要求填写一次。</li>
+    <li>旧配置中两个等价 ID 可无损加载并在保存后完成迁移。</li>
+    <li>旧配置冲突时不会执行任何 Telegram 自动删除，并能在页面或日志中明确定位冲突。</li>
+    <li>同一消息 ID同时出现在 <code>remote_parts</code> 与 <code>orphan_parts</code> 时不会被删除。</li>
+    <li>任何活跃 TelDrive 文件引用的消息 ID不会被第四条删除。</li>
+    <li>实时上传会话查询或活跃引用查询失败时，第四条零次调用 <code>delete_messages</code>，任务仍可重置并重试。</li>
+    <li>证据完整的真实孤儿块仍会被自动清理。</li>
+    <li>前三项删除行为的现有测试和新增回归测试全部通过。</li>
+    <li>四类 Telegram 删除来源在成功、失败或被阻止后均生成一条且仅一条审计记录。</li>
+    <li>每条记录包含可显示到秒的完整删除时间、状态、原因、频道和消息 ID。</li>
+    <li>页面可在运行日志、TelDrive 删除日志和 Telegram 删除日志之间稳定切换，动态内容不会改变面板尺寸。</li>
+    <li>Telegram 删除日志视图打开时能实时出现新记录，清空日志不会调用任何 Telegram 或 TelDrive 删除 API。</li>
+  </ol>
+
+  <h2>9. 测试策略</h2>
+  <ul>
+    <li>配置单元测试：单字段、旧字段迁移、<code>-100</code> 等价形式、冲突阻断、保存结果。</li>
+    <li>分块清理单元测试：候选规范化、最终文件保护、活跃文件保护、重复 ID、空集合。</li>
+    <li>故障测试：上传会话查询异常、数据库查询异常、Telegram 客户端断开、删除 API异常。</li>
+    <li>业务回归测试：同名消息、回源成功、删除同步三条路径仍调用预期频道和消息 ID。</li>
+    <li>审计测试：四类来源、三种结果、完整时间、单操作单记录、容量裁剪和敏感信息排除。</li>
+    <li>接口测试：Telegram 删除日志查询按时间返回、限制条数、独立清空且不影响其他日志流。</li>
+    <li>前端测试：三态切换、时间格式化、状态样式、空状态、实时追加和清空确认。</li>
+    <li>完整测试套件和配置读写烟雾测试。</li>
+  </ul>
+
+  <footer>本设计以数据保护优先：无法证明一个分块是孤儿时，宁可保留无用消息，也不删除可能仍被文件使用的消息。</footer>
+</main>
+</body>
+</html>

@@ -281,6 +281,37 @@ async def clear_deleted_files():
     return {"success": True, "count": cleared}
 
 
+@router.get("/telegram-delete-logs")
+async def get_telegram_delete_logs(limit: int = 200):
+    from app import database as db
+    from app.modules.tel2teldrive.service import TELEGRAM_DELETE_LOG_STREAM
+
+    normalized_limit = max(1, min(int(limit or 200), 500))
+    logs = await db.get_progress_logs(stream=TELEGRAM_DELETE_LOG_STREAM, limit=normalized_limit)
+    items: list[dict[str, Any]] = []
+    for log in reversed(logs):
+        payload = log.get("payload") if isinstance(log.get("payload"), dict) else {}
+        items.append(
+            {
+                **payload,
+                "id": log.get("id"),
+                "job_id": payload.get("job_id") or log.get("job_id"),
+                "created_at": log.get("created_at"),
+                "occurred_at": payload.get("occurred_at") or log.get("created_at"),
+            }
+        )
+    return {"items": items, "count": len(items)}
+
+
+@router.delete("/telegram-delete-logs")
+async def clear_telegram_delete_logs():
+    from app import database as db
+    from app.modules.tel2teldrive.service import TELEGRAM_DELETE_LOG_STREAM
+
+    cleared = await db.clear_progress_logs(stream=TELEGRAM_DELETE_LOG_STREAM)
+    return {"success": True, "count": cleared}
+
+
 @router.get("/relay-jobs")
 async def get_relay_jobs(limit: int = 200):
     from app import database as db

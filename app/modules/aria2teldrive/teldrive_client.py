@@ -1087,6 +1087,7 @@ class TelDriveClient:
         confirmed_numbers = self._normalize_confirmed_part_numbers(confirmed_part_numbers, total_parts)
         upload_meta = {
             "upload_id": upload_id,
+            "parts_verified_upload_id": None,
             "total_parts": total_parts,
             "confirmed_part_numbers": confirmed_numbers,
             "uploaded_parts": [],
@@ -1152,6 +1153,7 @@ class TelDriveClient:
                     return await self._touch(session, filename, teldrive_path)
 
                 remote_parts_raw = await self._get_file_parts_with_retry(session, upload_id)
+                upload_meta["parts_verified_upload_id"] = upload_id
                 selected_map, orphan_parts_live = self._dedupe_remote_parts(
                     remote_parts_raw, total_parts, file_size
                 )
@@ -1205,6 +1207,7 @@ class TelDriveClient:
                     uploaded_parts, file_size, total_parts
                 )
                 result["upload_meta"] = upload_meta
+                upload_meta["parts_verified_upload_id"] = upload_id
                 if isinstance(result.get("remote_parts"), list):
                     upload_meta["remote_parts"] = self._normalize_remote_parts(result["remote_parts"], total_parts)
                     upload_meta["confirmed_part_numbers"] = self._extract_confirmed_part_numbers(upload_meta["remote_parts"])

@@ -28,7 +28,10 @@ def _sanitize_payload(payload: dict | None) -> dict:
 
 
 def _has_channel_id(value) -> bool:
-    return str(value).strip() not in ("", "None")
+    try:
+        return int(str(value).strip()) != 0
+    except (TypeError, ValueError):
+        return False
 
 
 @router.get("")
@@ -36,7 +39,8 @@ def _has_channel_id(value) -> bool:
 async def get_settings():
     config = load_config()
     data = dict(config)
-    data["_meta"] = {"needs_setup": needs_setup()}
+    config_meta = config.get("_meta") if isinstance(config.get("_meta"), dict) else {}
+    data["_meta"] = {**config_meta, "needs_setup": needs_setup()}
     return data
 
 
@@ -387,7 +391,7 @@ async def global_health_check():
         telegram_base_ready = (
             bool(tg_cfg.get("api_id"))
             and bool(str(tg_cfg.get("api_hash") or "").strip())
-            and _has_channel_id(tg_cfg.get("channel_id"))
+            and _has_channel_id(teldrive_cfg.get("channel_id"))
         )
         try:
             from app.modules.tel2teldrive.service import broker

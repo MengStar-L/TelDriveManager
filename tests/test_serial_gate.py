@@ -4,6 +4,7 @@ import tempfile
 import unittest
 import uuid
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, cast
 
 from app.modules.aria2teldrive import task_manager as task_manager_module
@@ -902,7 +903,7 @@ class SerialGateTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("task-3", manager._upload_retry_checkpoints)
         self.assertEqual(manager._upload_confirmed_checkpoints["task-3"], 8)
 
-    async def test_cleanup_polluted_upload_uses_cached_remote_parts(self):
+    async def test_cleanup_polluted_upload_does_not_delete_cached_remote_parts(self):
         manager = self.make_manager()
         manager.teldrive = cast(Any, FakeTelDrive())
         manager._upload_session_meta["task-polluted"] = {
@@ -928,14 +929,14 @@ class SerialGateTests(unittest.IsolatedAsyncioTestCase):
             async def fake_broadcast(*args, **kwargs):
                 return None
 
-            async def fake_delete_messages(message_ids):
-                deleted.extend(message_ids)
-                return True
+            async def fake_cleanup_evidence():
+                from app.modules.tel2teldrive import service as service_module
+                return service_module, SimpleNamespace(teldrive_channel_id=12345), set()
 
             cast(Any, task_manager_module.db).get_task = fake_get_task
             cast(Any, task_manager_module.db).update_task = fake_update_task
             manager._broadcast_task_update = cast(Any, fake_broadcast)
-            manager._delete_telegram_messages = cast(Any, fake_delete_messages)
+            manager._telegram_cleanup_evidence = cast(Any, fake_cleanup_evidence)
 
             result = await manager.cleanup_polluted_upload("task-polluted")
         finally:
@@ -943,7 +944,7 @@ class SerialGateTests(unittest.IsolatedAsyncioTestCase):
             cast(Any, task_manager_module.db).update_task = original_update_task
 
         self.assertTrue(result["success"])
-        self.assertEqual(deleted, [101, 102])
+        self.assertEqual(deleted, [])
         self.assertEqual(manager.teldrive.cleaned_upload_ids, ["upload-1"])
         self.assertNotIn("task-polluted", manager._upload_session_meta)
         self.assertEqual(updates[-1]["status"], "failed")

@@ -49,6 +49,7 @@ from telethon.tl.types import (
 )
 
 from app.modules.tel2teldrive.relay import TelegramRelayManager
+from app.config import normalize_telegram_channel_id, telegram_channel_ids_equivalent
 
 BASE_DIR = Path(__file__).parent
 STATIC_DIR = BASE_DIR / "static"
@@ -60,6 +61,7 @@ LEGACY_MAPPING_PATH = BASE_DIR / "file_msg_map.json"
 MAPPING_PATH = RUNTIME_DATA_DIR / "file_msg_map.json"
 DEFAULT_LOG_FILE = BASE_DIR / "runtime.log"
 T2TD_ACTION_LOG_STREAM = "t2td_sync"
+TELEGRAM_DELETE_LOG_STREAM = "telegram_deletions"
 T2TD_ACTION_LOG_LIMIT_MULTIPLIER = 5
 T2TD_ACTION_LOG_MIN_LIMIT = 500
 # 内部删除宽限期：删除同步轮询间隔可配置到数百秒，宽限期必须覆盖
@@ -79,7 +81,6 @@ DEFAULT_CONFIG: dict[str, dict[str, Any]] = {
     "telegram": {
         "api_id": None,
         "api_hash": "",
-        "channel_id": None,
         "session_name": "tel2teldrive_session",
         "sync_interval": 10,
         "sync_enabled": True,
@@ -140,7 +141,6 @@ DEFAULT_CONFIG: dict[str, dict[str, Any]] = {
 FIELD_LABELS = {
     "telegram.api_id": "Telegram API ID",
     "telegram.api_hash": "Telegram API Hash",
-    "telegram.channel_id": "Telegram 监听频道 ID",
     "telegram.session_name": "会话文件名",
     "teldrive.url": "TelDrive 地址",
     "teldrive.bearer_token": "TelDrive Bearer Token",
@@ -169,6 +169,7 @@ class RuntimeConfig:
     telegram_api_id: int | None
     telegram_api_hash: str
     telegram_channel_id: int | None
+    telegram_channel_conflict: bool
     session_name: str
     teldrive_url: str
     bearer_token: str
@@ -227,6 +228,10 @@ class RuntimeConfig:
         return not self.missing_fields and not self.config_error
 
     @property
+    def telegram_deletion_enabled(self) -> bool:
+        return bool(self.teldrive_channel_id) and not self.telegram_channel_conflict
+
+    @property
     def log_file_path(self) -> Path:
         log_path = Path(self.log_file or "runtime.log")
         if not log_path.is_absolute():
@@ -281,7 +286,8 @@ class ConfigStore:
             config_error=self._config_error,
             telegram_api_id=telegram["api_id"],
             telegram_api_hash=telegram["api_hash"],
-            telegram_channel_id=telegram["channel_id"],
+            telegram_channel_id=teldrive["channel_id"],
+            telegram_channel_conflict=bool(data.get("_meta", {}).get("telegram_channel_conflict", False)),
             session_name=telegram["session_name"],
             teldrive_url=teldrive["api_host"],
             bearer_token=teldrive["access_token"],
@@ -330,7 +336,6 @@ class ConfigStore:
             "telegram": {
                 "api_id": "" if runtime.telegram_api_id is None else runtime.telegram_api_id,
                 "api_hash": runtime.telegram_api_hash,
-                "channel_id": "" if runtime.telegram_channel_id is None else runtime.telegram_channel_id,
                 "session_name": runtime.session_name,
                 "sync_interval": runtime.sync_interval,
                 "sync_enabled": runtime.sync_enabled,
@@ -388,6 +393,8 @@ class ConfigStore:
                 "config_error": runtime.config_error,
                 "missing_fields": runtime.missing_fields,
                 "config_path": str(self.path),
+                "telegram_channel_conflict": runtime.telegram_channel_conflict,
+                "legacy_telegram_channel_id": self._data.get("_meta", {}).get("legacy_telegram_channel_id"),
             },
         }
 
@@ -412,7 +419,6 @@ class ConfigStore:
         telegram = data["telegram"]
         telegram["api_id"] = self._parse_optional_int(telegram_payload.get("api_id"), "Telegram API ID", strict=strict)
         telegram["api_hash"] = self._parse_string(telegram_payload.get("api_hash"))
-        telegram["channel_id"] = self._parse_optional_int(telegram_payload.get("channel_id"), "Telegram 监听频道 ID", strict=strict)
         telegram["session_name"] = self._parse_string(
             telegram_payload.get("session_name"),
             fallback=DEFAULT_CONFIG["telegram"]["session_name"],
@@ -461,7 +467,26 @@ class ConfigStore:
             teldrive_payload.get("random_chunk_name"),
             default=DEFAULT_CONFIG["teldrive"]["random_chunk_name"],
         )
-        teldrive["channel_id"] = self._parse_optional_int(teldrive_payload.get("channel_id"), "TelDrive 频道 ID", strict=strict)
+        teldrive["channel_id"] = normalize_telegram_channel_id(
+            self._parse_optional_int(teldrive_payload.get("channel_id"), "TelDrive 频道 ID", strict=strict)
+        )
+
+        legacy_channel_id = normalize_telegram_channel_id(
+            self._parse_optional_int(
+                telegram_payload.get("channel_id"), "旧 Telegram 监听频道 ID", strict=False
+            )
+        )
+        if teldrive["channel_id"] is None:
+            teldrive["channel_id"] = legacy_channel_id
+        channel_conflict = bool(
+            teldrive["channel_id"] is not None
+            and legacy_channel_id is not None
+            and not telegram_channel_ids_equivalent(teldrive["channel_id"], legacy_channel_id)
+        )
+        data["_meta"] = {
+            "telegram_channel_conflict": channel_conflict,
+            "legacy_telegram_channel_id": legacy_channel_id if channel_conflict else None,
+        }
 
         upload = data["upload"]
         upload["max_retries"] = self._parse_positive_int(
@@ -562,8 +587,6 @@ class ConfigStore:
             missing.append(FIELD_LABELS["telegram.api_id"])
         if not data["telegram"]["api_hash"]:
             missing.append(FIELD_LABELS["telegram.api_hash"])
-        if data["telegram"]["channel_id"] is None:
-            missing.append(FIELD_LABELS["telegram.channel_id"])
         if not data["telegram"]["session_name"]:
             missing.append(FIELD_LABELS["telegram.session_name"])
         if not data["teldrive"]["api_host"]:
@@ -768,6 +791,7 @@ def should_reload_service(old_config: RuntimeConfig, new_config: RuntimeConfig) 
         "telegram_api_id",
         "telegram_api_hash",
         "telegram_channel_id",
+        "telegram_channel_conflict",
         "session_name",
         "teldrive_url",
         "bearer_token",
@@ -1142,6 +1166,145 @@ async def record_teldrive_action(
         logger.warning(f"写入 TelDrive 自动增删记录失败: {exc}")
 
 
+def _normalize_audit_texts(values: Any) -> list[str]:
+    result: list[str] = []
+    seen: set[str] = set()
+    for value in values or []:
+        text = str(value or "").strip()
+        if text and text not in seen:
+            seen.add(text)
+            result.append(text)
+    return result
+
+
+async def record_telegram_delete_audit(
+    *,
+    status: str,
+    reason: str,
+    channel_id: int | None,
+    message_ids: list[int],
+    deleted_message_ids: list[int] | None = None,
+    file_names: list[str] | None = None,
+    file_ids: list[str] | None = None,
+    task_id: str | None = None,
+    job_id: str | None = None,
+    upload_id: str | None = None,
+    protected_final_ids: list[int] | None = None,
+    protected_active_ids: list[int] | None = None,
+    detail: str | None = None,
+) -> dict[str, Any]:
+    """Persist and broadcast one final Telegram deletion decision."""
+    normalized_status = status if status in {"deleted", "failed", "blocked"} else "failed"
+    payload: dict[str, Any] = {
+        "occurred_at": iso_now(),
+        "status": normalized_status,
+        "reason": str(reason or "unknown").strip() or "unknown",
+        "channel_id": normalize_telegram_channel_id(channel_id),
+        "message_ids": normalize_message_ids(message_ids),
+        "deleted_message_ids": normalize_message_ids(deleted_message_ids),
+        "file_names": _normalize_audit_texts(file_names),
+        "file_ids": _normalize_audit_texts(file_ids),
+        "task_id": str(task_id or "").strip() or None,
+        "job_id": str(job_id or "").strip() or None,
+        "upload_id": str(upload_id or "").strip() or None,
+        "protected_final_ids": normalize_message_ids(protected_final_ids),
+        "protected_active_ids": normalize_message_ids(protected_active_ids),
+        "detail": str(detail or "").strip()[:1000] or None,
+    }
+    event_payload = dict(payload)
+    try:
+        row = await db.add_progress_log(
+            "telegram_delete",
+            payload,
+            stream=TELEGRAM_DELETE_LOG_STREAM,
+            job_id=payload["task_id"] or payload["job_id"],
+            limit=500,
+        )
+        if isinstance(row, dict):
+            event_payload["id"] = row.get("id")
+            event_payload["created_at"] = row.get("created_at")
+    except Exception as exc:
+        logger.warning(f"写入 Telegram 删除审计失败: {exc}")
+    broker._schedule_broadcast({"type": "telegram_delete_audit", "payload": event_payload})
+    return event_payload
+
+
+async def delete_telegram_messages_with_audit(
+    client: Any,
+    config: Any,
+    message_ids: Any,
+    *,
+    reason: str,
+    candidate_message_ids: Any = None,
+    requested_channel_id: Any = None,
+    file_names: list[str] | None = None,
+    file_ids: list[str] | None = None,
+    task_id: str | None = None,
+    job_id: str | None = None,
+    upload_id: str | None = None,
+    protected_final_ids: list[int] | None = None,
+    protected_active_ids: list[int] | None = None,
+) -> bool:
+    """Delete from the canonical channel and emit exactly one final audit record."""
+    normalized_ids = normalize_message_ids(message_ids)
+    if hasattr(config, "teldrive_channel_id"):
+        channel_id = normalize_telegram_channel_id(getattr(config, "teldrive_channel_id", None))
+    else:
+        channel_id = normalize_telegram_channel_id(getattr(config, "telegram_channel_id", None))
+
+    blocked_detail: str | None = None
+    if bool(getattr(config, "telegram_channel_conflict", False)):
+        blocked_detail = "旧 Telegram 频道与 TelDrive 频道配置冲突，自动删除已阻止"
+    elif channel_id is None:
+        blocked_detail = "共享 Telegram 存储/监听频道 ID 无效，自动删除已阻止"
+    elif requested_channel_id is not None and not channel_ids_match(requested_channel_id, channel_id):
+        blocked_detail = (
+            f"请求频道 {requested_channel_id} 与共享频道 {channel_id} 不一致，自动删除已阻止"
+        )
+    elif not normalized_ids:
+        blocked_detail = "没有有效的 Telegram 消息 ID，未执行删除"
+    elif client is None:
+        blocked_detail = "Telegram 客户端不可用，未执行删除"
+    elif hasattr(client, "is_connected") and not client.is_connected():
+        blocked_detail = "Telegram 客户端未连接，未执行删除"
+
+    common = {
+        "reason": reason,
+        "channel_id": channel_id,
+        "message_ids": normalize_message_ids(
+            candidate_message_ids if candidate_message_ids is not None else normalized_ids
+        ),
+        "file_names": file_names,
+        "file_ids": file_ids,
+        "task_id": task_id,
+        "job_id": job_id,
+        "upload_id": upload_id,
+        "protected_final_ids": protected_final_ids,
+        "protected_active_ids": protected_active_ids,
+    }
+    if blocked_detail:
+        await record_telegram_delete_audit(status="blocked", detail=blocked_detail, **common)
+        return False
+
+    try:
+        remember_internal_deleted_message_ids(normalized_ids)
+        await client.delete_messages(channel_id, normalized_ids)
+    except Exception as exc:
+        await record_telegram_delete_audit(
+            status="failed",
+            detail=f"{type(exc).__name__}: {exc}",
+            **common,
+        )
+        return False
+
+    await record_telegram_delete_audit(
+        status="deleted",
+        deleted_message_ids=normalized_ids,
+        **common,
+    )
+    return True
+
+
 async def add_file_to_teldrive(
     config: RuntimeConfig,
     file_name: str,
@@ -1369,9 +1532,7 @@ def _channel_id_candidates(value: Any) -> set[int]:
 
 
 def channel_ids_match(a: Any, b: Any) -> bool:
-    ca = _channel_id_candidates(a)
-    cb = _channel_id_candidates(b)
-    return bool(ca and cb and ca & cb)
+    return telegram_channel_ids_equivalent(a, b)
 
 
 def query_db_mapping(config: RuntimeConfig) -> dict[str, list[int]]:
@@ -1531,6 +1692,55 @@ def query_db_msg_ids(config: RuntimeConfig) -> set[int]:
     except Exception as exc:
         logger.warning(f"TelDrive 消息 ID 查询失败: {exc}")
         return set()
+
+
+def query_active_teldrive_part_ids(config: RuntimeConfig) -> set[int] | None:
+    """Return active part IDs for the canonical channel, or None when evidence is unavailable."""
+    if bool(getattr(config, "telegram_channel_conflict", False)):
+        return None
+    channel_id = normalize_telegram_channel_id(getattr(config, "teldrive_channel_id", None))
+    if channel_id is None or not bool(getattr(config, "db_enabled", False)) or psycopg2 is None:
+        return None
+
+    conn = None
+    cur = None
+    try:
+        conn = psycopg2.connect(
+            host=config.db_host,
+            port=config.db_port,
+            user=config.db_user,
+            password=config.db_password,
+            database=config.db_name,
+        )
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT parts, channel_id FROM teldrive.files "
+            "WHERE type='file' AND status='active' AND parts IS NOT NULL"
+        )
+        active_ids: set[int] = set()
+        for parts, part_channel_id in cur.fetchall():
+            if not channel_ids_match(part_channel_id, channel_id):
+                continue
+            if not isinstance(parts, list):
+                return None
+            for part in parts:
+                if not isinstance(part, dict) or "id" not in part:
+                    return None
+                message_id = normalize_telegram_channel_id(part.get("id"))
+                if message_id is None:
+                    return None
+                active_ids.add(message_id)
+        return active_ids
+    except Exception as exc:
+        logger.warning(f"TelDrive 活动文件分块引用查询失败: {exc}")
+        return None
+    finally:
+        if cur is not None:
+            with suppress(Exception):
+                cur.close()
+        if conn is not None:
+            with suppress(Exception):
+                conn.close()
 
 
 def get_db_missing_fields(config: RuntimeConfig) -> list[str]:
@@ -2050,21 +2260,30 @@ async def sync_deletions(client: TelegramClient, config: RuntimeConfig):
 
             if confirmed_ids:
                 msg_ids_to_delete: list[int] = []
+                confirmed_file_names: list[str] = []
                 for file_id in confirmed_ids:
                     info = pending_deletions.pop(file_id)
                     msg_ids_to_delete = merge_message_ids(msg_ids_to_delete, info["msg_ids"])
+                    if info.get("name"):
+                        confirmed_file_names.append(str(info["name"]))
                     mapping.pop(file_id, None)
 
                 if msg_ids_to_delete:
                     logger.warning(
                         f"确认删除 {len(confirmed_ids)} 个文件，准备清理 {len(msg_ids_to_delete)} 条频道消息"
                     )
-                    try:
-                        remember_internal_deleted_message_ids(msg_ids_to_delete)
-                        await client.delete_messages(config.telegram_channel_id, msg_ids_to_delete)
+                    deleted = await delete_telegram_messages_with_audit(
+                        client,
+                        config,
+                        msg_ids_to_delete,
+                        reason="teldrive_file_removed",
+                        file_names=confirmed_file_names,
+                        file_ids=confirmed_ids,
+                    )
+                    if deleted:
                         logger.info(f"已删除 {len(msg_ids_to_delete)} 条频道消息")
-                    except Exception as exc:
-                        logger.error(f"删除频道消息失败: {exc}")
+                    else:
+                        logger.error("删除频道消息失败或被安全规则阻止，详情见 Telegram 删除日志")
                 await run_blocking_io(save_mapping, mapping)
 
             if new_ids:
@@ -2532,12 +2751,18 @@ class Tel2TelDriveService:
 
         if name in mapped_names:
             logger.warning(f"检测到重复消息，准备删除: {name} (msg_id={msg.id})")
-            try:
-                remember_internal_deleted_message_ids([msg.id])
-                await client.delete_messages(config.telegram_channel_id, [msg.id])
+            deleted = await delete_telegram_messages_with_audit(
+                client,
+                config,
+                [msg.id],
+                reason="duplicate_incoming_message",
+                requested_channel_id=config.telegram_channel_id,
+                file_names=[name],
+            )
+            if deleted:
                 logger.info(f"重复消息已删除: {name} (msg_id={msg.id})")
-            except Exception as exc:
-                logger.error(f"删除重复消息失败: {exc}")
+            else:
+                logger.error("删除重复消息失败或被安全规则阻止，详情见 Telegram 删除日志")
             return
 
         existing_name_to_id = {info["name"]: file_id for file_id, info in td_files.items() if isinstance(info, dict) and info.get("name")}

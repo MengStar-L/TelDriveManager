@@ -61,6 +61,7 @@ min_split_size_mb = 0               # 推送时的最小分块大小（MB）；0
 [teldrive]
 api_host = ""
 access_token = ""
+# Telegram 分片存储、消息监听和自动清理共用此频道
 channel_id = 0
 chunk_size = "250M"
 upload_concurrency = 4
@@ -80,7 +81,6 @@ parallel_chunk_upload = false      # 试验功能：单文件多分块并行上�
 [telegram]
 api_id = 0
 api_hash = ""
-channel_id = 0
 session_name = "tel2teldrive_session"
 sync_interval = 10
 sync_enabled = true

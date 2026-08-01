@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>统一分享页层级重命名恢复设计</title>
+  <style>
+    :root { color-scheme: light; font-family: "Segoe UI", "Microsoft YaHei", sans-serif; color: #172033; background: #f3f6fb; }
+    body { margin: 0; padding: 36px 20px; }
+    main { max-width: 880px; margin: 0 auto; background: #fff; border: 1px solid #dce5f2; border-radius: 10px; box-shadow: 0 12px 35px rgba(35, 56, 91, .08); overflow: hidden; }
+    header { padding: 30px 36px; background: #f7faff; border-bottom: 1px solid #dce5f2; }
+    h1 { margin: 0; font-size: 26px; font-weight: 700; letter-spacing: 0; }
+    .meta { margin: 9px 0 0; color: #64748b; font-size: 14px; }
+    section { padding: 24px 36px; border-bottom: 1px solid #eef2f7; }
+    section:last-child { border-bottom: 0; }
+    h2 { margin: 0 0 12px; font-size: 18px; }
+    p, li { font-size: 15px; line-height: 1.7; }
+    p { margin: 0; }
+    ul { margin: 10px 0 0; padding-left: 21px; }
+    code { padding: 2px 5px; border-radius: 4px; background: #eef4ff; color: #174ea6; font-family: Consolas, monospace; font-size: .9em; }
+    .flow { display: grid; grid-template-columns: 1fr auto 1fr auto 1fr; align-items: center; gap: 10px; margin-top: 14px; }
+    .node { padding: 12px; border: 1px solid #c7d9f9; border-radius: 7px; background: #f7faff; text-align: center; font-size: 14px; font-weight: 600; }
+    .arrow { color: #3974c8; font-size: 22px; }
+    .note { margin-top: 12px; padding: 12px 14px; border-left: 3px solid #3484e8; background: #f4f8ff; color: #30415f; font-size: 14px; line-height: 1.6; }
+    @media (max-width: 650px) { body { padding: 12px; } header, section { padding: 22px; } .flow { grid-template-columns: 1fr; } .arrow { transform: rotate(90deg); text-align: center; } }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <h1>统一分享页层级重命名恢复设计</h1>
+      <p class="meta">2026-08-01 · 已获用户确认</p>
+    </header>
+
+    <section>
+      <h2>目标</h2>
+      <p>恢复统一解析页面中 PikPak 分享文件的“层级重命名”选项。启用后，下载文件以其原始父目录名命名，同时保留文件扩展名。</p>
+    </section>
+
+    <section>
+      <h2>界面与适用范围</h2>
+      <ul>
+        <li>在统一解析结果操作栏内，将“层级重命名”置于“维持目录结构映射”右侧。</li>
+        <li>开关默认关闭。</li>
+        <li>仅当当前结果来自 PikPak 分享链接时显示并生效；普通磁链结果不显示该开关，避免提供无效选项。</li>
+        <li>不修改已隐藏的旧分享页，也不改变其现有开关或行为。</li>
+      </ul>
+    </section>
+
+    <section>
+      <h2>数据流与优先级</h2>
+      <div class="flow">
+        <div class="node">统一分享页开关</div><div class="arrow">→</div>
+        <div class="node"><code>rename_by_folder</code> 请求字段</div><div class="arrow">→</div>
+        <div class="node">现有分享下载逻辑</div>
+      </div>
+      <ul>
+        <li>统一分享下载不再把 <code>rename_by_folder</code> 固定为 <code>false</code>，改为传递开关的当前值。</li>
+        <li>复用后端已存在的重命名逻辑：源路径倒数第二段作为输出文件名，扩展名保持不变。</li>
+        <li>“维持目录结构映射”仍仅控制下载和上传目标目录；它与层级重命名可独立组合。</li>
+        <li>已有 Jellyfin 格式化名称继续优先于层级重命名，保持当前兼容性。</li>
+      </ul>
+      <div class="note">不改动 PikPak 解析、隔离转存、链接解析或 aria2 后处理流程；本次仅恢复前端控件可达性与请求参数传递。</div>
+    </section>
+
+    <section>
+      <h2>验证标准</h2>
+      <ul>
+        <li>统一解析到分享链接时，截图所示操作栏显示默认关闭的“层级重命名”。</li>
+        <li>统一解析到磁链时，该开关不可见。</li>
+        <li>关闭时请求携带 <code>rename_by_folder: false</code>；开启时携带 <code>rename_by_folder: true</code>。</li>
+        <li>分享文件 <code>父目录/原文件.mp4</code> 开启后输出为 <code>父目录.mp4</code>，并继续使用既有的目录映射与 Jellyfin 覆盖优先级。</li>
+      </ul>
+    </section>
+  </main>
+</body>
+</html>

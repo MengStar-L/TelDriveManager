@@ -78,7 +78,8 @@ def make_runtime(**overrides):
         relay_proxy_password="",
         teldrive_url="http://teldrive",
         bearer_token="token",
-        teldrive_channel_id=54321,
+        teldrive_channel_id=12345,
+        telegram_channel_conflict=False,
         teldrive_chunk_size="100M",
         teldrive_upload_concurrency=1,
         teldrive_random_chunk_name=False,
@@ -295,28 +296,37 @@ class TelegramRelayIndependentTests(unittest.IsolatedAsyncioTestCase):
             local_path=str(Path(config.relay_download_dir) / job_id / "relay.bin"),
         )
         remembered_ids = []
+        audit_records = []
 
         async def fake_upload(path, runtime, current_job):
             self.assertEqual(Path(path).read_bytes(), fake_client.payload)
             return {"success": True, "data": {"id": "td-file-1"}}
 
+        async def fake_record_audit(**payload):
+            audit_records.append(payload)
+            return dict(payload)
+
         manager.bind_client_getter(lambda: fake_client)
         original_upload = manager._upload_local_file
         original_remember = service_module.remember_internal_deleted_message_ids
+        original_record_audit = service_module.record_telegram_delete_audit
         try:
             manager._upload_local_file = cast(Any, fake_upload)
             service_module.remember_internal_deleted_message_ids = cast(Any, lambda ids: remembered_ids.extend(ids))
+            service_module.record_telegram_delete_audit = cast(Any, fake_record_audit)
 
             await manager._process_job(job)
             completed = await db.get_telegram_relay_job(job_id)
         finally:
             manager._upload_local_file = original_upload
             service_module.remember_internal_deleted_message_ids = original_remember
+            service_module.record_telegram_delete_audit = original_record_audit
             await db.delete_telegram_relay_job(job_id)
 
         self.assertEqual(completed["status"], "completed")
         self.assertEqual(fake_client.deleted, [(config.telegram_channel_id, [222])])
         self.assertEqual(remembered_ids, [222])
+        self.assertEqual([record["status"] for record in audit_records], ["deleted"])
 
     async def test_relay_upload_resumes_with_persisted_checkpoint(self):
         """上传失败后，重试复用同一 upload_id + 已确认分块续传，而非整文件重传。"""

@@ -83,7 +83,7 @@ DEFAULTS: dict[str, Any] = {
         "min_throughput_kbps": 100, "parallel_chunk_upload": False,
     },
     "telegram": {
-        "api_id": 0, "api_hash": "", "channel_id": 0,
+        "api_id": 0, "api_hash": "",
         "session_name": "tel2teldrive_session",
         "sync_interval": 10, "sync_enabled": True,
         "max_scan_messages": 10000, "confirm_cycles": 3,
@@ -119,6 +119,79 @@ def _deep_merge(base: dict, override: dict) -> dict:
         else:
             result[key] = copy.deepcopy(val)
     return result
+
+
+def normalize_telegram_channel_id(value: Any) -> int | None:
+    """Parse a non-zero Telegram channel ID without changing its representation."""
+    try:
+        channel_id = int(str(value).strip())
+    except (TypeError, ValueError):
+        return None
+    return channel_id or None
+
+
+def _telegram_channel_id_candidates(value: Any) -> set[int]:
+    channel_id = normalize_telegram_channel_id(value)
+    if channel_id is None:
+        return set()
+    absolute = abs(channel_id)
+    candidates = {absolute}
+    text = str(absolute)
+    if text.startswith("100") and len(text) > 6:
+        try:
+            candidates.add(int(text[3:]))
+        except ValueError:
+            pass
+    return candidates
+
+
+def telegram_channel_ids_equivalent(left: Any, right: Any) -> bool:
+    left_candidates = _telegram_channel_id_candidates(left)
+    right_candidates = _telegram_channel_id_candidates(right)
+    return bool(left_candidates and right_candidates and left_candidates & right_candidates)
+
+
+def _normalize_shared_telegram_channel(merged: dict, raw: dict) -> None:
+    """Migrate the legacy Telegram channel while retaining conflict evidence in memory."""
+    teldrive = merged.setdefault("teldrive", {})
+    telegram = merged.setdefault("telegram", {})
+    raw_teldrive = raw.get("teldrive") if isinstance(raw.get("teldrive"), dict) else {}
+    raw_telegram = raw.get("telegram") if isinstance(raw.get("telegram"), dict) else {}
+    prior_meta = merged.get("_meta") if isinstance(merged.get("_meta"), dict) else {}
+
+    has_canonical_input = "channel_id" in raw_teldrive
+    has_legacy_input = "channel_id" in raw_telegram
+    canonical_input = normalize_telegram_channel_id(raw_teldrive.get("channel_id"))
+    legacy_input = normalize_telegram_channel_id(raw_telegram.get("channel_id"))
+    current_canonical = normalize_telegram_channel_id(teldrive.get("channel_id"))
+
+    conflict = False
+    legacy_for_meta: int | None = None
+    if has_canonical_input:
+        channel_id = canonical_input
+        if has_legacy_input and canonical_input is not None and legacy_input is not None:
+            conflict = not telegram_channel_ids_equivalent(canonical_input, legacy_input)
+            legacy_for_meta = legacy_input if conflict else None
+    elif has_legacy_input and prior_meta:
+        channel_id = current_canonical or legacy_input
+        if current_canonical is not None and legacy_input is not None:
+            conflict = not telegram_channel_ids_equivalent(current_canonical, legacy_input)
+            legacy_for_meta = legacy_input if conflict else None
+    elif has_legacy_input:
+        channel_id = legacy_input
+    else:
+        channel_id = current_canonical
+        conflict = bool(prior_meta.get("telegram_channel_conflict", False))
+        legacy_for_meta = normalize_telegram_channel_id(prior_meta.get("legacy_telegram_channel_id"))
+
+    teldrive["channel_id"] = channel_id or 0
+    telegram.pop("channel_id", None)
+    merged["_meta"] = {
+        **prior_meta,
+        "telegram_channel_conflict": conflict,
+        "legacy_telegram_channel_id": legacy_for_meta,
+        "canonical_telegram_channel_id": channel_id,
+    }
 
 
 def load_config(force_reload: bool = False) -> dict:
@@ -272,6 +345,7 @@ def _normalize_pikpak_accounts(pikpak_cfg: dict, raw_pikpak: dict) -> list[dict]
 
 def _normalize_config(merged: dict, raw: dict | None = None) -> dict:
     raw = raw or {}
+    _normalize_shared_telegram_channel(merged, raw)
     pikpak_cfg = merged.setdefault("pikpak", {})
     aria2_cfg = merged.setdefault("aria2", {})
     upload_cfg = merged.setdefault("upload", {})
@@ -391,8 +465,12 @@ def save_config(data: dict) -> None:
         for deprecated_key in ("max_disk_usage", "cpu_limit", "max_disk_usage_gb", "cpu_usage_limit", "check_interval"):
             upload_cfg.pop(deprecated_key, None)
 
+    serializable = copy.deepcopy(merged)
+    serializable.pop("_meta", None)
+    if isinstance(serializable.get("telegram"), dict):
+        serializable["telegram"].pop("channel_id", None)
     with open(CONFIG_PATH, "wb") as f:
-        tomli_w.dump(merged, f)
+        tomli_w.dump(serializable, f)
     _config_cache = merged
     logger.info("配置已保存到 config.toml")
 
@@ -430,14 +508,13 @@ def needs_setup() -> bool:
     has_teldrive = (
         bool(str(teldrive_cfg.get("api_host") or "").strip())
         and bool(str(teldrive_cfg.get("access_token") or "").strip())
-        and str(teldrive_cfg.get("channel_id", "")).strip() != ""
+        and normalize_telegram_channel_id(teldrive_cfg.get("channel_id")) is not None
     )
 
     telegram_cfg = cfg.get("telegram", {})
     has_telegram = (
         bool(telegram_cfg.get("api_id"))
         and bool(str(telegram_cfg.get("api_hash") or "").strip())
-        and str(telegram_cfg.get("channel_id", "")).strip() != ""
     )
 
     telegram_db_cfg = cfg.get("telegram_db", {})

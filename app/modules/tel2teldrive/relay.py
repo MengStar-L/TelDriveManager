@@ -636,11 +636,22 @@ class TelegramRelayManager:
         )
         await self._broadcast_job_id(job_id)
 
-        from app.modules.tel2teldrive.service import remember_internal_deleted_message_ids
+        from app.modules.tel2teldrive.service import delete_telegram_messages_with_audit
 
         source_message_id = int(job["source_message_id"])
-        remember_internal_deleted_message_ids([source_message_id])
-        await client.delete_messages(int(job["source_channel_id"]), [source_message_id])
+        source_deleted = await delete_telegram_messages_with_audit(
+            client,
+            config,
+            [source_message_id],
+            reason="relay_source_after_upload",
+            requested_channel_id=int(job["source_channel_id"]),
+            file_names=[str(job.get("file_name") or "")],
+            file_ids=[file_id] if file_id else [],
+            job_id=job_id,
+            upload_id=upload_id or None,
+        )
+        if not source_deleted:
+            raise RuntimeError("source Telegram message cleanup failed or was blocked")
         await self._cleanup_local_path(str(path), job_id=job_id)
         await db.update_telegram_relay_job(
             job_id,

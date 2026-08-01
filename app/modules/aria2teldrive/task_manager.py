@@ -2366,27 +2366,38 @@ class TaskManager:
         self._upload_tasks[task_id] = asyncio.create_task(self._handle_download_complete(task_id, gid, token))
         return True
 
-    async def _delete_telegram_messages(self, message_ids) -> bool:
-        normalized_ids = []
-        for msg_id in message_ids or []:
-            try:
-                normalized_ids.append(int(msg_id))
-            except Exception:
+    def _part_message_ids(self, parts) -> list[int]:
+        message_ids: list[int] = []
+        seen: set[int] = set()
+        teldrive = self.teldrive
+        for part in parts or []:
+            message_id = teldrive._get_part_message_id(part) if teldrive else None
+            if message_id is None:
                 continue
-        if not normalized_ids:
-            return True
-        try:
-            from app.modules.tel2teldrive.service import config_store, remember_internal_deleted_message_ids, service as t2td_service
-            config = config_store.runtime()
-            client = getattr(t2td_service, "client", None)
-            if client is None or not client.is_connected():
-                return False
-            remember_internal_deleted_message_ids(normalized_ids)
-            await client.delete_messages(config.telegram_channel_id, normalized_ids)
-            return True
-        except Exception as e:
-            logger.warning(f"failed to delete polluted upload telegram messages: {e}")
-            return False
+            try:
+                normalized = int(message_id)
+            except (TypeError, ValueError):
+                continue
+            if normalized > 0 and normalized not in seen:
+                seen.add(normalized)
+                message_ids.append(normalized)
+        return message_ids
+
+    async def _telegram_cleanup_evidence(self):
+        from app.modules.tel2teldrive import service as t2td_module
+
+        config = t2td_module.config_store.runtime()
+        active_ids = await asyncio.to_thread(t2td_module.query_active_teldrive_part_ids, config)
+        return t2td_module, config, active_ids
+
+    @staticmethod
+    def _task_audit_names(task: Optional[dict]) -> list[str]:
+        if not task:
+            return []
+        name = str(task.get("filename") or task.get("name") or "").strip()
+        if not name and task.get("local_path"):
+            name = os.path.basename(str(task["local_path"]))
+        return [name] if name else []
 
     async def _record_orphan_parts(self, task_id: str, upload_id: str, orphan_parts: list) -> None:
         """孤儿块消息删除失败时落库记录，供后续人工/定期清理，不阻塞任务流转"""
@@ -2417,24 +2428,80 @@ class TaskManager:
             logger.debug(f"record orphan parts failed: {e}")
 
     async def _cleanup_orphan_parts(self, task_id: str, upload_meta: dict) -> None:
-        """删除去重后落选的重复分块消息（尽力而为；失败仅记录不阻塞）"""
+        """Delete only current-session orphan parts proven unused by every active file."""
         orphan_parts = list((upload_meta or {}).get("orphan_parts") or [])
         if not orphan_parts:
             return
-        teldrive = self.teldrive
-        message_ids = []
-        for part in orphan_parts:
-            message_id = teldrive._get_part_message_id(part) if teldrive else None
-            if message_id is not None:
-                message_ids.append(message_id)
-        if not message_ids:
+        candidate_ids = self._part_message_ids(orphan_parts)
+        if not candidate_ids:
             return
-        if await self._delete_telegram_messages(message_ids):
-            logger.info(f"task {task_id} 已清理 {len(message_ids)} 个重复分块消息")
-        else:
-            await self._record_orphan_parts(
-                task_id, str((upload_meta or {}).get("upload_id") or ""), orphan_parts
+
+        upload_id = str((upload_meta or {}).get("upload_id") or "").strip()
+        verified_upload_id = str((upload_meta or {}).get("parts_verified_upload_id") or "").strip()
+        final_ids = set(self._part_message_ids((upload_meta or {}).get("remote_parts") or []))
+        task = await db.get_task(task_id)
+        t2td_module, config, active_ids = await self._telegram_cleanup_evidence()
+        common = {
+            "reason": "upload_orphan_parts",
+            "channel_id": getattr(config, "teldrive_channel_id", None),
+            "message_ids": candidate_ids,
+            "file_names": self._task_audit_names(task),
+            "task_id": task_id,
+            "upload_id": upload_id or None,
+            "protected_final_ids": sorted(final_ids & set(candidate_ids)),
+        }
+
+        if not upload_id or verified_upload_id != upload_id:
+            await self._record_orphan_parts(task_id, upload_id, orphan_parts)
+            await t2td_module.record_telegram_delete_audit(
+                status="blocked",
+                detail="孤儿分块不是来自当前 upload_id 的已验证实时结果",
+                protected_active_ids=[],
+                **common,
             )
+            return
+        if active_ids is None:
+            await self._record_orphan_parts(task_id, upload_id, orphan_parts)
+            await t2td_module.record_telegram_delete_audit(
+                status="blocked",
+                detail="无法确认活动 TelDrive 文件的分块引用，未执行 Telegram 删除",
+                protected_active_ids=[],
+                **common,
+            )
+            return
+
+        candidate_set = set(candidate_ids)
+        protected_active_ids = candidate_set & active_ids
+        deletable_ids = [
+            message_id for message_id in candidate_ids
+            if message_id not in final_ids and message_id not in active_ids
+        ]
+        if not deletable_ids:
+            await self._record_orphan_parts(task_id, upload_id, orphan_parts)
+            await t2td_module.record_telegram_delete_audit(
+                status="blocked",
+                detail="所有候选分块仍被最终文件或活动文件引用",
+                protected_active_ids=sorted(protected_active_ids),
+                **common,
+            )
+            return
+
+        deleted = await t2td_module.delete_telegram_messages_with_audit(
+            getattr(t2td_module.service, "client", None),
+            config,
+            deletable_ids,
+            reason="upload_orphan_parts",
+            candidate_message_ids=candidate_ids,
+            file_names=self._task_audit_names(task),
+            task_id=task_id,
+            upload_id=upload_id,
+            protected_final_ids=sorted(final_ids & candidate_set),
+            protected_active_ids=sorted(protected_active_ids),
+        )
+        if deleted:
+            logger.info(f"task {task_id} 已清理 {len(deletable_ids)} 个重复分块消息")
+        else:
+            await self._record_orphan_parts(task_id, upload_id, orphan_parts)
 
     async def cleanup_polluted_upload(self, task_id: str, retry_after_cleanup: bool = False) -> dict:
         task = await db.get_task(task_id)
@@ -2444,36 +2511,86 @@ class TaskManager:
             return {"success": False, "message": "task has no polluted upload session to clean"}
 
         meta = self._get_upload_session_meta(task_id)
-        # 内存 meta 可能在重启后缺失，回退到 DB 持久化字段
         upload_id = str(meta.get("upload_id") or task.get("upload_id") or "")
-        remote_parts = list(meta.get("remote_parts") or [])
-        if not remote_parts:
-            remote_parts = self._get_persisted_remote_parts(task)
+        diagnostic_parts = list(meta.get("remote_parts") or [])
+        if not diagnostic_parts:
+            diagnostic_parts = self._get_persisted_remote_parts(task)
 
         teldrive = self._require_teldrive()
-        if upload_id:
+        t2td_module, config, active_ids = await self._telegram_cleanup_evidence()
+        live_parts: list = []
+        live_error: str | None = None
+        if not upload_id:
+            live_error = "当前任务没有 upload_id，无法验证污染分块来源"
+        else:
             try:
-                fetched_parts = await teldrive.get_upload_parts(upload_id)
-                if fetched_parts:
-                    remote_parts = fetched_parts
-            except Exception:
-                pass
+                live_parts = list(await teldrive.get_upload_parts(upload_id) or [])
+            except Exception as exc:
+                live_error = f"当前上传会话分块查询失败: {type(exc).__name__}: {exc}"
 
-        message_ids = []
-        for part in remote_parts:
-            message_id = teldrive._get_part_message_id(part)
-            if message_id is not None:
-                message_ids.append(message_id)
-        cleanup_note = "polluted remote chunks cleaned; ready to retry upload"
-        if message_ids and not await self._delete_telegram_messages(message_ids):
-            # 降级：tel2teldrive 不可用时不再永久阻塞重试 ——
-            # 记录孤儿消息 id 待后续清理，会话照常重置（重新上传会用新 upload_id，
-            # 旧消息只占频道空间，不影响新文件正确性）
-            await self._record_orphan_parts(task_id, upload_id, remote_parts)
-            cleanup_note = (
-                "polluted session reset; chunk messages recorded for later cleanup "
-                "(tel2teldrive offline)"
+        candidate_parts = live_parts if live_error is None else diagnostic_parts
+        candidate_ids = self._part_message_ids(candidate_parts)
+        deleted_count = 0
+        cleanup_note = "polluted session reset; ready to retry upload"
+        audit_common = {
+            "reason": "polluted_upload_parts",
+            "channel_id": getattr(config, "teldrive_channel_id", None),
+            "message_ids": candidate_ids,
+            "file_names": self._task_audit_names(task),
+            "task_id": task_id,
+            "upload_id": upload_id or None,
+            "protected_final_ids": [],
+        }
+        if live_error is not None:
+            if candidate_parts:
+                await self._record_orphan_parts(task_id, upload_id, candidate_parts)
+            await t2td_module.record_telegram_delete_audit(
+                status="blocked",
+                detail=live_error,
+                protected_active_ids=[],
+                **audit_common,
             )
+            cleanup_note = "polluted session reset; unverified chunks recorded without Telegram deletion"
+        elif active_ids is None:
+            if live_parts:
+                await self._record_orphan_parts(task_id, upload_id, live_parts)
+            await t2td_module.record_telegram_delete_audit(
+                status="blocked",
+                detail="无法确认活动 TelDrive 文件的分块引用，未执行 Telegram 删除",
+                protected_active_ids=[],
+                **audit_common,
+            )
+            cleanup_note = "polluted session reset; active references unavailable, Telegram deletion blocked"
+        elif candidate_ids:
+            protected_active_ids = set(candidate_ids) & active_ids
+            deletable_ids = [message_id for message_id in candidate_ids if message_id not in active_ids]
+            if not deletable_ids:
+                await self._record_orphan_parts(task_id, upload_id, live_parts)
+                await t2td_module.record_telegram_delete_audit(
+                    status="blocked",
+                    detail="所有污染会话分块仍被活动文件引用",
+                    protected_active_ids=sorted(protected_active_ids),
+                    **audit_common,
+                )
+                cleanup_note = "polluted session reset; all chunks protected from Telegram deletion"
+            else:
+                deleted = await t2td_module.delete_telegram_messages_with_audit(
+                    getattr(t2td_module.service, "client", None),
+                    config,
+                    deletable_ids,
+                    reason="polluted_upload_parts",
+                    candidate_message_ids=candidate_ids,
+                    file_names=self._task_audit_names(task),
+                    task_id=task_id,
+                    upload_id=upload_id,
+                    protected_active_ids=sorted(protected_active_ids),
+                )
+                if deleted:
+                    deleted_count = len(deletable_ids)
+                    cleanup_note = "polluted remote chunks cleaned; ready to retry upload"
+                else:
+                    await self._record_orphan_parts(task_id, upload_id, live_parts)
+                    cleanup_note = "polluted session reset; Telegram chunk deletion failed or was blocked"
 
         if upload_id:
             await teldrive.cleanup_upload_session(upload_id)
@@ -2507,7 +2624,10 @@ class TaskManager:
 
         if retry_after_cleanup:
             return await self.retry_task(task_id)
-        return {"success": True, "message": f"cleaned {len(message_ids)} polluted remote chunks from this upload session"}
+        return {
+            "success": True,
+            "message": f"cleaned {deleted_count} verified polluted remote chunks from this upload session",
+        }
 
     async def _handle_download_complete(self, task_id: str, gid: str, token: str):
         """下载完成后自动上传到 TelDrive。"""
