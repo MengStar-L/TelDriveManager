@@ -222,6 +222,34 @@ def _normalize_selected_ids(file_ids: List[str]) -> List[str]:
     return normalized
 
 
+def _bind_selected_share_paths(
+    files: List[dict], file_ids: List[str], file_paths: Dict[str, str]
+) -> List[dict]:
+    expected_paths = [
+        str(file_paths.get(file_id) or "").strip().replace("\\", "/")
+        for file_id in file_ids
+    ]
+    expected_names = [posixpath.basename(path) for path in expected_paths]
+    actual_names = [str(item.get("name") or "") for item in files]
+    if sorted(actual_names) != sorted(expected_names):
+        raise RuntimeError(
+            "PikPak 隔离解析结果与勾选文件不一致，本次未推送任何下载链接"
+        )
+
+    paths_by_name: Dict[str, List[str]] = {}
+    for path in expected_paths:
+        paths_by_name.setdefault(posixpath.basename(path), []).append(path)
+    for paths in paths_by_name.values():
+        paths.sort(key=_natural_sort_key)
+
+    rebound = []
+    for item in files:
+        copy = dict(item)
+        copy["path"] = paths_by_name[copy["name"]].pop(0)
+        rebound.append(copy)
+    return rebound
+
+
 def _build_file_dedupe_key(file_info: Dict[str, str]) -> tuple:
     file_id = str(file_info.get("file_id") or "").strip()
     url = str(file_info.get("url") or "").strip()
@@ -1390,7 +1418,12 @@ async def api_share_download(request: Request):
         file_ids = _normalize_selected_ids(body.get("file_ids", []))
         pass_code_token = body.get("pass_code_token", "")
         keep_structure = body.get("keep_structure", True)
-        file_paths = body.get("file_paths", {})
+        raw_file_paths = body.get("file_paths", {})
+        file_paths = raw_file_paths if isinstance(raw_file_paths, dict) else {}
+        file_paths = {
+            str(file_id): str(path or "").strip().replace("\\", "/")
+            for file_id, path in file_paths.items()
+        }
         rename_by_folder = body.get("rename_by_folder", False)
         teldrive_path = body.get("teldrive_path", "/")
         name_overrides = body.get("name_overrides") or {}
@@ -1398,6 +1431,12 @@ async def api_share_download(request: Request):
             name_overrides = {}
         if not share_id or not file_ids:
             return JSONResponse({"error": "缺少参数"}, status_code=400)
+        missing_paths = [file_id for file_id in file_ids if not file_paths.get(file_id)]
+        if missing_paths:
+            return JSONResponse(
+                {"error": "所选文件路径元数据不完整，请重新解析分享链接后再下载"},
+                status_code=400,
+            )
 
         job_key = _make_share_download_job_key(share_id, file_ids)
         if not await _register_share_download_job(job_key):
@@ -1773,7 +1812,7 @@ async def _process_share_download(share_id: str, file_ids: List[str], pass_code_
                                    keep_structure: bool = True, file_paths: Dict[str, str] = None,
                                     rename_by_folder: bool = False, teldrive_path: Optional[str] = None,
                                     job_key: str = "", name_overrides: Dict[str, str] | None = None):
-    saved_ids: List[str] = []
+    owned_scope_id = ""
     account: PikPakAccountContext | None = None
     pikpak = None
     try:
@@ -1794,19 +1833,24 @@ async def _process_share_download(share_id: str, file_ids: List[str], pass_code_
         await _broadcast({"type": "task_status", "index": 1,
                           "status": "正在保存分享内容到 PikPak 网盘..."})
         try:
-            saved_ids = _normalize_selected_ids(await asyncio.wait_for(
-                pikpak.save_share_files(share_id, file_ids, pass_code_token),
+            owned_scope_id = await asyncio.wait_for(
+                pikpak.start_isolated_share_restore(
+                    share_id, file_ids, pass_code_token
+                ),
                 timeout=share_parse_timeout,
-            ))
+            )
         except asyncio.TimeoutError as exc:
-            raise RuntimeError(_build_share_fallback_message(f"分享转存超时 ({int(share_parse_timeout)}s)")) from exc
-        if not saved_ids:
-            await _broadcast({"type": "task_error", "index": 1, "message": "保存失败，未获取到文件"})
-            return
+            raise RuntimeError(
+                _build_share_fallback_message(
+                    f"分享隔离转存超时 ({int(share_parse_timeout)}s)"
+                )
+            ) from exc
 
-        logger.info(f"分享文件已保存, saved_ids={saved_ids}")
-        await _broadcast({"type": "task_status", "index": 1,
-                          "status": f"转存完成，共 {len(saved_ids)} 项，开始逐个解析下载链接..."})
+        await _broadcast({
+            "type": "task_status",
+            "index": 1,
+            "status": f"隔离转存已提交，共 {total} 项，正在解析所选文件的下载链接...",
+        })
 
         orig_paths_by_name: Dict[str, List[str]] = {}
         if rename_by_folder and file_paths:
@@ -1816,45 +1860,25 @@ async def _process_share_download(share_id: str, file_ids: List[str], pass_code_
             for paths in orig_paths_by_name.values():
                 paths.sort(key=_natural_sort_key)
 
-        all_urls: List[dict] = []
-        share_timeout_hits = 0
-        for i, fid in enumerate(saved_ids, 1):
-            await _broadcast({"type": "task_status", "index": i, "status": f"获取下载链接 [{i}/{len(saved_ids)}]"})
-            try:
-                urls = await pikpak.wait_for_download_urls(
-                    fid,
-                    timeout=share_url_timeout,
-                    poll_interval=share_poll_interval,
-                )
-            except Exception as e:
-                logger.error(f"分享文件直链获取失败: file_id={fid}, error={e}")
-                share_timeout_hits += 1
-                await _broadcast({
-                    "type": "task_error",
-                    "index": i,
-                    "message": _build_share_fallback_message("获取下载直链失败", str(e)),
-                })
-                continue
-
-            if not urls:
-                share_timeout_hits += 1
-                await _broadcast({
-                    "type": "task_error",
-                    "index": i,
-                    "message": _build_share_fallback_message(f"获取下载直链超时 ({int(share_url_timeout)}s 内未就绪)"),
-                })
-                continue
-
-            await _broadcast({"type": "task_status", "index": i,
-                              "status": f"第 {i} 项解析成功，生成 {len(urls)} 条可用下载链接"})
-            await _broadcast_resolved_files(i, urls)
-            all_urls.extend(urls)
+        all_urls = await pikpak.wait_for_isolated_share_urls(
+            owned_scope_id,
+            expected_count=total,
+            timeout=share_url_timeout,
+            poll_interval=share_poll_interval,
+        )
+        all_urls = _bind_selected_share_paths(all_urls, file_ids, file_paths or {})
+        await _broadcast({
+            "type": "task_status",
+            "index": 1,
+            "status": f"隔离解析完成，共生成 {len(all_urls)} 条可用下载链接",
+        })
+        await _broadcast_resolved_files(1, all_urls)
 
         all_urls = _sort_file_entries_by_name(_dedupe_file_entries(all_urls))
         if not all_urls:
             await _broadcast({
                 "type": "error",
-                "message": _build_share_fallback_message("所有文件直链获取失败", f"共 {share_timeout_hits} 项失败" if share_timeout_hits else ""),
+                "message": _build_share_fallback_message("所有文件直链获取失败"),
                 "toast_message": _SHARE_FALLBACK_TOAST,
                 "toast_type": "error",
             })
@@ -1950,9 +1974,11 @@ async def _process_share_download(share_id: str, file_ids: List[str], pass_code_
             "toast_type": "error",
         })
     finally:
-        if saved_ids:
+        if owned_scope_id and pikpak is not None:
             try:
-                await pikpak.delete_files(saved_ids)
-            except Exception as e:
-                logger.warning(f"清理分享临时文件失败: {e}")
+                await pikpak.delete_files([owned_scope_id])
+            except Exception as error:
+                logger.warning(
+                    f"清理 PikPak 分享隔离目录失败: scope={owned_scope_id}, error={error}"
+                )
         await _release_share_download_job(job_key)

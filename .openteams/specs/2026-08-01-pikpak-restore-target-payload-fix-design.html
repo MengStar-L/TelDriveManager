@@ -1,0 +1,174 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>TelDriveManager PikPak 转存目标载荷修正设计</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --ink: #17211b;
+      --muted: #5b655f;
+      --line: #d7ddd9;
+      --paper: #ffffff;
+      --wash: #f3f6f4;
+      --green: #176b4d;
+      --blue: #245f87;
+      --amber: #93620c;
+      --red: #a2372d;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: var(--wash);
+      color: var(--ink);
+      font: 16px/1.68 "Segoe UI", "Microsoft YaHei", sans-serif;
+      letter-spacing: 0;
+    }
+    main {
+      width: min(920px, calc(100% - 32px));
+      margin: 32px auto;
+      padding: clamp(24px, 5vw, 52px);
+      border: 1px solid var(--line);
+      border-top: 5px solid var(--green);
+      background: var(--paper);
+    }
+    h1, h2, h3 { line-height: 1.3; letter-spacing: 0; }
+    h1 { margin: 0 0 10px; font-size: 30px; }
+    h2 { margin: 38px 0 12px; padding-bottom: 7px; border-bottom: 1px solid var(--line); font-size: 22px; }
+    h3 { margin: 22px 0 8px; font-size: 18px; }
+    p, ul, ol, table, pre { margin: 10px 0 16px; }
+    li + li { margin-top: 6px; }
+    .meta { color: var(--muted); }
+    .decision, .evidence, .warning {
+      margin: 18px 0;
+      padding: 14px 18px;
+      border-left: 4px solid var(--green);
+      background: #eef8f2;
+    }
+    .evidence { border-left-color: var(--blue); background: #eef6fb; }
+    .warning { border-left-color: var(--amber); background: #fff8e8; }
+    code {
+      padding: 1px 5px;
+      border: 1px solid #dfe5e1;
+      border-radius: 3px;
+      background: #edf1ee;
+      font-family: Consolas, "Cascadia Mono", monospace;
+      font-size: 0.92em;
+    }
+    pre {
+      overflow-x: auto;
+      padding: 16px;
+      background: #15231c;
+      color: #eef7f1;
+      font-family: Consolas, "Cascadia Mono", monospace;
+    }
+    table { width: 100%; border-collapse: collapse; }
+    th, td { padding: 10px 12px; border: 1px solid var(--line); text-align: left; vertical-align: top; }
+    th { background: #edf2ef; }
+    footer { margin-top: 40px; padding-top: 16px; border-top: 1px solid var(--line); color: var(--muted); font-size: 14px; }
+  </style>
+</head>
+<body>
+<main>
+  <h1>PikPak 转存目标载荷修正设计</h1>
+  <p class="meta">项目：TelDriveManager · 日期：2026-08-01 · 状态：已确认</p>
+
+  <div class="decision">
+    <strong>核心决策：</strong>仅将分享恢复请求的目标目录字段从无效的扁平
+    <code>to_parent_id</code> 修正为 PikPak 接受的嵌套结构
+    <code>to.parent_id</code>。现有隔离目录、全量校验、失败不推送和仅清理自有目录的规则全部保留。
+  </div>
+
+  <h2>1. 生产证据与根因</h2>
+  <div class="evidence">
+    2026-08-01 02:46:20（服务器 EDT），PikPak 返回 <code>RESTORE_START</code>，本次隔离目录为
+    <code>VOyw3hi05ETZwllgHnyyT8Apo2</code>，选择数量为 1。随后 60 秒内该目录始终为 0 个文件，
+    页面于 02:47:21 报告“应有 1 个文件，实际就绪 0 个”。
+  </div>
+  <p>当前请求把目标目录写成：</p>
+  <pre>{
+  "share_id": "...",
+  "pass_code_token": "...",
+  "file_ids": ["selected-file-id"],
+  "to_parent_id": "owned-scope-id"
+}</pre>
+  <p>PikPak 接受请求但静默忽略未知字段。已核对可工作的客户端实现，接口要求：</p>
+  <pre>{
+  "share_id": "...",
+  "pass_code_token": "...",
+  "file_ids": ["selected-file-id"],
+  "to": {
+    "parent_id": "owned-scope-id"
+  }
+}</pre>
+
+  <h2>2. 修改范围</h2>
+  <table>
+    <thead><tr><th>文件</th><th>修改</th><th>保持不变</th></tr></thead>
+    <tbody>
+      <tr>
+        <td><code>app/modules/pikpak/client.py</code></td>
+        <td>在 <code>start_isolated_share_restore()</code> 中生成嵌套 <code>to.parent_id</code>。</td>
+        <td>唯一目录创建、认证请求、错误处理、响应 <code>file_id</code> 忽略策略。</td>
+      </tr>
+      <tr>
+        <td><code>tests/test_pikpak_share_restore_isolation.py</code></td>
+        <td>把载荷断言改成嵌套结构，并明确断言不存在扁平字段。</td>
+        <td>数量、名称、aria2 推送数量、串并行模式和清理所有权测试。</td>
+      </tr>
+    </tbody>
+  </table>
+  <p><code>app/modules/pikpak/routes.py</code>、前端、aria2、Telegram、TelDrive 数据库和任务状态均不修改。</p>
+
+  <h2>3. 数据流与安全边界</h2>
+  <ol>
+    <li>创建唯一的 <code>.teldrive-share-&lt;uuid&gt;</code> 空目录并取得其 ID。</li>
+    <li>通过 <code>to.parent_id</code> 把本次勾选文件转存到该目录。</li>
+    <li>只轮询该目录；不读取、不遍历 PikPak 响应中的 <code>file_id</code>。</li>
+    <li>文件数量和名称与用户选择完全一致后，才允许向 aria2 推送。</li>
+    <li>任何超时、额外文件或名称不一致都使整批失败，aria2 调用次数必须为 0。</li>
+    <li>结束时只删除步骤 1 创建的目录 ID。</li>
+  </ol>
+
+  <div class="warning">
+    <strong>既有误落文件：</strong>错误载荷可能已把刚才勾选的文件转存到 PikPak 默认目录。
+    因为该请求没有记录一个可证明归属的返回文件 ID，程序不得猜测并自动删除它；自动清理只处理本次明确创建的隔离目录。
+  </div>
+
+  <h2>4. 错误处理</h2>
+  <ul>
+    <li>接口拒绝恢复请求：删除本次隔离目录并返回失败。</li>
+    <li>接口返回 <code>RESTORE_START</code> 但目录未就绪：保持当前超时和失败关闭行为，不推送链接。</li>
+    <li>隔离目录出现多于所选数量的文件：立即失败，不筛选、不继续。</li>
+    <li>清理失败：记录明确的隔离目录 ID，但不扩大删除范围。</li>
+  </ul>
+
+  <h2>5. 验证与上线</h2>
+  <h3>自动验证</h3>
+  <ul>
+    <li>载荷精确等于 <code>{"to": {"parent_id": "owned-scope"}}</code>，且没有 <code>to_parent_id</code>。</li>
+    <li>14 个 PikPak 分享隔离专项测试全部通过。</li>
+    <li>完整 Python 测试套件全部通过，远端 <code>py_compile</code> 通过。</li>
+  </ul>
+  <h3>生产验证</h3>
+  <ol>
+    <li>备份当前失败关闭版本的 <code>client.py</code>，仅部署修正后的该文件。</li>
+    <li>重启服务并确认 <code>active</code>、HTTP 可达、启动日志无致命错误。</li>
+    <li>用户重新解析同一分享，只勾选一个文件并推送。</li>
+    <li>确认隔离目录就绪数为 1、新增 aria2 GID 数为 1、文件名恰好为所选文件。</li>
+  </ol>
+  <p>任何数量不一致都停止验证并恢复部署前备份，不引入名称过滤或默认目录扫描作为补救。</p>
+
+  <h2>6. 验收条件</h2>
+  <ul>
+    <li>同一复现操作不再出现“应有 1 个，实际 0 个”的目标目录超时。</li>
+    <li>只勾选一个分享文件时，aria2 只新增一个对应任务。</li>
+    <li>旧的复用目录 ID 仍不会成为解析根目录或清理目标。</li>
+    <li>本次修改不改变 Telegram 删除、TelDrive 上传或其他 PikPak 工作流。</li>
+  </ul>
+
+  <footer>本规格只处理已确认的 PikPak 分享恢复目标字段错误，不包含其他重构或自动清理历史误落文件。</footer>
+</main>
+</body>
+</html>

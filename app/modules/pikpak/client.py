@@ -5,6 +5,7 @@ import json
 import logging
 import re
 import time
+import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -229,6 +230,48 @@ class PikPakClient:
             raise RuntimeError(f"等待 PikPak 直链超时，可能触发风控或分享暂不可用{f'：{detail}' if detail else ''}")
         return []
 
+    async def wait_for_isolated_share_urls(
+        self, scope_id: str, expected_count: int,
+        timeout: float = 60.0, poll_interval: float = 3.0,
+    ) -> List[Dict[str, str]]:
+        scope_id = str(scope_id or "").strip()
+        expected_count = int(expected_count or 0)
+        if not scope_id or expected_count <= 0:
+            raise ValueError("分享隔离目录和文件数量必须有效")
+
+        timeout = max(float(timeout or 0.0), 0.0)
+        poll_interval = max(float(poll_interval or 0.0), 0.01)
+        request_timeout = max(1.0, min(timeout if timeout > 0 else 15.0, 15.0))
+        deadline = time.monotonic() + timeout
+        last_count = 0
+        last_error: Optional[Exception] = None
+
+        while True:
+            try:
+                files = await asyncio.wait_for(
+                    self._list_folder_files(scope_id, prefix=""),
+                    timeout=request_timeout,
+                )
+            except Exception as error:
+                last_error = error
+            else:
+                last_count = len(files)
+                if last_count > expected_count:
+                    raise RuntimeError(
+                        f"分享隔离目录出现 {last_count} 个文件，但只勾选 {expected_count} 个；"
+                        "本次未推送任何下载链接"
+                    )
+                if last_count == expected_count:
+                    return files
+
+            if time.monotonic() >= deadline:
+                detail = f"，最后错误：{last_error}" if last_error else ""
+                raise RuntimeError(
+                    f"分享隔离目录等待超时：应有 {expected_count} 个文件，"
+                    f"实际就绪 {last_count} 个{detail}"
+                )
+            await asyncio.sleep(poll_interval)
+
     async def _list_folder_files(self, folder_id: str, prefix: str = "") -> List[Dict[str, str]]:
         results = []
         next_page_token = None
@@ -366,20 +409,48 @@ class PikPakClient:
                 "icon_link": file_info.get("icon_link", ""),
             })
 
-    async def save_share_files(self, share_id: str, file_ids: List[str],
-                                pass_code_token: str) -> List[str]:
-        """将分享文件转存到自己的网盘（与 AutoPikDown 完全一致）"""
-        result = await self.client.restore(share_id, pass_code_token, file_ids)
-        logger.info(f"restore 响应: {json.dumps(result, ensure_ascii=False)}")
-        saved_ids = []
-        if result.get('file_id'):
-            saved_ids.append(result['file_id'])
-        if not saved_ids:
-            for task_info in result.get('task_info', []):
-                fid = task_info.get('file_id', '')
-                if fid:
-                    saved_ids.append(fid)
-        logger.info(f"已保存 {len(saved_ids)} 个分享文件到网盘, IDs: {saved_ids}")
-        return saved_ids
+    async def start_isolated_share_restore(
+        self, share_id: str, file_ids: List[str], pass_code_token: str
+    ) -> str:
+        parent_id = await self._get_save_dir_id()
+        folder_name = f".teldrive-share-{uuid.uuid4().hex}"
+        folder = await self.client.create_folder(name=folder_name, parent_id=parent_id)
+        scope_id = str(
+            folder.get("file", {}).get("id") or folder.get("id") or ""
+        ).strip()
+        if not scope_id:
+            raise RuntimeError("PikPak 未返回隔离目录 ID，本次未转存任何文件")
 
+        payload = {
+            "share_id": share_id,
+            "pass_code_token": pass_code_token,
+            "file_ids": list(file_ids),
+            "to": {"parent_id": scope_id},
+        }
+        try:
+            result = await self.client._request_post(
+                url=f"https://{self.client.PIKPAK_API_HOST}/drive/v1/share/restore",
+                data=payload,
+            )
+            if not isinstance(result, dict):
+                raise RuntimeError("PikPak 转存响应格式无效")
+            if result.get("error"):
+                error = result["error"]
+                detail = error.get("message") if isinstance(error, dict) else str(error)
+                raise RuntimeError(f"PikPak 隔离转存失败: {detail or error}")
+        except BaseException:
+            try:
+                await self.delete_files([scope_id])
+            except Exception as cleanup_error:
+                logger.warning(
+                    f"清理未启用的分享隔离目录失败: {scope_id}, {cleanup_error}"
+                )
+            raise
 
+        logger.info(
+            "分享转存已提交到隔离目录: scope=%s, selected=%s, status=%s",
+            scope_id,
+            len(file_ids),
+            result.get("restore_status", ""),
+        )
+        return scope_id
