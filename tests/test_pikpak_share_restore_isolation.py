@@ -1,9 +1,10 @@
 import asyncio
+import json
 import unittest
 from typing import cast
 from unittest.mock import AsyncMock
 
-from app.modules.pikpak.client import PikPakClient
+from app.modules.pikpak.client import PikPakClient, ShareRestoreReceipt
 from app.modules.pikpak import routes as pikpak_routes
 
 
@@ -16,7 +17,7 @@ def build_client(raw_client) -> PikPakClient:
 
 
 class IsolatedShareRestoreClientTests(unittest.IsolatedAsyncioTestCase):
-    async def test_restore_targets_owned_scope_and_ignores_response_file_id(self):
+    async def test_restore_uses_explicit_target_protocol_and_returns_receipt(self):
         class RawClient:
             PIKPAK_API_HOST = "api-drive.mypikpak.com"
 
@@ -31,7 +32,86 @@ class IsolatedShareRestoreClientTests(unittest.IsolatedAsyncioTestCase):
             async def _request_post(self, url, data):
                 self.restore_calls.append((url, data))
                 return {
-                    "file_id": "reused-unrelated-folder",
+                    "file_id": "owned-scope",
+                    "restore_status": "RESTORE_START",
+                    "restore_task_id": "restore-task",
+                }
+
+            async def delete_forever(self, ids):
+                self.deleted.append(ids)
+
+        raw = RawClient()
+        client = build_client(raw)
+
+        receipt = await client.start_isolated_share_restore(
+            "share-1", ["selected-1", "selected-2"], "pass-token"
+        )
+
+        self.assertEqual(receipt.scope_id, "owned-scope")
+        self.assertEqual(receipt.task_id, "restore-task")
+        self.assertEqual(receipt.selected_ids, ("selected-1", "selected-2"))
+        self.assertEqual(raw.folder_call[1], None)
+        self.assertTrue(raw.folder_call[0].startswith(".teldrive-share-"))
+        payload = raw.restore_calls[0][1]
+        self.assertEqual(
+            payload,
+            {
+                "parent_id": "owned-scope",
+                "share_id": "share-1",
+                "pass_code_token": "pass-token",
+                "file_ids": ["selected-1", "selected-2"],
+                "ancestor_ids": [],
+                "specify_parent_id": True,
+                "params": {"trace_file_ids": "selected-1,selected-2"},
+            },
+        )
+        self.assertNotIn("to", payload)
+        self.assertNotIn("to_parent_id", payload)
+        self.assertEqual(raw.deleted, [])
+
+    async def test_restore_rejects_response_target_outside_owned_scope(self):
+        class RawClient:
+            PIKPAK_API_HOST = "api-drive.mypikpak.com"
+
+            def __init__(self):
+                self.deleted = []
+
+            async def create_folder(self, name, parent_id):
+                return {"file": {"id": "owned-scope"}}
+
+            async def _request_post(self, url, data):
+                return {
+                    "file_id": "Pack From Shared",
+                    "restore_status": "RESTORE_START",
+                    "restore_task_id": "restore-task",
+                }
+
+            async def delete_forever(self, ids):
+                self.deleted.append(ids)
+
+        raw = RawClient()
+        client = build_client(raw)
+
+        with self.assertRaisesRegex(RuntimeError, "恢复目标目录不一致"):
+            await client.start_isolated_share_restore(
+                "share-1", ["selected-1"], "pass-token"
+            )
+
+        self.assertEqual(raw.deleted, [["owned-scope"]])
+
+    async def test_restore_rejects_missing_task_id(self):
+        class RawClient:
+            PIKPAK_API_HOST = "api-drive.mypikpak.com"
+
+            def __init__(self):
+                self.deleted = []
+
+            async def create_folder(self, name, parent_id):
+                return {"file": {"id": "owned-scope"}}
+
+            async def _request_post(self, url, data):
+                return {
+                    "file_id": "owned-scope",
                     "restore_status": "RESTORE_START",
                 }
 
@@ -41,25 +121,12 @@ class IsolatedShareRestoreClientTests(unittest.IsolatedAsyncioTestCase):
         raw = RawClient()
         client = build_client(raw)
 
-        scope_id = await client.start_isolated_share_restore(
-            "share-1", ["selected-1"], "pass-token"
-        )
+        with self.assertRaisesRegex(RuntimeError, "未返回恢复任务 ID"):
+            await client.start_isolated_share_restore(
+                "share-1", ["selected-1"], "pass-token"
+            )
 
-        self.assertEqual(scope_id, "owned-scope")
-        self.assertEqual(raw.folder_call[1], None)
-        self.assertTrue(raw.folder_call[0].startswith(".teldrive-share-"))
-        payload = raw.restore_calls[0][1]
-        self.assertEqual(
-            payload,
-            {
-                "share_id": "share-1",
-                "pass_code_token": "pass-token",
-                "file_ids": ["selected-1"],
-                "to": {"parent_id": "owned-scope"},
-            },
-        )
-        self.assertNotIn("to_parent_id", payload)
-        self.assertEqual(raw.deleted, [])
+        self.assertEqual(raw.deleted, [["owned-scope"]])
 
     async def test_restore_failure_cleans_only_the_owned_scope(self):
         class RawClient:
@@ -136,91 +203,255 @@ class IsolatedShareRestoreClientTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertFalse(raw.restore_called)
 
-    async def test_scope_polling_waits_for_exact_count_without_scope_prefix(self):
-        client = build_client(object())
-        selected = {
-            "name": "paid_8k.mp4",
-            "url": "https://download/selected",
-            "file_id": "restored-selected",
-            "path": "Movie/paid_8k.mp4",
-            "size": 100,
-        }
-        client._list_folder_files = AsyncMock(side_effect=[[], [selected]])
+    async def test_restore_task_mapping_resolves_direct_children_in_selected_order(self):
+        class RawClient:
+            PIKPAK_API_HOST = "api-drive.mypikpak.com"
+
+            async def _request_get(self, url, params=None):
+                self.task_call = (url, params)
+                return {
+                    "phase": "PHASE_TYPE_COMPLETE",
+                    "message": "Completed",
+                    "params": {
+                        "trace_file_ids": json.dumps({
+                            "selected-1": "restored-1",
+                            "selected-2": "restored-2",
+                        })
+                    },
+                }
+
+            async def file_list(self, parent_id, next_page_token=None):
+                self.list_call = (parent_id, next_page_token)
+                return {
+                    "files": [
+                        {
+                            "id": "restored-2",
+                            "name": "two.mp4",
+                            "kind": "drive#file",
+                            "parent_id": "owned-scope",
+                            "size": "200",
+                            "web_content_link": "https://download/two",
+                        },
+                        {
+                            "id": "restored-1",
+                            "name": "one.mp4",
+                            "kind": "drive#file",
+                            "parent_id": "owned-scope",
+                            "size": "100",
+                            "web_content_link": "https://download/one",
+                        },
+                    ]
+                }
+
+        raw = RawClient()
+        client = build_client(raw)
+        client._list_folder_files = AsyncMock(
+            side_effect=AssertionError("restore scope must not be recursive")
+        )
+        receipt = ShareRestoreReceipt(
+            "owned-scope", "restore-task", ("selected-1", "selected-2")
+        )
 
         files = await client.wait_for_isolated_share_urls(
-            "owned-scope", expected_count=1, timeout=0.2, poll_interval=0.01
+            receipt, timeout=0.2, poll_interval=0.01
         )
 
-        self.assertEqual(files, [selected])
         self.assertEqual(
-            client._list_folder_files.await_args_list[0].args,
-            ("owned-scope",),
-        )
-        self.assertEqual(
-            client._list_folder_files.await_args_list[0].kwargs,
-            {"prefix": ""},
-        )
-
-    async def test_scope_polling_retries_transient_listing_error(self):
-        client = build_client(object())
-        selected = {
-            "name": "paid_8k.mp4",
-            "url": "https://download/selected",
-            "file_id": "restored-selected",
-            "path": "Movie/paid_8k.mp4",
-            "size": 100,
-        }
-        client._list_folder_files = AsyncMock(
-            side_effect=[RuntimeError("temporary API failure"), [selected]]
-        )
-
-        files = await client.wait_for_isolated_share_urls(
-            "owned-scope", expected_count=1, timeout=0.2, poll_interval=0.01
-        )
-
-        self.assertEqual(files, [selected])
-        self.assertEqual(client._list_folder_files.await_count, 2)
-
-    async def test_scope_polling_rejects_extra_files_instead_of_filtering(self):
-        client = build_client(object())
-        client._list_folder_files = AsyncMock(
-            return_value=[
+            files,
+            [
                 {
-                    "name": "SAVR-1127-1.mp4",
-                    "url": "https://download/old-1",
+                    "name": "one.mp4",
+                    "url": "https://download/one",
+                    "file_id": "restored-1",
+                    "path": "one.mp4",
+                    "size": 100,
                 },
                 {
-                    "name": "SAVR-1127-2.mp4",
-                    "url": "https://download/old-2",
+                    "name": "two.mp4",
+                    "url": "https://download/two",
+                    "file_id": "restored-2",
+                    "path": "two.mp4",
+                    "size": 200,
                 },
-                {
-                    "name": "paid_8k.mp4",
-                    "url": "https://download/selected",
-                },
-            ]
+            ],
+        )
+        self.assertTrue(raw.task_call[0].endswith("/drive/v1/tasks/restore-task"))
+        self.assertEqual(raw.list_call, ("owned-scope", None))
+        self.assertEqual(client._list_folder_files.await_count, 0)
+
+    async def test_restore_task_terminal_error_fails_before_listing(self):
+        class RawClient:
+            PIKPAK_API_HOST = "api-drive.mypikpak.com"
+
+            async def _request_get(self, url, params=None):
+                return {
+                    "phase": "PHASE_TYPE_ERROR",
+                    "message": "restore rejected",
+                    "params": {"error_detail": "target denied"},
+                }
+
+            async def file_list(self, parent_id, next_page_token=None):
+                raise AssertionError("failed task must not list the scope")
+
+        client = build_client(RawClient())
+        receipt = ShareRestoreReceipt(
+            "owned-scope", "restore-task", ("selected-1",)
         )
 
-        with self.assertRaisesRegex(
-            RuntimeError, "隔离目录出现 3 个文件.*勾选 1 个"
-        ):
+        with self.assertRaisesRegex(RuntimeError, "target denied"):
             await client.wait_for_isolated_share_urls(
-                "owned-scope", expected_count=1, timeout=0.2, poll_interval=0.01
+                receipt, timeout=0.2, poll_interval=0.01
             )
 
-    async def test_scope_polling_rejects_partial_result_after_timeout(self):
-        client = build_client(object())
-        client._list_folder_files = AsyncMock(
-            return_value=[
-                {"name": "one.mp4", "url": "https://download/one"},
-            ]
+    async def test_restore_task_rejects_invalid_or_mismatched_trace_mapping(self):
+        cases = [
+            ("not-json", "映射格式无效"),
+            (json.dumps({}), "源文件映射不一致"),
+            (
+                json.dumps({
+                    "selected-1": "restored-1",
+                    "unselected": "restored-extra",
+                }),
+                "源文件映射不一致",
+            ),
+            (
+                json.dumps({
+                    "selected-1": "restored-same",
+                    "selected-2": "restored-same",
+                }),
+                "目标文件映射无效",
+            ),
+        ]
+
+        for trace_value, error_pattern in cases:
+            with self.subTest(trace_value=trace_value):
+                class RawClient:
+                    PIKPAK_API_HOST = "api-drive.mypikpak.com"
+
+                    async def _request_get(self, url, params=None):
+                        return {
+                            "phase": "PHASE_TYPE_COMPLETE",
+                            "params": {"trace_file_ids": trace_value},
+                        }
+
+                    async def file_list(self, parent_id, next_page_token=None):
+                        raise AssertionError("invalid mapping must not list scope")
+
+                client = build_client(RawClient())
+                receipt = ShareRestoreReceipt(
+                    "owned-scope",
+                    "restore-task",
+                    ("selected-1", "selected-2"),
+                )
+
+                with self.assertRaisesRegex(RuntimeError, error_pattern):
+                    await client.wait_for_isolated_share_urls(
+                        receipt, timeout=0.2, poll_interval=0.01
+                    )
+
+    async def test_restore_scope_partial_children_times_out(self):
+        class RawClient:
+            PIKPAK_API_HOST = "api-drive.mypikpak.com"
+
+            async def _request_get(self, url, params=None):
+                return {
+                    "phase": "PHASE_TYPE_COMPLETE",
+                    "params": {
+                        "trace_file_ids": json.dumps({
+                            "selected-1": "restored-1",
+                            "selected-2": "restored-2",
+                        })
+                    },
+                }
+
+            async def file_list(self, parent_id, next_page_token=None):
+                return {
+                    "files": [{
+                        "id": "restored-1",
+                        "name": "one.mp4",
+                        "kind": "drive#file",
+                        "parent_id": "owned-scope",
+                        "size": "100",
+                        "web_content_link": "https://download/one",
+                    }]
+                }
+
+        client = build_client(RawClient())
+        receipt = ShareRestoreReceipt(
+            "owned-scope", "restore-task", ("selected-1", "selected-2")
         )
 
-        with self.assertRaisesRegex(
-            RuntimeError, "应有 2 个文件，实际就绪 1 个"
-        ):
+        with self.assertRaisesRegex(RuntimeError, "直属文件等待超时"):
             await client.wait_for_isolated_share_urls(
-                "owned-scope", expected_count=2, timeout=0.02, poll_interval=0.01
+                receipt, timeout=0.02, poll_interval=0.01
             )
+
+    async def test_restore_scope_rejects_extra_or_non_direct_file(self):
+        cases = [
+            (
+                [
+                    {
+                        "id": "restored-1",
+                        "name": "one.mp4",
+                        "kind": "drive#file",
+                        "parent_id": "owned-scope",
+                    },
+                    {
+                        "id": "unrelated",
+                        "name": "old.mp4",
+                        "kind": "drive#file",
+                        "parent_id": "owned-scope",
+                    },
+                ],
+                "出现未映射文件",
+            ),
+            (
+                [{
+                    "id": "restored-1",
+                    "name": "one.mp4",
+                    "kind": "drive#file",
+                    "parent_id": "other-scope",
+                }],
+                "不属于本次隔离目录",
+            ),
+            (
+                [{
+                    "id": "restored-1",
+                    "name": "folder",
+                    "kind": "drive#folder",
+                    "parent_id": "owned-scope",
+                }],
+                "不是直属文件",
+            ),
+        ]
+
+        for children, error_pattern in cases:
+            with self.subTest(error_pattern=error_pattern):
+                class RawClient:
+                    PIKPAK_API_HOST = "api-drive.mypikpak.com"
+
+                    async def _request_get(self, url, params=None):
+                        return {
+                            "phase": "PHASE_TYPE_COMPLETE",
+                            "params": {
+                                "trace_file_ids": json.dumps({
+                                    "selected-1": "restored-1"
+                                })
+                            },
+                        }
+
+                    async def file_list(self, parent_id, next_page_token=None):
+                        return {"files": children}
+
+                client = build_client(RawClient())
+                receipt = ShareRestoreReceipt(
+                    "owned-scope", "restore-task", ("selected-1",)
+                )
+
+                with self.assertRaisesRegex(RuntimeError, error_pattern):
+                    await client.wait_for_isolated_share_urls(
+                        receipt, timeout=0.2, poll_interval=0.01
+                    )
 
 
 class ShareSelectionContractTests(unittest.IsolatedAsyncioTestCase):
@@ -361,12 +592,14 @@ class ShareDownloadIsolationRouteTests(unittest.IsolatedAsyncioTestCase):
                 self, share_id, file_ids, token
             ):
                 self.start_call = (share_id, file_ids, token)
-                return "owned-scope"
+                return ShareRestoreReceipt(
+                    "owned-scope", "restore-task", tuple(file_ids)
+                )
 
             async def wait_for_isolated_share_urls(
-                self, scope_id, expected_count, **kwargs
+                self, receipt, **kwargs
             ):
-                self.wait_call = (scope_id, expected_count)
+                self.wait_call = receipt
                 return [
                     {
                         "name": "paid_8k.mp4",
@@ -399,7 +632,12 @@ class ShareDownloadIsolationRouteTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(pikpak.start_call[1], ["selected-1"])
-        self.assertEqual(pikpak.wait_call, ("owned-scope", 1))
+        self.assertEqual(
+            pikpak.wait_call,
+            ShareRestoreReceipt(
+                "owned-scope", "restore-task", ("selected-1",)
+            ),
+        )
         self.assertEqual(
             [item[0] for item in aria2.added],
             ["https://download/selected"],
@@ -415,10 +653,12 @@ class ShareDownloadIsolationRouteTests(unittest.IsolatedAsyncioTestCase):
             async def start_isolated_share_restore(
                 self, share_id, file_ids, token
             ):
-                return "owned-scope"
+                return ShareRestoreReceipt(
+                    "owned-scope", "restore-task", tuple(file_ids)
+                )
 
             async def wait_for_isolated_share_urls(
-                self, scope_id, expected_count, **kwargs
+                self, receipt, **kwargs
             ):
                 return [
                     {
@@ -469,7 +709,9 @@ class ShareDownloadIsolationRouteTests(unittest.IsolatedAsyncioTestCase):
                 self.deleted = []
 
             async def start_isolated_share_restore(self, *args):
-                return "owned-scope"
+                return ShareRestoreReceipt(
+                    "owned-scope", "restore-task", ("selected-1",)
+                )
 
             async def wait_for_isolated_share_urls(self, *args, **kwargs):
                 raise RuntimeError(

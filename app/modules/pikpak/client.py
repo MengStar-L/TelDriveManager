@@ -6,6 +6,7 @@ import logging
 import re
 import time
 import uuid
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -15,6 +16,17 @@ from pikpakapi.enums import DownloadStatus
 logger = logging.getLogger(__name__)
 
 TOKEN_FILE = Path(__file__).resolve().parent.parent.parent.parent / "pikpak_token.json"
+
+
+@dataclass(frozen=True)
+class ShareRestoreReceipt:
+    scope_id: str
+    task_id: str
+    selected_ids: tuple[str, ...]
+
+
+class _ShareRestoreValidationError(RuntimeError):
+    pass
 
 
 class PikPakClient:
@@ -231,46 +243,178 @@ class PikPakClient:
         return []
 
     async def wait_for_isolated_share_urls(
-        self, scope_id: str, expected_count: int,
+        self, receipt: ShareRestoreReceipt,
         timeout: float = 60.0, poll_interval: float = 3.0,
-    ) -> List[Dict[str, str]]:
-        scope_id = str(scope_id or "").strip()
-        expected_count = int(expected_count or 0)
-        if not scope_id or expected_count <= 0:
-            raise ValueError("分享隔离目录和文件数量必须有效")
+    ) -> List[Dict[str, Any]]:
+        if not isinstance(receipt, ShareRestoreReceipt):
+            raise TypeError("分享恢复回执无效")
+        if not receipt.scope_id or not receipt.task_id or not receipt.selected_ids:
+            raise ValueError("分享恢复回执字段不完整")
 
         timeout = max(float(timeout or 0.0), 0.0)
         poll_interval = max(float(poll_interval or 0.0), 0.01)
         request_timeout = max(1.0, min(timeout if timeout > 0 else 15.0, 15.0))
         deadline = time.monotonic() + timeout
+        expected_count = len(receipt.selected_ids)
+        trace_map: Optional[Dict[str, str]] = None
         last_count = 0
         last_error: Optional[Exception] = None
 
         while True:
             try:
-                files = await asyncio.wait_for(
-                    self._list_folder_files(scope_id, prefix=""),
-                    timeout=request_timeout,
-                )
+                if trace_map is None:
+                    task = await asyncio.wait_for(
+                        self.client._request_get(
+                            f"https://{self.client.PIKPAK_API_HOST}/drive/v1/tasks/{receipt.task_id}"
+                        ),
+                        timeout=request_timeout,
+                    )
+                    phase = str(task.get("phase") or "").strip()
+                    params = task.get("params") if isinstance(task.get("params"), dict) else {}
+                    if phase in {"PHASE_TYPE_ERROR", "PHASE_TYPE_FAILED"}:
+                        detail = str(
+                            params.get("error_detail")
+                            or task.get("message")
+                            or phase
+                        ).strip()
+                        raise _ShareRestoreValidationError(
+                            f"PikPak 恢复任务失败: {detail}"
+                        )
+                    if phase == "PHASE_TYPE_COMPLETE":
+                        trace_map = self._parse_restore_trace_map(
+                            params.get("trace_file_ids"), receipt.selected_ids
+                        )
+
+                if trace_map is not None:
+                    children = await asyncio.wait_for(
+                        self._list_direct_folder_files(receipt.scope_id),
+                        timeout=request_timeout,
+                    )
+                    last_count = len(children)
+                    destination_ids = set(trace_map.values())
+                    child_ids = {
+                        str(child.get("id") or "").strip()
+                        for child in children
+                    }
+                    extra_ids = child_ids - destination_ids
+                    if extra_ids:
+                        raise _ShareRestoreValidationError(
+                            "PikPak 隔离目录出现未映射文件，本次未推送任何下载链接"
+                        )
+                    for child in children:
+                        if str(child.get("parent_id") or "").strip() != receipt.scope_id:
+                            raise _ShareRestoreValidationError(
+                                "PikPak 恢复文件不属于本次隔离目录，本次未推送任何下载链接"
+                            )
+                        if str(child.get("kind") or "").strip() != "drive#file":
+                            raise _ShareRestoreValidationError(
+                                "PikPak 恢复结果不是直属文件，本次未推送任何下载链接"
+                            )
+
+                    if child_ids == destination_ids:
+                        children_by_id = {
+                            str(child.get("id") or "").strip(): child
+                            for child in children
+                        }
+                        resolved = []
+                        missing_url = False
+                        for selected_id in receipt.selected_ids:
+                            destination_id = trace_map[selected_id]
+                            child = children_by_id[destination_id]
+                            url = self._extract_download_url(child)
+                            if not url:
+                                info = await asyncio.wait_for(
+                                    self.client.get_download_url(destination_id),
+                                    timeout=request_timeout,
+                                )
+                                url = self._extract_download_url(info)
+                            if not url:
+                                missing_url = True
+                                break
+                            name = str(child.get("name") or "")
+                            resolved.append({
+                                "name": name,
+                                "url": url,
+                                "file_id": destination_id,
+                                "path": name,
+                                "size": int(child.get("size") or 0),
+                            })
+                        if not missing_url:
+                            return resolved
+            except _ShareRestoreValidationError:
+                raise
             except Exception as error:
                 last_error = error
-            else:
-                last_count = len(files)
-                if last_count > expected_count:
-                    raise RuntimeError(
-                        f"分享隔离目录出现 {last_count} 个文件，但只勾选 {expected_count} 个；"
-                        "本次未推送任何下载链接"
-                    )
-                if last_count == expected_count:
-                    return files
 
             if time.monotonic() >= deadline:
                 detail = f"，最后错误：{last_error}" if last_error else ""
+                if trace_map is None:
+                    raise RuntimeError(f"PikPak 恢复任务等待超时{detail}")
+                if last_count < expected_count:
+                    raise RuntimeError(
+                        f"PikPak 隔离目录直属文件等待超时：应有 {expected_count} 个，"
+                        f"实际 {last_count} 个{detail}"
+                    )
                 raise RuntimeError(
-                    f"分享隔离目录等待超时：应有 {expected_count} 个文件，"
-                    f"实际就绪 {last_count} 个{detail}"
+                    f"PikPak 隔离目录直链等待超时：应有 {expected_count} 个文件{detail}"
                 )
             await asyncio.sleep(poll_interval)
+
+    @staticmethod
+    def _parse_restore_trace_map(
+        value: Any, selected_ids: tuple[str, ...]
+    ) -> Dict[str, str]:
+        if isinstance(value, str):
+            try:
+                value = json.loads(value)
+            except (TypeError, ValueError) as error:
+                raise _ShareRestoreValidationError(
+                    "PikPak 恢复任务映射格式无效"
+                ) from error
+        if not isinstance(value, dict):
+            raise _ShareRestoreValidationError("PikPak 恢复任务映射格式无效")
+
+        trace_map = {
+            str(source_id).strip(): str(destination_id).strip()
+            for source_id, destination_id in value.items()
+        }
+        if set(trace_map) != set(selected_ids):
+            raise _ShareRestoreValidationError(
+                "PikPak 恢复任务源文件映射不一致"
+            )
+        destination_ids = list(trace_map.values())
+        if (
+            any(not destination_id for destination_id in destination_ids)
+            or len(set(destination_ids)) != len(destination_ids)
+        ):
+            raise _ShareRestoreValidationError(
+                "PikPak 恢复任务目标文件映射无效"
+            )
+        return trace_map
+
+    async def _list_direct_folder_files(self, folder_id: str) -> List[Dict[str, Any]]:
+        results: List[Dict[str, Any]] = []
+        next_page_token = None
+        while True:
+            resp = await self.client.file_list(
+                parent_id=folder_id,
+                next_page_token=next_page_token,
+            )
+            for item in resp.get("files", []) or []:
+                results.append({
+                    "id": str(item.get("id") or "").strip(),
+                    "name": str(item.get("name") or ""),
+                    "kind": str(item.get("kind") or ""),
+                    "parent_id": str(item.get("parent_id") or "").strip(),
+                    "size": int(item.get("size") or 0),
+                    "web_content_link": item.get("web_content_link", ""),
+                    "medias": item.get("medias", []),
+                    "links": item.get("links", []),
+                })
+            next_page_token = resp.get("next_page_token")
+            if not next_page_token:
+                break
+        return results
 
     async def _list_folder_files(self, folder_id: str, prefix: str = "") -> List[Dict[str, str]]:
         results = []
@@ -411,7 +555,17 @@ class PikPakClient:
 
     async def start_isolated_share_restore(
         self, share_id: str, file_ids: List[str], pass_code_token: str
-    ) -> str:
+    ) -> ShareRestoreReceipt:
+        selected_ids = tuple(
+            str(file_id).strip()
+            for file_id in file_ids
+            if str(file_id or "").strip()
+        )
+        if not selected_ids:
+            raise ValueError("分享恢复文件 ID 不能为空")
+        if len(set(selected_ids)) != len(selected_ids):
+            raise ValueError("分享恢复文件 ID 不能重复")
+
         parent_id = await self._get_save_dir_id()
         folder_name = f".teldrive-share-{uuid.uuid4().hex}"
         folder = await self.client.create_folder(name=folder_name, parent_id=parent_id)
@@ -422,10 +576,13 @@ class PikPakClient:
             raise RuntimeError("PikPak 未返回隔离目录 ID，本次未转存任何文件")
 
         payload = {
+            "parent_id": scope_id,
             "share_id": share_id,
             "pass_code_token": pass_code_token,
-            "file_ids": list(file_ids),
-            "to": {"parent_id": scope_id},
+            "file_ids": list(selected_ids),
+            "ancestor_ids": [],
+            "specify_parent_id": True,
+            "params": {"trace_file_ids": ",".join(selected_ids)},
         }
         try:
             result = await self.client._request_post(
@@ -438,6 +595,16 @@ class PikPakClient:
                 error = result["error"]
                 detail = error.get("message") if isinstance(error, dict) else str(error)
                 raise RuntimeError(f"PikPak 隔离转存失败: {detail or error}")
+            returned_scope_id = str(result.get("file_id") or "").strip()
+            if returned_scope_id != scope_id:
+                raise RuntimeError(
+                    "PikPak 恢复目标目录不一致，本次未解析或推送任何文件"
+                )
+            task_id = str(result.get("restore_task_id") or "").strip()
+            if not task_id:
+                raise RuntimeError(
+                    "PikPak 未返回恢复任务 ID，本次未解析或推送任何文件"
+                )
         except BaseException:
             try:
                 await self.delete_files([scope_id])
@@ -448,9 +615,10 @@ class PikPakClient:
             raise
 
         logger.info(
-            "分享转存已提交到隔离目录: scope=%s, selected=%s, status=%s",
+            "分享转存已提交到隔离目录: scope=%s, task=%s, selected=%s, status=%s",
             scope_id,
-            len(file_ids),
+            task_id,
+            len(selected_ids),
             result.get("restore_status", ""),
         )
-        return scope_id
+        return ShareRestoreReceipt(scope_id, task_id, selected_ids)

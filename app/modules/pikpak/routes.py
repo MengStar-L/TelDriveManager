@@ -1833,12 +1833,13 @@ async def _process_share_download(share_id: str, file_ids: List[str], pass_code_
         await _broadcast({"type": "task_status", "index": 1,
                           "status": "正在保存分享内容到 PikPak 网盘..."})
         try:
-            owned_scope_id = await asyncio.wait_for(
+            restore_receipt = await asyncio.wait_for(
                 pikpak.start_isolated_share_restore(
                     share_id, file_ids, pass_code_token
                 ),
                 timeout=share_parse_timeout,
             )
+            owned_scope_id = restore_receipt.scope_id
         except asyncio.TimeoutError as exc:
             raise RuntimeError(
                 _build_share_fallback_message(
@@ -1861,8 +1862,7 @@ async def _process_share_download(share_id: str, file_ids: List[str], pass_code_
                 paths.sort(key=_natural_sort_key)
 
         all_urls = await pikpak.wait_for_isolated_share_urls(
-            owned_scope_id,
-            expected_count=total,
+            restore_receipt,
             timeout=share_url_timeout,
             poll_interval=share_poll_interval,
         )
