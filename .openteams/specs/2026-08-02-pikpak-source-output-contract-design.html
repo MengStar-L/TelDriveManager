@@ -1,0 +1,264 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>PikPak 解析身份与输出命名契约设计</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --ink: #18212b;
+      --muted: #5d6875;
+      --line: #d8dee5;
+      --paper: #ffffff;
+      --band: #f3f6f8;
+      --accent: #08736a;
+      --accent-soft: #eaf7f4;
+      --warn: #9a580d;
+      --warn-soft: #fff5e7;
+      --danger: #a22f35;
+      --danger-soft: #fff0f1;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: var(--band);
+      color: var(--ink);
+      font: 15px/1.68 system-ui, -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
+      letter-spacing: 0;
+    }
+    main {
+      width: min(1040px, calc(100% - 32px));
+      margin: 24px auto 48px;
+      background: var(--paper);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      overflow: hidden;
+    }
+    header, section { padding: 25px 34px; }
+    header { border-bottom: 4px solid var(--accent); }
+    section + section { border-top: 1px solid var(--line); }
+    h1, h2, h3 { margin: 0 0 12px; line-height: 1.3; letter-spacing: 0; }
+    h1 { font-size: 27px; }
+    h2 { font-size: 19px; }
+    h3 { font-size: 16px; }
+    p { margin: 8px 0; }
+    ul, ol { margin: 9px 0; padding-left: 24px; }
+    code, pre { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; }
+    code { color: #00574f; }
+    pre {
+      margin: 12px 0;
+      padding: 16px;
+      overflow: auto;
+      border-radius: 6px;
+      background: #131b23;
+      color: #f5f7f9;
+      line-height: 1.52;
+    }
+    table { width: 100%; border-collapse: collapse; margin: 12px 0; }
+    th, td { padding: 10px 12px; border: 1px solid var(--line); text-align: left; vertical-align: top; }
+    th { background: var(--band); }
+    .meta { color: var(--muted); }
+    .callout { margin: 12px 0; border-left: 4px solid var(--accent); padding: 11px 14px; background: var(--accent-soft); }
+    .warning { border-left-color: var(--warn); background: var(--warn-soft); }
+    .danger { border-left-color: var(--danger); background: var(--danger-soft); }
+    .flow { white-space: pre-wrap; }
+    .badge { display: inline-block; padding: 2px 7px; border: 1px solid #b9dcd7; border-radius: 4px; background: var(--accent-soft); color: #075d56; font-size: 13px; }
+    @media (max-width: 680px) {
+      main { width: 100%; margin: 0; border: 0; border-radius: 0; }
+      header, section { padding: 20px; }
+      table { display: block; overflow-x: auto; }
+    }
+  </style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>PikPak 解析身份与输出命名契约设计</h1>
+    <p class="meta">日期：2026-08-02 · 状态：用户已确认设计方向，待书面规格复核</p>
+    <p class="meta">适用范围：PikPak 分享链接解析、Jellyfin 格式化、隔离恢复、路径绑定与 aria2/串行队列推送。</p>
+  </header>
+
+  <section>
+    <h2>结论</h2>
+    <p>当前链路把“源文件身份”和“最终输出名称”混在同一组 <code>name/path</code> 字段中。Jellyfin 格式化直接改写这些字段后，后端使用新名称校验 PikPak 返回的原文件，导致正确文件被误判为恢复结果不一致。</p>
+    <div class="callout">
+      核心规则：文件身份只由分享作用域和 <code>source_file_id</code> 决定；名称只作为元数据。Jellyfin、层级重命名和 aria2 输出名均不得改变或参与源文件身份判断。
+    </div>
+  </section>
+
+  <section>
+    <h2>已确认故障链路</h2>
+    <ol>
+      <li>分享解析返回原始 <code>id/name/path</code>。</li>
+      <li>前端 Jellyfin 格式化就地改写 <code>item.name</code> 和 <code>item.path</code>。</li>
+      <li>下载请求把已经格式化的路径作为 <code>file_paths</code> 发送，同时另发 <code>name_overrides</code>。</li>
+      <li>PikPak 隔离恢复返回原始文件名。</li>
+      <li>后端在应用 <code>name_overrides</code> 前，按名称比较隔离结果与 <code>file_paths</code>，因此产生“隔离解析结果与勾选文件不一致”。</li>
+      <li>安全校验在 aria2 前中止，所以本次没有推送错误下载链接。</li>
+    </ol>
+  </section>
+
+  <section>
+    <h2>目标与非目标</h2>
+    <h3>目标</h3>
+    <ul>
+      <li>深层分享链接保留明确的目标节点作用域，不允许静默退回分享根目录。</li>
+      <li>解析产生的源 ID、源名称和源路径在一次工作流内保持不可变。</li>
+      <li>Jellyfin 格式化只改变预览和最终输出名称。</li>
+      <li>隔离恢复完全依赖源 ID到目标 ID的任务映射，不按名称或返回顺序猜测。</li>
+      <li>同名文件、多层目录和格式化后的文件均能稳定绑定到原始路径。</li>
+    </ul>
+    <h3>非目标</h3>
+    <ul>
+      <li>不放宽现有隔离目录所有权和“整批验证通过后才推送”的安全规则。</li>
+      <li>不扫描或复用 <code>Pack From Shared</code>，不从其他目录补齐结果。</li>
+      <li>不改动 Jellyfin 的标题识别算法本身。</li>
+      <li>不通过删除名称校验后信任返回顺序来绕过问题。</li>
+    </ul>
+  </section>
+
+  <section>
+    <h2>统一数据模型</h2>
+    <table>
+      <thead><tr><th>字段</th><th>含义</th><th>可变性</th><th>用途</th></tr></thead>
+      <tbody>
+        <tr><td><code>source_file_id</code></td><td>分享中的原始文件 ID</td><td><span class="badge">不可变</span></td><td>勾选、恢复、映射与安全校验</td></tr>
+        <tr><td><code>source_name</code></td><td>PikPak 返回的原始文件名</td><td><span class="badge">不可变</span></td><td>原始元数据与诊断日志</td></tr>
+        <tr><td><code>source_path</code></td><td>分享作用域内的原始相对路径</td><td><span class="badge">不可变</span></td><td>目录结构映射和层级重命名来源</td></tr>
+        <tr><td><code>output_name</code></td><td>用户希望写入 aria2/TelDrive 的文件名</td><td>可变</td><td>Jellyfin 或层级重命名结果</td></tr>
+        <tr><td><code>destination_file_id</code></td><td>隔离恢复后产生的网盘文件 ID</td><td>恢复阶段生成</td><td>获取直链和清理范围验证</td></tr>
+      </tbody>
+    </table>
+    <p>现有接口可暂时保留 <code>id/name/path</code> 作为兼容展示字段，但内部必须将其视为 <code>source_file_id/source_name/source_path</code>，格式化操作不得再改写它们。</p>
+  </section>
+
+  <section>
+    <h2>端到端数据流</h2>
+    <pre class="flow">分享 URL
+  -> 后端解析 share_id + 可选 target_id
+  -> PikPak 分享接口按明确 target_id 读取目标作用域
+  -> 校验响应未退回分享根目录
+  -> 生成不可变 source_file_id/source_name/source_path
+  -> 前端树使用 output_name ?? source_name 展示
+  -> Jellyfin 只写 output_name
+  -> 下载请求发送：
+       file_ids[source_file_id]
+       file_paths[source_file_id] = source_path
+       name_overrides[source_file_id] = output_name
+  -> 创建本次唯一隔离目录
+  -> 提交恢复并读取 trace_file_ids
+  -> 建立 source_file_id -> destination_file_id 映射
+  -> 校验映射集合和隔离目录直属成员集合
+  -> 每条直链携带 source_file_id + destination_file_id
+  -> 按 source_file_id 绑定 source_path 和 output_name
+  -> 全部验证通过后推送 aria2/串行队列</pre>
+  </section>
+
+  <section>
+    <h2>组件职责</h2>
+    <table>
+      <thead><tr><th>组件</th><th>修改后的职责</th></tr></thead>
+      <tbody>
+        <tr>
+          <td><code>app/modules/pikpak/client.py</code></td>
+          <td>接收明确的分享 ID 和目标作用域；生成不可变源元数据；提交隔离恢复；解析源 ID到目标 ID映射；直链结果必须携带两个 ID。</td>
+        </tr>
+        <tr>
+          <td><code>app/modules/pikpak/routes.py</code></td>
+          <td>按 <code>source_file_id</code> 校验请求、绑定原始路径和输出名；不得再比较文件名集合；全部验证完成后才允许推送。</td>
+        </tr>
+        <tr>
+          <td><code>app/static/app.js</code></td>
+          <td>保持源字段不可变；格式化只设置 <code>output_name</code>；请求中的路径和名称覆盖都按源 ID 构造。</td>
+        </tr>
+        <tr>
+          <td>自动化测试</td>
+          <td>覆盖深层链接作用域、不可变字段、同名文件、Jellyfin 格式化、恢复映射和失败零推送。</td>
+        </tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section>
+    <h2>请求契约</h2>
+    <pre><code>{
+  "share_id": "分享 ID",
+  "file_ids": ["source-file-1", "source-file-2"],
+  "file_paths": {
+    "source-file-1": "原始目录/原始文件名.mkv",
+    "source-file-2": "另一目录/同名文件.mkv"
+  },
+  "name_overrides": {
+    "source-file-1": "中文标题 S01E01.mkv",
+    "source-file-2": "中文标题 S01E02.mkv"
+  }
+}</code></pre>
+    <ul>
+      <li><code>file_paths</code> 始终是原始路径，Jellyfin 格式化前后必须完全相同。</li>
+      <li><code>name_overrides</code> 改为按源 ID 建键，避免同名文件覆盖。</li>
+      <li>没有格式化的文件可以省略覆盖项，最终沿用原始文件名或层级重命名结果。</li>
+    </ul>
+  </section>
+
+  <section>
+    <h2>命名与路径优先级</h2>
+    <ol>
+      <li>目录结构始终从 <code>source_path</code> 计算，不读取 <code>output_name</code>。</li>
+      <li>启用层级重命名时，从 <code>source_path</code> 的父目录生成候选输出名。</li>
+      <li>存在 Jellyfin <code>name_overrides[source_file_id]</code> 时，它覆盖层级重命名候选名。</li>
+      <li>两项均未启用时，最终输出名为 <code>source_name</code>。</li>
+    </ol>
+    <div class="callout warning">名称优先级只决定输出，不得改变源 ID、恢复目标 ID、直链归属或目录成员校验。</div>
+  </section>
+
+  <section>
+    <h2>作用域与失败策略</h2>
+    <ul>
+      <li>后端自行解析分享 URL，得到 <code>share_id</code> 与可选 <code>target_id</code>；客户端方法不再依赖 SDK 内部正则隐式决定作用域。</li>
+      <li>深层链接有 <code>target_id</code> 时，只允许返回该文件或该文件夹子树。PikPak 返回根目录内容、无效目标或无法证明作用域时，解析失败。</li>
+      <li>恢复任务源 ID 集合必须等于勾选 ID 集合；目标 ID 集合必须等于隔离目录直属成员集合。</li>
+      <li>每条直链必须携带可回溯的 <code>source_file_id</code>。缺失、重复或未知 ID 时整批失败。</li>
+      <li>任何失败路径向 aria2 和串行队列推送 0 条链接，并且只清理本次创建的隔离目录。</li>
+    </ul>
+    <div class="callout danger">禁止回退到分享根目录，禁止按名称搜索替代文件，禁止按返回顺序猜测源文件，禁止部分成功后继续推送。</div>
+  </section>
+
+  <section>
+    <h2>测试与验收</h2>
+    <h3>前端测试</h3>
+    <ul>
+      <li>Jellyfin 格式化前后 <code>source_file_id/source_name/source_path</code> 不变。</li>
+      <li>树中显示格式化名称，但请求 <code>file_paths</code> 仍为原始路径。</li>
+      <li><code>name_overrides</code> 按源 ID 建键；两个同名文件不会互相覆盖。</li>
+    </ul>
+    <h3>后端测试</h3>
+    <ul>
+      <li>正确恢复映射配合任意输出名均能通过，不再发生名称误判。</li>
+      <li>源 ID 缺失、多余、重复，或隔离目录成员不一致时推送 0 条。</li>
+      <li>同名文件按照源 ID 绑定各自原始路径和输出名。</li>
+      <li>深层分享链接只解析目标作用域；模拟接口退回根目录时必须失败。</li>
+      <li>Jellyfin、层级重命名、维持目录结构四种组合均覆盖。</li>
+    </ul>
+    <h3>真实链路验收</h3>
+    <ol>
+      <li>使用出现错误的深层分享链接，记录解析出的源 ID、源路径和目标作用域，不触发 aria2。</li>
+      <li>对同一批 12 个文件先执行 Jellyfin 格式化，再提交隔离恢复。</li>
+      <li>确认任务映射、隔离目录成员和选中 ID 完全一致。</li>
+      <li>确认 aria2 恰好收到 12 条链接，输出名为 Jellyfin 名称，目录仍来自原始路径。</li>
+      <li>确认隔离目录清理后不触碰其他 PikPak 文件或目录。</li>
+    </ol>
+  </section>
+
+  <section>
+    <h2>完成标准</h2>
+    <ul>
+      <li>解析结果不再因深层链接目标被忽略而出现其他内容。</li>
+      <li>Jellyfin 格式化后可以正常完成隔离恢复和推送。</li>
+      <li>所有身份判断均以源 ID/目标 ID 为依据，代码中不存在名称集合身份校验。</li>
+      <li>自动化测试通过，真实 12 文件场景通过，aria2 推送数量与勾选数量严格一致。</li>
+    </ul>
+  </section>
+</main>
+</body>
+</html>

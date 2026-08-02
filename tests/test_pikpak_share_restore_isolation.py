@@ -16,6 +16,66 @@ def build_client(raw_client) -> PikPakClient:
     return client
 
 
+class ShareListScopeTests(unittest.IsolatedAsyncioTestCase):
+    async def test_deep_link_requests_explicit_target_and_preserves_source_metadata(self):
+        class RawClient:
+            PIKPAK_API_HOST = "api-drive.mypikpak.com"
+
+            def __init__(self):
+                self.calls = []
+
+            async def _request_get(self, url, params=None):
+                self.calls.append((url, params))
+                return {
+                    "pass_code_token": "pass-token",
+                    "files": [
+                        {
+                            "id": "source-1",
+                            "parent_id": "target-folder",
+                            "name": "original.mkv",
+                            "kind": "drive#file",
+                            "size": "100",
+                            "mime_type": "video/x-matroska",
+                        }
+                    ],
+                }
+
+        raw = RawClient()
+        client = build_client(raw)
+        result = await client.get_share_file_list(
+            "https://mypikpak.com/s/share-1/target-folder"
+        )
+
+        self.assertEqual(raw.calls[0][1]["share_id"], "share-1")
+        self.assertEqual(raw.calls[0][1]["parent_id"], "target-folder")
+        self.assertEqual(result["target_id"], "target-folder")
+        self.assertEqual(result["files"][0]["source_file_id"], "source-1")
+        self.assertEqual(result["files"][0]["source_name"], "original.mkv")
+        self.assertEqual(result["files"][0]["source_path"], "original.mkv")
+
+    async def test_deep_link_rejects_share_root_fallback(self):
+        class RawClient:
+            PIKPAK_API_HOST = "api-drive.mypikpak.com"
+
+            async def _request_get(self, url, params=None):
+                return {
+                    "pass_code_token": "pass-token",
+                    "files": [
+                        {
+                            "id": "unrelated-folder",
+                            "parent_id": "",
+                            "name": "Unrelated",
+                            "kind": "drive#folder",
+                        }
+                    ],
+                }
+
+        with self.assertRaisesRegex(RuntimeError, "链接目标节点不一致"):
+            await build_client(RawClient()).get_share_file_list(
+                "https://mypikpak.com/s/share-1/target-folder"
+            )
+
+
 class IsolatedShareRestoreClientTests(unittest.IsolatedAsyncioTestCase):
     async def test_restore_uses_explicit_target_protocol_and_returns_receipt(self):
         class RawClient:

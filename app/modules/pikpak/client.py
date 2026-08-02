@@ -9,6 +9,7 @@ import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+from urllib.parse import urlsplit
 
 from pikpakapi import PikPakApi
 from pikpakapi.enums import DownloadStatus
@@ -27,6 +28,19 @@ class ShareRestoreReceipt:
 
 class _ShareRestoreValidationError(RuntimeError):
     pass
+
+
+def _parse_pikpak_share_location(share_link: str) -> tuple[str, Optional[str]]:
+    value = str(share_link or "").strip()
+    parsed = urlsplit(value if "://" in value else f"https://{value}")
+    parts = [part for part in parsed.path.split("/") if part]
+    if len(parts) not in {2, 3} or parts[0].lower() != "s":
+        raise ValueError("无效的 PikPak 分享链接格式")
+    share_id = parts[1].strip()
+    target_id = parts[2].strip() if len(parts) == 3 else None
+    if not share_id or (len(parts) == 3 and not target_id):
+        raise ValueError("无效的 PikPak 分享链接格式")
+    return share_id, target_id
 
 
 class PikPakClient:
@@ -522,18 +536,44 @@ class PikPakClient:
     # ── 分享链接相关 ──
 
     async def get_share_file_list(self, share_link: str, pass_code: str = "") -> Dict[str, Any]:
-        match = re.search(r"/s/([^/?#]+)", share_link)
-        if not match:
-            raise ValueError("无效的分享链接格式")
-        share_id = match.group(1)
-        result = await self.client.get_share_info(share_link, pass_code or None)
-        if isinstance(result, ValueError):
-            raise result
+        share_id, target_id = _parse_pikpak_share_location(share_link)
+        result = await self.client._request_get(
+            url=f"https://{self.client.PIKPAK_API_HOST}/drive/v1/share",
+            params={
+                "limit": "100",
+                "thumbnail_size": "SIZE_LARGE",
+                "order": "3",
+                "share_id": share_id,
+                "parent_id": target_id,
+                "pass_code": pass_code or None,
+            },
+        )
+        if not isinstance(result, dict):
+            raise RuntimeError("PikPak 分享接口响应格式无效")
+
+        roots = list(result.get("files", []) or [])
+        if target_id:
+            target_is_returned = (
+                len(roots) == 1
+                and str(roots[0].get("id") or "").strip() == target_id
+            )
+            target_is_parent = bool(roots) and all(
+                str(item.get("parent_id") or "").strip() == target_id
+                for item in roots
+            )
+            if not (target_is_returned or target_is_parent):
+                raise RuntimeError("PikPak 返回的分享内容与链接目标节点不一致")
+
         pass_code_token = result.get("pass_code_token", "")
         files: List[Dict] = []
-        for item in result.get("files", []):
+        for item in roots:
             await self._collect_share_files(share_id, pass_code_token, item, files)
-        return {"share_id": share_id, "pass_code_token": pass_code_token, "files": files}
+        return {
+            "share_id": share_id,
+            "target_id": target_id,
+            "pass_code_token": pass_code_token,
+            "files": files,
+        }
 
     async def _collect_share_files(self, share_id: str, pass_code_token: str,
                                     file_info: Dict, files: List[Dict], prefix: str = ""):
@@ -547,7 +587,12 @@ class PikPakClient:
                 await self._collect_share_files(share_id, pass_code_token, f, files, full_path)
         elif kind == "drive#file":
             files.append({
-                "id": file_id, "name": name, "path": full_path,
+                "id": file_id,
+                "source_file_id": file_id,
+                "name": name,
+                "source_name": name,
+                "path": full_path,
+                "source_path": full_path,
                 "size": int(file_info.get("size", 0)),
                 "file_type": file_info.get("mime_type", ""),
                 "icon_link": file_info.get("icon_link", ""),
