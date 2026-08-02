@@ -37,10 +37,10 @@ def _parse_pikpak_share_location(share_link: str) -> tuple[str, Optional[str]]:
     if len(parts) not in {2, 3} or parts[0].lower() != "s":
         raise ValueError("无效的 PikPak 分享链接格式")
     share_id = parts[1].strip()
-    target_id = parts[2].strip() if len(parts) == 3 else None
-    if not share_id or (len(parts) == 3 and not target_id):
+    target_locator = parts[2].strip() if len(parts) == 3 else None
+    if not share_id or (len(parts) == 3 and not target_locator):
         raise ValueError("无效的 PikPak 分享链接格式")
-    return share_id, target_id
+    return share_id, target_locator
 
 
 class PikPakClient:
@@ -538,7 +538,7 @@ class PikPakClient:
     # ── 分享链接相关 ──
 
     async def get_share_file_list(self, share_link: str, pass_code: str = "") -> Dict[str, Any]:
-        share_id, target_id = _parse_pikpak_share_location(share_link)
+        share_id, target_locator = _parse_pikpak_share_location(share_link)
         result = await self.client._request_get(
             url=f"https://{self.client.PIKPAK_API_HOST}/drive/v1/share",
             params={
@@ -546,7 +546,7 @@ class PikPakClient:
                 "thumbnail_size": "SIZE_LARGE",
                 "order": "3",
                 "share_id": share_id,
-                "parent_id": target_id,
+                "parent_id": target_locator,
                 "pass_code": pass_code or None,
             },
         )
@@ -554,17 +554,8 @@ class PikPakClient:
             raise RuntimeError("PikPak 分享接口响应格式无效")
 
         roots = list(result.get("files", []) or [])
-        if target_id:
-            target_is_returned = (
-                len(roots) == 1
-                and str(roots[0].get("id") or "").strip() == target_id
-            )
-            target_is_parent = bool(roots) and all(
-                str(item.get("parent_id") or "").strip() == target_id
-                for item in roots
-            )
-            if not (target_is_returned or target_is_parent):
-                raise RuntimeError("PikPak 返回的分享内容与链接目标节点不一致")
+        if not roots:
+            raise RuntimeError("PikPak 分享目标没有返回可解析节点")
 
         pass_code_token = result.get("pass_code_token", "")
         files: List[Dict] = []
@@ -572,7 +563,7 @@ class PikPakClient:
             await self._collect_share_files(share_id, pass_code_token, item, files)
         return {
             "share_id": share_id,
-            "target_id": target_id,
+            "target_locator": target_locator,
             "pass_code_token": pass_code_token,
             "files": files,
         }
