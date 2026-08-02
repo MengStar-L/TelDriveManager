@@ -320,6 +320,8 @@ class IsolatedShareRestoreClientTests(unittest.IsolatedAsyncioTestCase):
             files,
             [
                 {
+                    "source_file_id": "selected-1",
+                    "destination_file_id": "restored-1",
                     "name": "one.mp4",
                     "url": "https://download/one",
                     "file_id": "restored-1",
@@ -327,6 +329,8 @@ class IsolatedShareRestoreClientTests(unittest.IsolatedAsyncioTestCase):
                     "size": 100,
                 },
                 {
+                    "source_file_id": "selected-2",
+                    "destination_file_id": "restored-2",
                     "name": "two.mp4",
                     "url": "https://download/two",
                     "file_id": "restored-2",

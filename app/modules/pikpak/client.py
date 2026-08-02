@@ -347,6 +347,8 @@ class PikPakClient:
                                 break
                             name = str(child.get("name") or "")
                             resolved.append({
+                                "source_file_id": selected_id,
+                                "destination_file_id": destination_id,
                                 "name": name,
                                 "url": url,
                                 "file_id": destination_id,
