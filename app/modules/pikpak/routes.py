@@ -1432,6 +1432,17 @@ async def api_share_download(request: Request):
             name_overrides = {}
         if not share_id or not file_ids:
             return JSONResponse({"error": "缺少参数"}, status_code=400)
+        name_overrides = {
+            str(file_id or "").strip(): str(name or "").strip()
+            for file_id, name in name_overrides.items()
+            if str(file_id or "").strip() and str(name or "").strip()
+        }
+        unknown_override_ids = set(name_overrides) - set(file_ids)
+        if unknown_override_ids:
+            return JSONResponse(
+                {"error": "文件名覆盖包含未勾选的源文件 ID"},
+                status_code=400,
+            )
         missing_paths = [file_id for file_id in file_ids if not file_paths.get(file_id)]
         if missing_paths:
             return JSONResponse(
@@ -1854,14 +1865,6 @@ async def _process_share_download(share_id: str, file_ids: List[str], pass_code_
             "status": f"隔离转存已提交，共 {total} 项，正在解析所选文件的下载链接...",
         })
 
-        orig_paths_by_name: Dict[str, List[str]] = {}
-        if rename_by_folder and file_paths:
-            for _, path in file_paths.items():
-                name = path.rsplit("/", 1)[-1]
-                orig_paths_by_name.setdefault(name, []).append(path)
-            for paths in orig_paths_by_name.values():
-                paths.sort(key=_natural_sort_key)
-
         all_urls = await pikpak.wait_for_isolated_share_urls(
             restore_receipt,
             timeout=share_url_timeout,
@@ -1908,18 +1911,13 @@ async def _process_share_download(share_id: str, file_ids: List[str], pass_code_
                         target_dir = download_dir
                     opts["dir"] = target_dir.replace("\\", "/")
 
-                original_path = ""
-                if rename_by_folder:
-                    name = url_info.get("name", "")
-                    if orig_paths_by_name.get(name):
-                        original_path = orig_paths_by_name[name].pop(0)
-
+                original_path = str(url_info.get("source_path") or url_info.get("path") or "")
                 output_name = _maybe_rename_by_folder(url_info, rename_by_folder, original_path)
-                # Jellyfin 一键格式化（分享）：按原 basename 覆盖（完整名，含扩展名），优先于层级重命名
-                if name_overrides:
-                    override_name = name_overrides.get(str(url_info.get("name", "") or ""))
-                    if override_name:
-                        output_name = override_name
+                # Jellyfin 输出名按源文件 ID 覆盖，优先于层级重命名。
+                source_file_id = str(url_info.get("source_file_id") or "").strip()
+                override_name = (name_overrides or {}).get(source_file_id)
+                if override_name:
+                    output_name = override_name
                 display_info = dict(url_info)
                 if output_name:
                     opts["out"] = output_name

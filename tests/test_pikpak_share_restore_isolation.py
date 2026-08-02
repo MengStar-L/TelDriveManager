@@ -549,6 +549,22 @@ class ShareSelectionContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status_code, 400)
         self.assertIn("文件路径元数据不完整", response.body.decode("utf-8"))
 
+    async def test_share_download_endpoint_rejects_override_for_unselected_id(self):
+        class Request:
+            async def json(self):
+                return {
+                    "share_id": "share-1",
+                    "file_ids": ["selected-1"],
+                    "pass_code_token": "pass-token",
+                    "file_paths": {"selected-1": "Movie/original.mp4"},
+                    "name_overrides": {"other-id": "Wrong.mp4"},
+                }
+
+        response = await pikpak_routes.api_share_download(Request())
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("未勾选的源文件 ID", response.body.decode("utf-8"))
+
     async def test_selected_paths_bind_by_source_id_when_names_change(self):
         files = [
             {
@@ -719,6 +735,7 @@ class ShareDownloadIsolationRouteTests(unittest.IsolatedAsyncioTestCase):
             ["selected-1"],
             "pass-token",
             file_paths={"selected-1": "Movie/paid_8k.mp4"},
+            name_overrides={"selected-1": "Series S01E01.mp4"},
         )
 
         self.assertEqual(pikpak.start_call[1], ["selected-1"])
@@ -733,6 +750,7 @@ class ShareDownloadIsolationRouteTests(unittest.IsolatedAsyncioTestCase):
             ["https://download/selected"],
         )
         self.assertEqual(aria2.added[0][1]["dir"], "C:/downloads")
+        self.assertEqual(aria2.added[0][1]["out"], "Series S01E01.mp4")
         self.assertEqual(pikpak.deleted, [["owned-scope"]])
 
     async def test_serial_mode_enqueues_only_the_isolated_url(self):

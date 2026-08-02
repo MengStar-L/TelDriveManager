@@ -54,7 +54,15 @@ const sandbox = {
         share_id: 'share-1',
         pass_code_token: 'token-1',
     },
-    shareFileData: [{ id: 'file-1', name: 'original.mp4', path: 'parent-folder/original.mp4' }],
+    shareFileData: [{
+        id: 'file-1',
+        source_file_id: 'file-1',
+        name: 'original.mp4',
+        source_name: 'original.mp4',
+        path: 'parent-folder/Series S01E01.mp4',
+        source_path: 'parent-folder/original.mp4',
+        output_name: 'Series S01E01.mp4',
+    }],
     shareDownloadSubmitting: false,
     document: {
         getElementById(id) {
@@ -68,8 +76,11 @@ const sandbox = {
     getTelDriveTargetPath() {
         return '/target';
     },
+    getPikPakShareSourceId(item = {}) {
+        return String(item.source_file_id || item.id || '').trim();
+    },
     buildJellyfinOverrides() {
-        return {};
+        return { 'file-1': 'Series S01E01.mp4' };
     },
     async fetch(url, options) {
         requests.push({ url, body: JSON.parse(options.body) });
@@ -98,6 +109,13 @@ assert.strictEqual(renameCheckbox.checked, false);
     await sandbox.downloadUnifiedShareFiles();
     assert.strictEqual(requests[0].url, '/api/pikpak/share/download');
     assert.strictEqual(requests[0].body.rename_by_folder, true);
+    assert.deepStrictEqual(requests[0].body.file_ids, ['file-1']);
+    assert.deepStrictEqual(requests[0].body.file_paths, {
+        'file-1': 'parent-folder/original.mp4',
+    });
+    assert.deepStrictEqual(requests[0].body.name_overrides, {
+        'file-1': 'Series S01E01.mp4',
+    });
 
     renameCheckbox.checked = false;
     await sandbox.downloadUnifiedShareFiles();

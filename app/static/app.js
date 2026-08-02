@@ -2027,8 +2027,12 @@ function renderMagnetParseResult(result = {}) {
     updatePickerSelection('magnet');
 }
 
+function getPikPakShareSourceId(item = {}) {
+    return String(item.source_file_id || item.id || '').trim();
+}
+
 function normalizePikPakShareFile(item = {}) {
-    const sourceFileId = String(item.source_file_id || item.id || '').trim();
+    const sourceFileId = getPikPakShareSourceId(item);
     const sourceName = String(item.source_name || item.name || '').trim();
     const sourcePath = String(item.source_path || item.path || sourceName).replace(/\\/g, '/').trim();
     return {
@@ -5478,8 +5482,8 @@ async function downloadUnifiedShareFiles() {
     if (!shareCurrentData || shareDownloadSubmitting) return;
     const checkboxes = document.querySelectorAll('#magnetFileList input[data-role="file"]:checked');
     const selectedSet = new Set(Array.from(checkboxes).map(cb => String(cb.value || '')));
-    const orderedSelectedItems = shareFileData.filter(item => selectedSet.has(String(item.id || '')));
-    const selectedIds = orderedSelectedItems.map(item => item.id);
+    const orderedSelectedItems = shareFileData.filter(item => selectedSet.has(getPikPakShareSourceId(item)));
+    const selectedIds = orderedSelectedItems.map(getPikPakShareSourceId);
 
     if (!selectedIds.length) return alert('请先选择需要下载的文件');
 
@@ -5487,7 +5491,10 @@ async function downloadUnifiedShareFiles() {
     const renameByFolder = document.getElementById('magnetRenameByFolder')?.checked ?? false;
     const teldrivePath = getTelDriveTargetPath('magnetTeldrivePath');
     const filePaths = Object.fromEntries(
-        orderedSelectedItems.map(item => [item.id, item.path || item.name || ''])
+        orderedSelectedItems.map(item => [
+            getPikPakShareSourceId(item),
+            item.source_path || item.path || item.source_name || item.name || '',
+        ])
     );
     const btn = document.getElementById('magnetDownloadBtn');
     if (!btn) return;
@@ -5818,8 +5825,8 @@ async function downloadShareFiles() {
     const checkboxes = document.querySelectorAll('#fileList input[data-role="file"]:checked');
     const selectedSet = new Set(Array.from(checkboxes).map(cb => String(cb.value || '')));
 
-    const orderedSelectedItems = shareFileData.filter(item => selectedSet.has(String(item.id || '')));
-    const selectedIds = orderedSelectedItems.map(item => item.id);
+    const orderedSelectedItems = shareFileData.filter(item => selectedSet.has(getPikPakShareSourceId(item)));
+    const selectedIds = orderedSelectedItems.map(getPikPakShareSourceId);
     
     if (!selectedIds.length) return alert('请先选择需要下载的分享节点');
 
@@ -5827,7 +5834,10 @@ async function downloadShareFiles() {
     const renameByFolder = document.getElementById('shareRenameByFolder').checked;
     const teldrivePath = getTelDriveTargetPath('shareTeldrivePath');
     const filePaths = Object.fromEntries(
-        orderedSelectedItems.map(item => [item.id, item.path || item.name || ''])
+        orderedSelectedItems.map(item => [
+            getPikPakShareSourceId(item),
+            item.source_path || item.path || item.source_name || item.name || '',
+        ])
     );
     
     const btn = document.getElementById('downloadShareBtn');
