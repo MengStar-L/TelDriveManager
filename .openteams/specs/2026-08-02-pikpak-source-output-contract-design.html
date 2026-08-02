@@ -75,7 +75,7 @@
 <main>
   <header>
     <h1>PikPak 解析身份与输出命名契约设计</h1>
-    <p class="meta">日期：2026-08-02 · 状态：用户已确认设计方向，待书面规格复核</p>
+    <p class="meta">日期：2026-08-02 · 状态：用户已确认修订方向，待书面规格复核</p>
     <p class="meta">适用范围：PikPak 分享链接解析、Jellyfin 格式化、隔离恢复、路径绑定与 aria2/串行队列推送。</p>
   </header>
 
@@ -84,6 +84,9 @@
     <p>当前链路把“源文件身份”和“最终输出名称”混在同一组 <code>name/path</code> 字段中。Jellyfin 格式化直接改写这些字段后，后端使用新名称校验 PikPak 返回的原文件，导致正确文件被误判为恢复结果不一致。</p>
     <div class="callout">
       核心规则：文件身份只由分享作用域和 <code>source_file_id</code> 决定；名称只作为元数据。Jellyfin、层级重命名和 aria2 输出名均不得改变或参与源文件身份判断。
+    </div>
+    <div class="callout warning">
+      真实接口确认：深层分享 URL 最后一段是 PikPak 的不透明目标定位符，不是文件 ID。它必须作为首个分享请求的 <code>parent_id</code> 原样发送，但不得与返回节点的 <code>id</code> 或 <code>parent_id</code> 比较。
     </div>
   </section>
 
@@ -103,7 +106,7 @@
     <h2>目标与非目标</h2>
     <h3>目标</h3>
     <ul>
-      <li>深层分享链接保留明确的目标节点作用域，不允许静默退回分享根目录。</li>
+      <li>深层分享链接的目标定位符必须显式发送，不允许静默省略定位符后重试分享根目录。</li>
       <li>解析产生的源 ID、源名称和源路径在一次工作流内保持不可变。</li>
       <li>Jellyfin 格式化只改变预览和最终输出名称。</li>
       <li>隔离恢复完全依赖源 ID到目标 ID的任务映射，不按名称或返回顺序猜测。</li>
@@ -123,6 +126,7 @@
     <table>
       <thead><tr><th>字段</th><th>含义</th><th>可变性</th><th>用途</th></tr></thead>
       <tbody>
+        <tr><td><code>target_locator</code></td><td>深层分享 URL 中的不透明目标定位符</td><td><span class="badge">不可变</span></td><td>仅作为首个分享请求的 <code>parent_id</code>；不参与文件身份判断</td></tr>
         <tr><td><code>source_file_id</code></td><td>分享中的原始文件 ID</td><td><span class="badge">不可变</span></td><td>勾选、恢复、映射与安全校验</td></tr>
         <tr><td><code>source_name</code></td><td>PikPak 返回的原始文件名</td><td><span class="badge">不可变</span></td><td>原始元数据与诊断日志</td></tr>
         <tr><td><code>source_path</code></td><td>分享作用域内的原始相对路径</td><td><span class="badge">不可变</span></td><td>目录结构映射和层级重命名来源</td></tr>
@@ -136,9 +140,10 @@
   <section>
     <h2>端到端数据流</h2>
     <pre class="flow">分享 URL
-  -> 后端解析 share_id + 可选 target_id
-  -> PikPak 分享接口按明确 target_id 读取目标作用域
-  -> 校验响应未退回分享根目录
+  -> 后端解析 share_id + 可选 target_locator
+  -> PikPak 分享接口显式发送 parent_id=target_locator
+  -> 不使用省略 target_locator 的根目录请求重试
+  -> 只从接口实际返回节点提取真实 source_file_id
   -> 生成不可变 source_file_id/source_name/source_path
   -> 前端树使用 output_name ?? source_name 展示
   -> Jellyfin 只写 output_name
@@ -162,7 +167,7 @@
       <tbody>
         <tr>
           <td><code>app/modules/pikpak/client.py</code></td>
-          <td>接收明确的分享 ID 和目标作用域；生成不可变源元数据；提交隔离恢复；解析源 ID到目标 ID映射；直链结果必须携带两个 ID。</td>
+          <td>解析分享 ID 和不透明目标定位符并显式请求对应作用域；只从响应节点生成不可变源元数据；提交隔离恢复；解析源 ID到目标 ID映射；直链结果必须携带两个 ID。</td>
         </tr>
         <tr>
           <td><code>app/modules/pikpak/routes.py</code></td>
@@ -215,13 +220,15 @@
   <section>
     <h2>作用域与失败策略</h2>
     <ul>
-      <li>后端自行解析分享 URL，得到 <code>share_id</code> 与可选 <code>target_id</code>；客户端方法不再依赖 SDK 内部正则隐式决定作用域。</li>
-      <li>深层链接有 <code>target_id</code> 时，只允许返回该文件或该文件夹子树。PikPak 返回根目录内容、无效目标或无法证明作用域时，解析失败。</li>
+      <li>后端自行解析分享 URL，得到 <code>share_id</code> 与可选 <code>target_locator</code>；客户端方法不再依赖 SDK 内部正则隐式决定作用域。</li>
+      <li>深层链接有 <code>target_locator</code> 时，首个 <code>/drive/v1/share</code> 请求必须显式发送 <code>parent_id=target_locator</code>；该值是 API 定位符，不是文件 ID。</li>
+      <li>客户端不得把 <code>target_locator</code> 与响应节点的 <code>id/parent_id</code> 比较，也不得调用 <code>/share/detail</code> 把它当作目录 ID。真实源 ID 只能来自首个响应及其后按真实目录 ID 递归得到的节点。</li>
+      <li>首个请求失败、响应格式无效或没有可解析节点时直接失败；禁止移除 <code>target_locator</code> 后再次请求分享根目录作为回退。</li>
       <li>恢复任务源 ID 集合必须等于勾选 ID 集合；目标 ID 集合必须等于隔离目录直属成员集合。</li>
       <li>每条直链必须携带可回溯的 <code>source_file_id</code>。缺失、重复或未知 ID 时整批失败。</li>
       <li>任何失败路径向 aria2 和串行队列推送 0 条链接，并且只清理本次创建的隔离目录。</li>
     </ul>
-    <div class="callout danger">禁止回退到分享根目录，禁止按名称搜索替代文件，禁止按返回顺序猜测源文件，禁止部分成功后继续推送。</div>
+    <div class="callout danger">禁止省略目标定位符重试分享根目录，禁止将目标定位符冒充文件 ID，禁止按名称搜索替代文件，禁止按返回顺序猜测源文件，禁止部分成功后继续推送。</div>
   </section>
 
   <section>
@@ -237,12 +244,13 @@
       <li>正确恢复映射配合任意输出名均能通过，不再发生名称误判。</li>
       <li>源 ID 缺失、多余、重复，或隔离目录成员不一致时推送 0 条。</li>
       <li>同名文件按照源 ID 绑定各自原始路径和输出名。</li>
-      <li>深层分享链接只解析目标作用域；模拟接口退回根目录时必须失败。</li>
+      <li>深层分享请求必须携带 URL 中的目标定位符；接口失败时不得发起省略定位符的根目录重试。</li>
+      <li>目标定位符与响应节点 ID 不同仍可正常解析，响应节点真实 ID 成为 <code>source_file_id</code>。</li>
       <li>Jellyfin、层级重命名、维持目录结构四种组合均覆盖。</li>
     </ul>
     <h3>真实链路验收</h3>
     <ol>
-      <li>使用出现错误的深层分享链接，记录解析出的源 ID、源路径和目标作用域，不触发 aria2。</li>
+      <li>使用出现错误的深层分享链接，确认请求携带目标定位符，并记录解析出的真实源 ID 和源路径，不触发 aria2。</li>
       <li>对同一批 12 个文件先执行 Jellyfin 格式化，再提交隔离恢复。</li>
       <li>确认任务映射、隔离目录成员和选中 ID 完全一致。</li>
       <li>确认 aria2 恰好收到 12 条链接，输出名为 Jellyfin 名称，目录仍来自原始路径。</li>
@@ -253,9 +261,9 @@
   <section>
     <h2>完成标准</h2>
     <ul>
-      <li>解析结果不再因深层链接目标被忽略而出现其他内容。</li>
+      <li>深层链接目标定位符被显式发送，且不会因被误当作文件 ID 而拒绝正确响应。</li>
       <li>Jellyfin 格式化后可以正常完成隔离恢复和推送。</li>
-      <li>所有身份判断均以源 ID/目标 ID 为依据，代码中不存在名称集合身份校验。</li>
+      <li>所有文件身份判断均以源 ID/恢复目标 ID 为依据；目标定位符只决定首个请求作用域，代码中不存在名称集合或定位符身份校验。</li>
       <li>自动化测试通过，真实 12 文件场景通过，aria2 推送数量与勾选数量严格一致。</li>
     </ul>
   </section>
