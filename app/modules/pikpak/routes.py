@@ -225,27 +225,28 @@ def _normalize_selected_ids(file_ids: List[str]) -> List[str]:
 def _bind_selected_share_paths(
     files: List[dict], file_ids: List[str], file_paths: Dict[str, str]
 ) -> List[dict]:
-    expected_paths = [
-        str(file_paths.get(file_id) or "").strip().replace("\\", "/")
-        for file_id in file_ids
-    ]
-    expected_names = [posixpath.basename(path) for path in expected_paths]
-    actual_names = [str(item.get("name") or "") for item in files]
-    if sorted(actual_names) != sorted(expected_names):
+    expected_ids = [str(file_id or "").strip() for file_id in file_ids]
+    files_by_source_id: Dict[str, dict] = {}
+    for item in files:
+        source_id = str(item.get("source_file_id") or "").strip()
+        if not source_id or source_id in files_by_source_id:
+            raise RuntimeError(
+                "PikPak 隔离解析结果的源文件 ID 无效，本次未推送任何下载链接"
+            )
+        files_by_source_id[source_id] = item
+    if set(files_by_source_id) != set(expected_ids):
         raise RuntimeError(
-            "PikPak 隔离解析结果与勾选文件不一致，本次未推送任何下载链接"
+            "PikPak 隔离解析结果与勾选文件 ID 不一致，本次未推送任何下载链接"
         )
 
-    paths_by_name: Dict[str, List[str]] = {}
-    for path in expected_paths:
-        paths_by_name.setdefault(posixpath.basename(path), []).append(path)
-    for paths in paths_by_name.values():
-        paths.sort(key=_natural_sort_key)
-
     rebound = []
-    for item in files:
-        copy = dict(item)
-        copy["path"] = paths_by_name[copy["name"]].pop(0)
+    for source_id in expected_ids:
+        source_path = str(file_paths.get(source_id) or "").strip().replace("\\", "/")
+        copy = dict(files_by_source_id[source_id])
+        copy["source_file_id"] = source_id
+        copy["source_name"] = posixpath.basename(source_path)
+        copy["source_path"] = source_path
+        copy["path"] = source_path
         rebound.append(copy)
     return rebound
 

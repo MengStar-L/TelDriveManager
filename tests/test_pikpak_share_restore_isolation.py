@@ -549,29 +549,13 @@ class ShareSelectionContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status_code, 400)
         self.assertIn("文件路径元数据不完整", response.body.decode("utf-8"))
 
-    async def test_isolated_result_mismatch_fails_instead_of_filtering(self):
+    async def test_selected_paths_bind_by_source_id_when_names_change(self):
         files = [
             {
-                "name": "SAVR-1127-1.mp4",
-                "path": "SAVR-1127/SAVR-1127-1.mp4",
-                "url": "https://download/old",
-            }
-        ]
-
-        with self.assertRaisesRegex(
-            RuntimeError, "隔离解析结果与勾选文件不一致"
-        ):
-            pikpak_routes._bind_selected_share_paths(
-                files,
-                ["selected-1"],
-                {"selected-1": "Movie/paid_8k.mp4"},
-            )
-
-    async def test_selected_paths_replace_restore_scope_paths(self):
-        files = [
-            {
-                "name": "paid_8k.mp4",
-                "path": "temporary-wrapper/paid_8k.mp4",
+                "source_file_id": "selected-1",
+                "destination_file_id": "restored-1",
+                "file_id": "restored-1",
+                "name": "original.mkv",
                 "url": "https://download/selected",
             }
         ]
@@ -579,10 +563,49 @@ class ShareSelectionContractTests(unittest.IsolatedAsyncioTestCase):
         result = pikpak_routes._bind_selected_share_paths(
             files,
             ["selected-1"],
-            {"selected-1": "Movie/paid_8k.mp4"},
+            {"selected-1": "Series/original.mkv"},
         )
 
-        self.assertEqual(result[0]["path"], "Movie/paid_8k.mp4")
+        self.assertEqual(result[0]["path"], "Series/original.mkv")
+        self.assertEqual(result[0]["source_path"], "Series/original.mkv")
+        self.assertEqual(result[0]["source_name"], "original.mkv")
+
+    async def test_duplicate_basenames_bind_to_their_own_source_ids(self):
+        files = [
+            {"source_file_id": "source-b", "name": "same.mkv"},
+            {"source_file_id": "source-a", "name": "same.mkv"},
+        ]
+
+        result = pikpak_routes._bind_selected_share_paths(
+            files,
+            ["source-a", "source-b"],
+            {
+                "source-a": "Season A/same.mkv",
+                "source-b": "Season B/same.mkv",
+            },
+        )
+
+        self.assertEqual(
+            [item["source_file_id"] for item in result],
+            ["source-a", "source-b"],
+        )
+        self.assertEqual(
+            [item["path"] for item in result],
+            ["Season A/same.mkv", "Season B/same.mkv"],
+        )
+
+    async def test_unknown_or_duplicate_source_ids_fail_closed(self):
+        files = [
+            {"source_file_id": "selected-1", "name": "one.mkv"},
+            {"source_file_id": "selected-1", "name": "two.mkv"},
+        ]
+
+        with self.assertRaisesRegex(RuntimeError, "源文件 ID"):
+            pikpak_routes._bind_selected_share_paths(
+                files,
+                ["selected-1", "selected-2"],
+                {"selected-1": "one.mkv", "selected-2": "two.mkv"},
+            )
 
 
 class ShareDownloadIsolationRouteTests(unittest.IsolatedAsyncioTestCase):
@@ -666,6 +689,9 @@ class ShareDownloadIsolationRouteTests(unittest.IsolatedAsyncioTestCase):
                 self.wait_call = receipt
                 return [
                     {
+                        "source_file_id": "selected-1",
+                        "destination_file_id": "restored-1",
+                        "file_id": "restored-1",
                         "name": "paid_8k.mp4",
                         "path": "temporary/paid_8k.mp4",
                         "url": "https://download/selected",
@@ -726,6 +752,9 @@ class ShareDownloadIsolationRouteTests(unittest.IsolatedAsyncioTestCase):
             ):
                 return [
                     {
+                        "source_file_id": "selected-1",
+                        "destination_file_id": "restored-1",
+                        "file_id": "restored-1",
                         "name": "paid_8k.mp4",
                         "path": "temporary/paid_8k.mp4",
                         "url": "https://download/selected",
