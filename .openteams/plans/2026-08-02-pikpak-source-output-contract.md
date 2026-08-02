@@ -2,7 +2,7 @@
 
 **Goal:** Make PikPak deep-share parsing, isolated restore correlation, Jellyfin formatting, directory mapping, and final output naming use one explicit ID-based contract so correct files are never rejected or replaced because their names changed.
 
-**Architecture:** Parse a PikPak URL into an explicit `share_id` and optional `target_id`, then preserve immutable source metadata through the frontend. Correlate restored files with selected files through PikPak's `source_file_id -> destination_file_id` task mapping; bind paths and output overrides by `source_file_id`, while keeping names out of all identity checks.
+**Architecture:** Parse a PikPak URL into an explicit `share_id` and optional opaque `target_locator`, send that locator only as the initial share request's `parent_id`, then preserve immutable source metadata from the returned nodes through the frontend. Correlate restored files with selected files through PikPak's `source_file_id -> destination_file_id` task mapping; bind paths and output overrides by `source_file_id`, while keeping names and the target locator out of all file-identity checks.
 
 **Tech Stack:** Python 3.11+, FastAPI, `pikpakapi`, vanilla browser JavaScript, Python `unittest`, Node.js `assert`/`vm` tests.
 
@@ -10,7 +10,7 @@
 
 ## File Structure
 
-- Modify: `D:\Code\TelDriveManager\app\modules\pikpak\client.py` - own share URL parsing, request explicit target scope, reject root fallback, emit immutable source metadata, and attach source/destination IDs to resolved restore results.
+- Modify: `D:\Code\TelDriveManager\app\modules\pikpak\client.py` - own share URL parsing, send the opaque target locator explicitly without treating it as a file ID, reject locator-free retry fallback, emit immutable source metadata, and attach source/destination IDs to resolved restore results.
 - Modify: `D:\Code\TelDriveManager\app\modules\pikpak\routes.py` - bind restored results and output overrides by source ID instead of filename and keep structure mapping based on source paths.
 - Modify: `D:\Code\TelDriveManager\app\static\app.js` - normalize immutable share records, render `output_name` without mutating source fields, and submit paths/overrides keyed by source ID.
 - Modify: `D:\Code\TelDriveManager\app\static\index.html` - increment the `app.js` cache-busting query so deployed browsers load the contract fix.
@@ -30,7 +30,7 @@ Add a `ShareListScopeTests` class using `build_client()` and a raw client that r
 
 ```python
 class ShareListScopeTests(unittest.IsolatedAsyncioTestCase):
-    async def test_deep_link_requests_explicit_target_and_preserves_source_metadata(self):
+    async def test_deep_link_sends_opaque_locator_and_uses_returned_node_id(self):
         class RawClient:
             PIKPAK_API_HOST = "api-drive.mypikpak.com"
 
@@ -42,8 +42,8 @@ class ShareListScopeTests(unittest.IsolatedAsyncioTestCase):
                 return {
                     "pass_code_token": "pass-token",
                     "files": [{
-                        "id": "source-1",
-                        "parent_id": "target-folder",
+                        "id": "actual-source-1",
+                        "parent_id": "actual-parent-1",
                         "name": "original.mkv",
                         "kind": "drive#file",
                         "size": "100",
@@ -54,35 +54,34 @@ class ShareListScopeTests(unittest.IsolatedAsyncioTestCase):
         raw = RawClient()
         client = build_client(raw)
         result = await client.get_share_file_list(
-            "https://mypikpak.com/s/share-1/target-folder"
+            "https://mypikpak.com/s/share-1/opaque-target-locator"
         )
 
         self.assertEqual(raw.calls[0][1]["share_id"], "share-1")
-        self.assertEqual(raw.calls[0][1]["parent_id"], "target-folder")
-        self.assertEqual(result["target_id"], "target-folder")
-        self.assertEqual(result["files"][0]["source_file_id"], "source-1")
+        self.assertEqual(raw.calls[0][1]["parent_id"], "opaque-target-locator")
+        self.assertEqual(result["target_locator"], "opaque-target-locator")
+        self.assertEqual(result["files"][0]["source_file_id"], "actual-source-1")
         self.assertEqual(result["files"][0]["source_name"], "original.mkv")
         self.assertEqual(result["files"][0]["source_path"], "original.mkv")
 
-    async def test_deep_link_rejects_share_root_fallback(self):
+    async def test_deep_link_failure_does_not_retry_without_locator(self):
         class RawClient:
             PIKPAK_API_HOST = "api-drive.mypikpak.com"
 
-            async def _request_get(self, url, params=None):
-                return {
-                    "pass_code_token": "pass-token",
-                    "files": [{
-                        "id": "unrelated-folder",
-                        "parent_id": "",
-                        "name": "Unrelated",
-                        "kind": "drive#folder",
-                    }],
-                }
+            def __init__(self):
+                self.calls = []
 
-        with self.assertRaisesRegex(RuntimeError, "链接目标节点不一致"):
-            await build_client(RawClient()).get_share_file_list(
-                "https://mypikpak.com/s/share-1/target-folder"
+            async def _request_get(self, url, params=None):
+                self.calls.append((url, params))
+                raise RuntimeError("target not found")
+
+        raw = RawClient()
+        with self.assertRaisesRegex(RuntimeError, "target not found"):
+            await build_client(raw).get_share_file_list(
+                "https://mypikpak.com/s/share-1/opaque-target-locator"
             )
+        self.assertEqual(len(raw.calls), 1)
+        self.assertEqual(raw.calls[0][1]["parent_id"], "opaque-target-locator")
 ```
 
 - **Step 2: Run the two tests and verify they fail**
@@ -93,7 +92,7 @@ Run:
 .\.venv\Scripts\python.exe -m unittest tests.test_pikpak_share_restore_isolation.ShareListScopeTests -v
 ```
 
-Expected: FAIL because `get_share_file_list()` delegates URL parsing to `pikpakapi`, returns no `target_id`/source fields, and does not reject a root fallback.
+Expected: FAIL because `get_share_file_list()` either delegates URL parsing to `pikpakapi`, returns no `target_locator`/source fields, or incorrectly compares the opaque locator with returned node IDs.
 
 - **Step 3: Parse the URL with the standard URL parser**
 
@@ -110,20 +109,20 @@ def _parse_pikpak_share_location(share_link: str) -> tuple[str, Optional[str]]:
     if len(parts) not in {2, 3} or parts[0].lower() != "s":
         raise ValueError("无效的 PikPak 分享链接格式")
     share_id = parts[1].strip()
-    target_id = parts[2].strip() if len(parts) == 3 else None
-    if not share_id or (len(parts) == 3 and not target_id):
+    target_locator = parts[2].strip() if len(parts) == 3 else None
+    if not share_id or (len(parts) == 3 and not target_locator):
         raise ValueError("无效的 PikPak 分享链接格式")
-    return share_id, target_id
+    return share_id, target_locator
 ```
 
-Keep query/fragment removal in the route, but do not use a regex or the SDK's internal regex to decide the target scope.
+Keep query/fragment removal in the route, but do not use a regex or the SDK's internal regex to decide the target scope. The second path segment is deliberately named `target_locator` because the real API proves that it is not a file ID.
 
-- **Step 4: Request the share endpoint with explicit IDs and validate the first response**
+- **Step 4: Send the opaque locator explicitly and trust only returned node IDs**
 
 Replace the existing `get_share_info(share_link, ...)` call with:
 
 ```python
-share_id, target_id = _parse_pikpak_share_location(share_link)
+share_id, target_locator = _parse_pikpak_share_location(share_link)
 result = await self.client._request_get(
     url=f"https://{self.client.PIKPAK_API_HOST}/drive/v1/share",
     params={
@@ -131,24 +130,18 @@ result = await self.client._request_get(
         "thumbnail_size": "SIZE_LARGE",
         "order": "3",
         "share_id": share_id,
-        "parent_id": target_id,
+        "parent_id": target_locator,
         "pass_code": pass_code or None,
     },
 )
 if not isinstance(result, dict):
     raise RuntimeError("PikPak 分享接口响应格式无效")
 roots = list(result.get("files", []) or [])
-if target_id:
-    target_is_returned = len(roots) == 1 and str(roots[0].get("id") or "") == target_id
-    target_is_parent = bool(roots) and all(
-        str(item.get("parent_id") or "").strip() == target_id
-        for item in roots
-    )
-    if not (target_is_returned or target_is_parent):
-        raise RuntimeError("PikPak 返回的分享内容与链接目标节点不一致")
+if not roots:
+    raise RuntimeError("PikPak 分享目标没有返回可解析节点")
 ```
 
-Build the response with `target_id` and let `_collect_share_files()` recurse only from the validated roots.
+Do not compare `target_locator` with any returned `id` or `parent_id`, and do not retry without it. Let `_collect_share_files()` recurse only from the returned roots, using the real node IDs in that response for subsequent `/share/detail` calls.
 
 - **Step 5: Emit immutable source fields for every leaf file**
 
@@ -173,7 +166,7 @@ Return:
 ```python
 return {
     "share_id": share_id,
-    "target_id": target_id,
+    "target_locator": target_locator,
     "pass_code_token": result.get("pass_code_token", ""),
     "files": files,
 }
@@ -187,7 +180,7 @@ Run:
 .\.venv\Scripts\python.exe -m unittest tests.test_pikpak_share_restore_isolation.ShareListScopeTests -v
 ```
 
-Expected: PASS; the recorded request carries `parent_id=target-folder`, source metadata is present, and unrelated root content raises before recursion.
+Expected: PASS; the recorded request carries `parent_id=opaque-target-locator`, the different returned node ID becomes `source_file_id`, and an API failure produces exactly one request with no locator-free retry.
 
 - **Step 7: Commit the scope contract**
 
@@ -807,24 +800,26 @@ Use the existing configured PikPak account and call only `get_share_file_list()`
 
 ```text
 share_id
-target_id
+target_locator
 source_file_id count
 source_path list
 ```
 
-Expected: the returned files belong only to the URL's target scope. A response that cannot prove the target scope raises and produces no download job.
+Expected: `target_locator` equals the URL's final segment, the initial request sends it as `parent_id`, and every source ID comes from an actual returned node. The client never compares the locator with node IDs and never retries without it.
 
 - **Step 2: Exercise isolated restore without aria2**
 
-For the selected 12 source IDs, call `start_isolated_share_restore()` and `wait_for_isolated_share_urls()` directly. Assert:
+Select all leaf source IDs returned by the reported link, then call `start_isolated_share_restore()` and `wait_for_isolated_share_urls()` directly. Assert:
 
 ```python
+assert selected_ids
+assert receipt.selected_ids == tuple(selected_ids)
 assert {item["source_file_id"] for item in resolved} == set(selected_ids)
 assert len({item["destination_file_id"] for item in resolved}) == len(selected_ids)
 assert all(item["url"] for item in resolved)
 ```
 
-Expected: exactly 12 correlated results; no aria2 or serial-queue method is called.
+Expected: the resolved count equals the parsed leaf count; no aria2 or serial-queue method is called.
 
 - **Step 3: Clean only the owned scope**
 
@@ -834,6 +829,6 @@ Expected: the temporary `.teldrive-share-*` directory is removed. No root folder
 
 - **Step 4: Report acceptance evidence**
 
-Report the parsed target ID, selected/resolved counts, source-ID equality, destination-ID uniqueness, and cleanup result. Do not include account credentials, pass-code tokens, signed download URLs, or session data.
+Report the parsed target locator, selected/resolved counts, source-ID equality, destination-ID uniqueness, and cleanup result. Do not include account credentials, pass-code tokens, signed download URLs, or session data.
 
 Expected: delivery evidence demonstrates that the corrected contract works before code is pushed or deployed.
