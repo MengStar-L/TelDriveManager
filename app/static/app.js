@@ -2027,6 +2027,22 @@ function renderMagnetParseResult(result = {}) {
     updatePickerSelection('magnet');
 }
 
+function normalizePikPakShareFile(item = {}) {
+    const sourceFileId = String(item.source_file_id || item.id || '').trim();
+    const sourceName = String(item.source_name || item.name || '').trim();
+    const sourcePath = String(item.source_path || item.path || sourceName).replace(/\\/g, '/').trim();
+    return {
+        ...item,
+        id: sourceFileId,
+        source_file_id: sourceFileId,
+        name: sourceName,
+        source_name: sourceName,
+        path: sourcePath,
+        source_path: sourcePath,
+        output_name: String(item.output_name || '').trim(),
+    };
+}
+
 function renderUnifiedShareParseResult(result = {}) {
     if (!result || typeof result !== 'object') return;
     magnetResultMode = 'share';
@@ -2035,7 +2051,9 @@ function renderUnifiedShareParseResult(result = {}) {
     magnetRoots = [];
     magnetRootAccounts = {};
     shareCurrentData = { ...(shareCurrentData || {}), ...result };
-    shareFileData = sortPickerItemsByName(result.files || []);
+    shareFileData = sortPickerItemsByName(
+        (Array.isArray(result.files) ? result.files : []).map(normalizePikPakShareFile)
+    );
     magnetFileData = shareFileData;
     const titleEl = document.getElementById('magnetFileName');
     const metaEl = document.getElementById('magnetPanelMeta');
@@ -2056,7 +2074,9 @@ function renderUnifiedShareParseResult(result = {}) {
 function renderShareParseResult(result = {}) {
     if (!result || typeof result !== 'object') return;
     shareCurrentData = { ...(shareCurrentData || {}), ...result };
-    shareFileData = sortPickerItemsByName(result.files || []);
+    shareFileData = sortPickerItemsByName(
+        (Array.isArray(result.files) ? result.files : []).map(normalizePikPakShareFile)
+    );
     const shareMetaEl = document.getElementById('sharePanelMeta');
     if (shareMetaEl) {
         shareMetaEl.textContent = `已解析 ${shareFileData.length} 项，可筛选节点并执行同步下载`;
@@ -5516,7 +5536,7 @@ const pickerCollapsedState = {
 
 
 function getPickerItemName(item = {}) {
-    return String(item.name || item.title || '').trim();
+    return String(item.output_name || item.name || item.title || '').trim();
 }
 
 function getPickerItemPath(item = {}) {
@@ -5934,22 +5954,10 @@ function getPickerDataArray(prefix) {
     return [];
 }
 
-function jfBasename(p) {
-    const s = String(p || '').replace(/\\/g, '/');
-    const idx = s.lastIndexOf('/');
-    return idx >= 0 ? s.slice(idx + 1) : s;
-}
-
 function jfDirname(p) {
     const s = String(p || '').replace(/\\/g, '/');
     const idx = s.lastIndexOf('/');
     return idx >= 0 ? s.slice(0, idx) : '';
-}
-
-function jfReplaceBasename(p, newBase) {
-    const s = String(p || '').replace(/\\/g, '/');
-    const idx = s.lastIndexOf('/');
-    return idx >= 0 ? s.slice(0, idx + 1) + newBase : newBase;
 }
 
 function jfWithDedupeSuffix(name, n) {
@@ -5987,14 +5995,11 @@ function formatPickerNamesJellyfin(prefix) {
             item.title = next;
             renamed++;
         } else {
-            if (item._jfOriginalName === undefined) {
-                item._jfOriginalName = item.name || '';
-                item._jfOriginalPath = item.path || '';
-            }
-            const src = item._jfOriginalName;
-            let next = formatJellyfinFileName(src);
-            if (!next) { item.name = src; item.path = item._jfOriginalPath; skipped++; return; }
-            const dir = jfDirname(item._jfOriginalPath);
+            const sourceName = String(item.source_name || item.name || '');
+            const sourcePath = String(item.source_path || item.path || sourceName);
+            let next = formatJellyfinFileName(sourceName);
+            if (!next) { item.output_name = ''; skipped++; return; }
+            const dir = jfDirname(sourcePath);
             const set = usedByDir.get(dir) || new Set();
             if (set.has(next)) {
                 let n = 2;
@@ -6002,8 +6007,7 @@ function formatPickerNamesJellyfin(prefix) {
                 next = jfWithDedupeSuffix(next, n);
             }
             set.add(next); usedByDir.set(dir, set);
-            item.name = next;
-            item.path = jfReplaceBasename(item._jfOriginalPath, next);
+            item.output_name = next;
             renamed++;
         }
     });
@@ -6034,11 +6038,11 @@ function buildJellyfinOverrides(prefix) {
                 const key = String(item.download_url || '');
                 if (key) overrides[key] = item.title; // 无扩展名 base，后端补真实扩展名
             }
-        } else if (item._jfOriginalName !== undefined && item.name && item.name !== item._jfOriginalName) {
+        } else if (item.output_name && item.output_name !== (item.source_name || item.name)) {
             const key = prefix === 'share'
-                ? jfBasename(item._jfOriginalPath || item._jfOriginalName) // 后端按原 basename 匹配
-                : String(item.id || '');                                   // 磁链按 file_id 匹配
-            if (key) overrides[key] = item.name;
+                ? String(item.source_file_id || item.id || '')
+                : String(item.id || '');
+            if (key) overrides[key] = item.output_name;
         }
     });
     return overrides;
@@ -6289,9 +6293,9 @@ function renderPickerTreeRows(node, prefix, depth = 0) {
     });
 
     node.files.forEach(item => {
-        const val = item.download_url || item.file_id || item.id;
-        const title = escapeA2TDHtml(item.name || item.title || '未命名文件');
-        const fullPathRaw = String(item.path || item.name || item.title || '');
+        const val = item.download_url || item.source_file_id || item.file_id || item.id;
+        const title = escapeA2TDHtml(getPickerItemName(item) || '未命名文件');
+        const fullPathRaw = getPickerItemPath(item);
         const fullPath = escapeA2TDHtml(fullPathRaw);
         const sizeOrTime = escapeA2TDHtml(item.size_str || item.published || '0 B');
         html += `
