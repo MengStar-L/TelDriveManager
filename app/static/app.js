@@ -2258,7 +2258,7 @@ function renderA2TDStats(stats) {
             const thresholdText = protection.threshold_bytes !== undefined ? formatBytes(getA2TDNumber(protection.threshold_bytes), 0) : '--';
             diskProtectNotice.style.display = 'flex';
             if (diskProtectNoticeText) {
-                diskProtectNoticeText.textContent = `${protection.message || '磁盘不足，已自动保护'}（当前剩余 ${freeText}，保护阈值 ${thresholdText}）`;
+                diskProtectNoticeText.textContent = `${protection.message || '磁盘不足，已自动保护'}（当前剩余 ${freeText}，保护阈值 ${thresholdText}）${protection.recovery_message ? '；' + protection.recovery_message : ''}`;
             }
         } else {
             diskProtectNotice.style.display = 'none';
@@ -2533,6 +2533,9 @@ function buildA2TDTaskCardContent(task) {
     const errorNote = task.error
         ? `<div class="task-note error"><i class="ph ph-warning-circle"></i><span>${escapeA2TDHtml(task.error)}</span></div>`
         : '';
+    const downloadNote = task.download_note
+        ? `<div class="task-note warning"><i class="ph ph-warning-circle"></i><span>${escapeA2TDHtml(task.download_note)}</span></div>`
+        : '';
     const stalledNote = !task.error && !task.upload_note && stalled
         ? '<div class="task-note warning"><i class="ph ph-warning"></i><span>连接长时间没有新数据，下载器会自动重试当前分块。</span></div>'
         : '';
@@ -2553,7 +2556,7 @@ function buildA2TDTaskCardContent(task) {
         inlineRowHtml: inlineItems.join(''),
         barClass,
         progressWidth: `${progress}%`,
-        notesHtml: `${uploadNote}${errorNote}${stalledNote}`
+        notesHtml: `${uploadNote}${downloadNote}${errorNote}${stalledNote}`
     };
 }
 
@@ -2727,6 +2730,142 @@ async function clearCompletedTasks() {
 
 
 // ── Settings ──
+let updateStatusTimer = null;
+let updateCheckTimer = null;
+let updatePageVersion = null;
+
+function updateStatusLabel(data = {}) {
+    const state = String(data.state || 'idle');
+    const progress = Number(data.progress || 0);
+    if (state === 'update_available') return '发现新版本';
+    if (state === 'up_to_date') return '已是最新';
+    if (state === 'no_release') return '暂无发布版本';
+    if (state === 'checking') return '检查中...';
+    if (['preparing', 'validating', 'restarting'].includes(state)) {
+        return progress > 0 ? `更新中 ${Math.round(progress)}%` : '更新中...';
+    }
+    if (state === 'error') return '更新操作失败';
+    return '等待检查';
+}
+
+function updateStatusClass(state) {
+    if (state === 'update_available') return 'warning';
+    if (['up_to_date', 'no_release'].includes(state)) return 'success';
+    if (state === 'error') return 'error';
+    return '';
+}
+
+function renderUpdateStatus(data = {}) {
+    const current = document.getElementById('updateCurrentVersion');
+    const latest = document.getElementById('updateLatestVersion');
+    const badge = document.getElementById('updateStatus');
+    const notes = document.getElementById('updateReleaseNotes');
+    const link = document.getElementById('updateReleaseLink');
+    const checkBtn = document.getElementById('updateCheckBtn');
+    const applyBtn = document.getElementById('updateApplyBtn');
+    const state = String(data.state || 'idle');
+    const busy = ['checking', 'preparing', 'validating', 'restarting'].includes(state);
+
+    if (current) current.textContent = data.current_version || '--';
+    if (latest) latest.textContent = data.latest_version || '--';
+    if (badge) {
+        badge.className = `update-status-badge ${updateStatusClass(state)}`.trim();
+        badge.innerHTML = `<i class="ph ${busy ? 'ph-circle-notch' : state === 'error' ? 'ph-warning-circle' : 'ph-check-circle'}"></i> ${escapeA2TDHtml(updateStatusLabel(data))}`;
+    }
+    if (notes) {
+        notes.textContent = data.error || data.release_notes || '';
+        notes.style.display = data.error || data.release_notes ? '' : 'none';
+    }
+    if (link) {
+        link.href = data.release_url || '#';
+        link.style.display = data.release_url ? '' : 'none';
+    }
+    if (checkBtn) {
+        checkBtn.disabled = busy;
+        checkBtn.innerHTML = busy
+            ? '<span class="spinner"></span> 检查中...'
+            : '<i class="ph ph-arrows-clockwise"></i> 检查更新';
+    }
+    if (applyBtn) {
+        applyBtn.style.display = data.update_available ? '' : 'none';
+        applyBtn.disabled = busy;
+        if (busy) applyBtn.innerHTML = '<span class="spinner"></span> 更新中...';
+        else applyBtn.innerHTML = '<i class="ph ph-download-simple"></i> 立即更新';
+    }
+}
+
+async function loadUpdateStatus(showError = false) {
+    try {
+        const resp = await fetch('/api/update/status', { cache: 'no-store' });
+        const data = await readJsonSafe(resp);
+        if (!resp.ok) throw new Error(data.detail || data.message || '读取更新状态失败');
+        renderUpdateStatus(data);
+        const state = String(data.state || '');
+        const version = data.current_version;
+        if (version && !['preparing', 'validating', 'restarting'].includes(state)) {
+            if (updatePageVersion && updatePageVersion !== version) {
+                window.location.reload();
+                return data;
+            }
+            updatePageVersion = version;
+        }
+        if (['preparing', 'validating', 'restarting'].includes(state)) {
+            if (!updateStatusTimer) updateStatusTimer = setInterval(() => loadUpdateStatus(), 2000);
+        } else if (updateStatusTimer) {
+            clearInterval(updateStatusTimer);
+            updateStatusTimer = null;
+        }
+        return data;
+    } catch (e) {
+        if (showError) showA2TDToast(e.message || '读取更新状态失败', 'error');
+        return null;
+    }
+}
+
+async function checkForUpdates(showToast = false) {
+    const button = document.getElementById('updateCheckBtn');
+    if (button) button.disabled = true;
+    try {
+        const resp = await fetch('/api/update/check', { method: 'POST', cache: 'no-store' });
+        const data = await readJsonSafe(resp);
+        if (!resp.ok) throw new Error(data.detail || data.message || '检查更新失败');
+        renderUpdateStatus(data);
+        if (showToast) showA2TDToast(data.update_available ? `发现新版本 ${data.latest_version}` : updateStatusLabel(data), data.update_available ? 'success' : 'info');
+        return data;
+    } catch (e) {
+        renderUpdateStatus({ state: 'error', error: e.message });
+        if (showToast) showA2TDToast(e.message || '检查更新失败', 'error');
+        return null;
+    } finally {
+        await loadUpdateStatus();
+    }
+}
+
+async function applyUpdate() {
+    const button = document.getElementById('updateApplyBtn');
+    if (button) button.disabled = true;
+    try {
+        const resp = await fetch('/api/update/apply', { method: 'POST' });
+        const data = await readJsonSafe(resp);
+        if (!resp.ok || data.success === false) throw new Error(data.detail || data.message || '启动更新失败');
+        showA2TDToast(data.message || '更新已开始，程序将自动重启', 'success');
+        await loadUpdateStatus();
+        if (updateStatusTimer) clearInterval(updateStatusTimer);
+        updateStatusTimer = setInterval(() => loadUpdateStatus(), 2000);
+    } catch (e) {
+        if (button) button.disabled = false;
+        showA2TDToast(e.message || '启动更新失败', 'error');
+        await loadUpdateStatus();
+    }
+}
+
+function initUpdateChecks() {
+    loadUpdateStatus();
+    checkForUpdates(false);
+    if (updateCheckTimer) clearInterval(updateCheckTimer);
+    updateCheckTimer = setInterval(() => checkForUpdates(false), 30 * 60 * 1000);
+}
+
 async function toggleMonitorSerialMode(checked) {
     // 只发送 serial_transfer_mode 的增量更新，不要用 collectSettingsConfig() 全量保存
     // 因为在下载监控页面时设置表单元素尚未填充，全量保存会用空值覆盖所有配置
@@ -3589,6 +3728,7 @@ window.onload = async () => {
         }
     }
     connectWS();
+    initUpdateChecks();
     syncRemotePushToggles(); // 启动时初始化三处解析页的远程推送开关（含默认磁链页）
     checkServicesStatus();
     setInterval(checkServicesStatus, 30000);
@@ -4943,13 +5083,14 @@ function appendT2TDLog(log, options = {}) {
     if(logData.level === 'ERROR') c = '#f87171';
     else if(logData.level === 'WARN' || logData.level === 'WARNING') c = '#f59e0b';
 
-    let t = logData.time || logData.timestamp || '(none)';
+    let t = String(logData.time || logData.timestamp || '(none)');
     if (t && t.includes('T')) {
         t = t.split('T')[1].split('.')[0] || t;
         t = t.replace('Z', '').replace(/[+-]\d+:\d+$/, '');
     }
 
-    entry.innerHTML = `<span style="color:${c}">[${t}] [${logData.level || 'INFO'}] ${logData.message || ''}</span>`;
+    entry.style.color = c;
+    entry.textContent = `[${t}] [${logData.level || 'INFO'}] ${logData.message || ''}`;
     container.appendChild(entry);
     container.scrollTop = container.scrollHeight;
 }

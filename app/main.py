@@ -25,11 +25,13 @@ from app.aria2_service import aria2_service
 from app.modules.aria2teldrive.task_manager import task_manager
 from app.modules.pikpak.account_health import account_health_monitor
 from app.modules.pikpak import routes as pikpak_routes
+from app.updater import update_manager
 
 # 路由
 from app.routes.login import router as login_router
 from app.routes.settings import router as settings_router
 from app.routes.ws import router as ws_router
+from app.routes.update import router as update_router
 from app.modules.pikpak.routes import router as pikpak_router
 from app.modules.aria2teldrive.routes import router as a2td_router
 from app.modules.tel2teldrive.routes import router as t2td_router
@@ -73,6 +75,7 @@ async def lifespan(app: FastAPI):
     await task_manager.start()
     await pikpak_routes.init_runtime_state()
     await account_health_monitor.start()
+    await update_manager.start()
 
     # 启动 Tel2TelDrive 服务
     t2td_task = None
@@ -83,10 +86,13 @@ async def lifespan(app: FastAPI):
         logger.warning(f"Tel2TelDrive 服务启动失败（可能缺少配置）: {e}")
 
     logger.info("TelDriveManager 启动完成")
+    app.state.ready = True
     yield
 
     # 关闭
     logger.info("TelDriveManager 关闭中...")
+    app.state.ready = False
+    await update_manager.stop()
     await account_health_monitor.stop()
     await task_manager.stop()
     await aria2_service.stop()
@@ -114,6 +120,10 @@ app = FastAPI(title="TelDriveManager", lifespan=lifespan)
 async def auth_middleware(request: Request, call_next):
     path = request.url.path
 
+    if path in {"/api/update/health", "/api/update/shutdown"}:
+        # These endpoints authenticate the local installer with its transaction nonce.
+        return await call_next(request)
+
     # 放行：静态资源、登录、认证检查
     if (path in ("/login", "/api/login", "/api/auth/check")
             or path.startswith("/static/")
@@ -139,6 +149,7 @@ async def auth_middleware(request: Request, call_next):
 app.include_router(login_router)
 app.include_router(settings_router)
 app.include_router(ws_router)
+app.include_router(update_router)
 app.include_router(pikpak_router)
 app.include_router(a2td_router)
 app.include_router(t2td_router)

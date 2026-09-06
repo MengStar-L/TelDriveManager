@@ -65,7 +65,7 @@ def _verify_signed_token(token: str) -> bool:
             return False
 
         issued_at = int(payload.get("iat") or 0)
-        if issued_at <= 0 or (time.time() - issued_at) > TOKEN_MAX_AGE:
+        if issued_at <= 0 or not 0 <= (time.time() - issued_at) <= TOKEN_MAX_AGE:
             return False
 
         username = str(payload.get("u") or "")
@@ -91,7 +91,6 @@ def create_token() -> str:
     """生成新的会话 token"""
     username = str(_get_auth_config().get("username") or "")
     token = _build_signed_token(username)
-    _active_tokens.add(token)
     _revoked_tokens.discard(token)
     return token
 
@@ -100,7 +99,7 @@ def verify_token(token: str) -> bool:
     """验证 token 是否有效"""
     if not token or token in _revoked_tokens:
         return False
-    return token in _active_tokens or _verify_signed_token(token)
+    return _verify_signed_token(token)
 
 
 def revoke_token(token: str) -> None:

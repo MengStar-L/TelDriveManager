@@ -19,6 +19,8 @@ from telethon.tl.types import InputChannel, InputPeerChannel
 from telethon.utils import resolve_id
 
 from app import database as db
+from app.config import load_config
+from app.disk_budget import disk_budget, DiskSpaceUnavailable
 from app.modules.aria2teldrive.teldrive_client import TelDriveClient
 
 
@@ -48,6 +50,27 @@ MULTIBOT_BLOCK_SIZE = 16 * 1024 * 1024
 MULTIBOT_REQUEST_SIZE = 512 * 1024
 # 多 bot 下载用 os.pwrite 定位写盘（POSIX）；非 POSIX（如 Windows）回退单连接
 _HAS_PWRITE = hasattr(os, "pwrite")
+
+
+class DynamicLimiter:
+    def __init__(self, limit):
+        self.active = 0
+        self.limit = max(1, int(limit))
+        self.changed = asyncio.Event()
+
+    def resize(self, limit):
+        self.limit = max(1, int(limit))
+        self.changed.set()
+
+    async def __aenter__(self):
+        while self.active >= self.limit:
+            self.changed.clear()
+            await self.changed.wait()
+        self.active += 1
+
+    async def __aexit__(self, *_):
+        self.active -= 1
+        self.changed.set()
 
 
 class BotDownloadPool:
@@ -197,16 +220,16 @@ class BotDownloadPool:
         if report_bots:
             report_bots(len(live))
 
-        # 预分配文件，便于各 worker 用 pwrite 定位写入
-        with open(dest_path, "wb") as f:
-            f.truncate(file_size)
+        with open(dest_path, "wb"):
+            pass
 
         q: asyncio.Queue = asyncio.Queue()
         for off in range(0, file_size, MULTIBOT_BLOCK_SIZE):
             q.put_nowait((off, min(MULTIBOT_BLOCK_SIZE, file_size - off)))
 
         fd = os.open(dest_path, os.O_WRONLY)
-        progress = {"done": 0}
+        progress = {}
+        completed = set()
 
         async def worker(client: Any, doc: Any):
             fails = 0
@@ -223,13 +246,26 @@ class BotDownloadPool:
                         doc, offset=off, limit=limit_chunks,
                         request_size=MULTIBOT_REQUEST_SIZE, file_size=file_size,
                     ):
-                        os.pwrite(fd, part, pos)
+                        if not part or len(part) > off + length - pos:
+                            raise RuntimeError("Invalid Telegram download range length")
+                        written = 0
+                        while written < len(part):
+                            count = os.pwrite(fd, part[written:], pos + written)
+                            if count <= 0:
+                                raise OSError("Short positional write")
+                            written += count
                         pos += len(part)
-                        progress["done"] += len(part)
+                        progress[off] = pos - off
                         if on_progress:
-                            on_progress(progress["done"], file_size)
+                            on_progress(sum(progress.values()), file_size)
+                    if pos != off + length:
+                        raise RuntimeError(f"Telegram download ended early: {pos - off}/{length}")
+                    completed.add(off)
                     fails = 0
+                except DiskSpaceUnavailable:
+                    raise
                 except Exception as exc:
+                    progress[off] = 0
                     q.put_nowait((off, length))     # 退回给其他 bot（FLOOD_WAIT/抖动）
                     fails += 1
                     self._log("WARN", f"回源 bot 分块下载失败，退回重试: {type(exc).__name__}: {exc}")
@@ -237,10 +273,17 @@ class BotDownloadPool:
                         return                       # 放弃这个 bot，让健康 bot 继续清空队列
                     await asyncio.sleep(1)
 
+        workers = [asyncio.create_task(worker(c, d)) for c, d in zip(live, docs)]
         try:
-            await asyncio.gather(*[worker(c, d) for c, d in zip(live, docs)])
-            return q.empty()
+            await asyncio.gather(*workers)
+            os.fsync(fd)
+            return (q.empty() and len(completed) == (file_size + MULTIBOT_BLOCK_SIZE - 1) // MULTIBOT_BLOCK_SIZE
+                    and os.fstat(fd).st_size == file_size)
         finally:
+            for task in workers:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*workers, return_exceptions=True)
             os.close(fd)
 
 
@@ -260,7 +303,7 @@ class TelegramRelayManager:
         self.config: Any | None = None
         self._client_getter: Callable[[], Any] | None = None
         self._tasks: dict[str, asyncio.Task[Any]] = {}
-        self._semaphore: asyncio.Semaphore | None = None
+        self._semaphore = DynamicLimiter(1)
         self._concurrency: int = 1
         self._bot_pool: BotDownloadPool | None = None
         self._stopped = True
@@ -300,9 +343,8 @@ class TelegramRelayManager:
         await db.init_db()
         self.config = config
         concurrency = max(1, int(getattr(config, "relay_concurrency", 1) or 1))
-        if self._semaphore is None or concurrency != self._concurrency:
-            self._semaphore = asyncio.Semaphore(concurrency)
-            self._concurrency = concurrency
+        self._semaphore.resize(concurrency)
+        self._concurrency = concurrency
         enabled = bool(getattr(config, "relay_enabled", False))
         await self._update_state(
             enabled=enabled,
@@ -392,9 +434,8 @@ class TelegramRelayManager:
 
     async def enqueue_message(self, _main_client: Any, config: Any, msg: Any, file_info: dict[str, Any]) -> dict:
         self.config = config
-        if self._semaphore is None:
-            self._concurrency = max(1, int(getattr(config, "relay_concurrency", 1) or 1))
-            self._semaphore = asyncio.Semaphore(self._concurrency)
+        self._concurrency = max(1, int(getattr(config, "relay_concurrency", 1) or 1))
+        self._semaphore.resize(self._concurrency)
         self._stopped = False
 
         message_id = int(getattr(msg, "id"))
@@ -427,11 +468,16 @@ class TelegramRelayManager:
             return {"success": False, "message": "completed relay jobs cannot be retried"}
         # 允许对失败/取消，以及卡住的进行中任务（下载/上传/清理/等待）手动重试：
         # 先取消可能在跑的任务，避免与重试竞争，再重置状态重新入队。
-        task = self._tasks.pop(job_id, None)
+        task = self._tasks.get(job_id)
         if task:
             task.cancel()
-            with suppress(Exception):
+            with suppress(asyncio.CancelledError):
                 await task
+            if self._tasks.get(job_id) is task:
+                self._tasks.pop(job_id, None)
+        latest = await db.get_telegram_relay_job(job_id)
+        if latest and latest.get("status") == "completed":
+            return {"success": False, "message": "relay job completed while retry was requested"}
         await db.update_telegram_relay_job(
             job_id,
             status="pending",
@@ -456,6 +502,9 @@ class TelegramRelayManager:
         task = self._tasks.get(job_id)
         if task:
             task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+        await self._cleanup_local_path(str(job.get("local_path") or ""), job_id=job_id)
+        await db.update_telegram_relay_job(job_id, download_verified=0, download_fingerprint="")
         await self._broadcast_job_id(job_id)
         return {"success": True, "data": await db.get_telegram_relay_job(job_id)}
 
@@ -486,6 +535,7 @@ class TelegramRelayManager:
         return data[-max(1, int(limit or 200)):]
 
     async def _schedule_active_jobs(self):
+        await self._cleanup_inactive_parts()
         active_jobs = await db.get_active_telegram_relay_jobs()
         scheduled_count = 0
         for job in active_jobs:
@@ -493,6 +543,25 @@ class TelegramRelayManager:
                 scheduled_count += 1
         if scheduled_count:
             self._log("INFO", f"Scheduled {scheduled_count} active relay job(s)")
+
+    async def _cleanup_inactive_parts(self):
+        # A crashed download has no live writer; its .part is never an upload source.
+        for job in await db.get_telegram_relay_partial_caches():
+            if job["job_id"] in self._tasks:
+                continue
+            try:
+                expected = self._build_local_file_path(self.config, job["job_id"], job["file_name"])
+                if expected != expected.resolve() or self._download_root() not in expected.parents:
+                    continue
+                local = Path(job["local_path"])
+                part = local.with_name(local.name + ".part")
+                if local.resolve() != expected.resolve() or part.is_symlink():
+                    continue
+                if part.resolve().parent != expected.resolve().parent:
+                    continue
+                part.unlink(missing_ok=True)
+            except Exception as exc:
+                self._log("WARN", f"Interrupted relay cache cleanup deferred: {job['job_id']}: {exc}")
 
     async def _refresh_auth_state(self):
         """根据主监听客户端的登录状态刷新回源状态（仅在状态变化时广播，避免刷屏）。"""
@@ -527,13 +596,27 @@ class TelegramRelayManager:
             await self._refresh_auth_state()
             if await self._is_authorized():
                 await self._schedule_active_jobs()
+            for job in await db.get_all_telegram_relay_jobs(limit=10000):
+                if job.get("status") not in ("completed", "cancelled"):
+                    continue
+                try:
+                    await self._cleanup_local_path(str(job.get("local_path") or ""), job_id=job["job_id"])
+                except Exception:
+                    pass
 
     async def _schedule(self, job_id: str):
         if self._stopped or job_id in self._tasks:
             return False
         task = asyncio.create_task(self._run_job(job_id))
         self._tasks[job_id] = task
-        task.add_done_callback(lambda done, jid=job_id: self._tasks.pop(jid, None))
+        def finished(done):
+            if self._tasks.get(job_id) is done:
+                self._tasks.pop(job_id, None)
+            if not done.cancelled():
+                error = done.exception()
+                if error:
+                    self._log("ERROR", f"Relay runner failed: {job_id}: {error}")
+        task.add_done_callback(finished)
         return True
 
     async def _run_job(self, job_id: str):
@@ -549,6 +632,10 @@ class TelegramRelayManager:
                     return
                 try:
                     await self._process_job(job)
+                    return
+                except DiskSpaceUnavailable as exc:
+                    await db.update_telegram_relay_job(job_id, status="pending", error=str(exc))
+                    await self._broadcast_job_id(job_id)
                     return
                 except asyncio.CancelledError:
                     if not self._stopped:
@@ -592,75 +679,94 @@ class TelegramRelayManager:
 
     async def _process_job(self, job: dict):
         client = self._current_client()
-        if client is None:
-            raise RuntimeError("主 Telegram 客户端不可用")
+        if client is None or self.config is None:
+            raise RuntimeError("Telegram relay client is unavailable")
         config = self.config
-        if config is None:
-            raise RuntimeError("telegram relay manager is not started")
-
         job_id = job["job_id"]
-        local_path = str(job.get("local_path") or "")
-        if not local_path:
-            local_path = str(self._build_local_file_path(config, job_id, job["file_name"]))
-            await db.update_telegram_relay_job(job_id, local_path=local_path)
+        local_path = str(job.get("local_path") or self._build_local_file_path(config, job_id, job["file_name"]))
         path = Path(local_path)
+        expected = self._build_local_file_path(config, job_id, job["file_name"]).resolve()
+        if path.resolve() != expected:
+            raise RuntimeError("Relay local path no longer belongs to the configured job directory")
         path.parent.mkdir(parents=True, exist_ok=True)
+        await db.update_telegram_relay_job(job_id, local_path=local_path)
 
-        expected_size = int(job.get("file_size") or 0)
-        if not path.exists() or (expected_size > 0 and path.stat().st_size != expected_size):
-            if path.exists():
-                with suppress(Exception):
-                    path.unlink()
-            await db.update_telegram_relay_job(job_id, status="downloading", error=None, download_progress=0.0)
+        if not job.get("upload_committed"):
+            expected_size = int(job.get("file_size") or 0)
+            verified = (job.get("download_verified") and path.is_file() and expected_size > 0
+                        and path.stat().st_size == expected_size
+                        and job.get("download_fingerprint") == self._calc_upload_fingerprint(path, 0))
+            if not verified:
+                message = await client.get_messages(int(job["source_channel_id"]), ids=int(job["source_message_id"]))
+                if message is None:
+                    raise RuntimeError("Source Telegram message is missing")
+                actual_size = int(getattr(getattr(message, "file", None), "size", 0) or expected_size)
+                if actual_size <= 0:
+                    raise RuntimeError("Cannot verify Telegram file size; download has not started")
+                if expected_size > 0 and actual_size != expected_size:
+                    raise RuntimeError("Source Telegram file size changed")
+                expected_size = actual_size
+                job["file_size"] = expected_size
+                part_path = path.with_name(path.name + ".part")
+                await self._cleanup_local_path(local_path, job_id=job_id)
+                path.parent.mkdir(parents=True, exist_ok=True)
+                await db.update_telegram_relay_job(
+                    job_id, download_verified=0, download_fingerprint="", file_size=expected_size,
+                    status="pending", download_progress=0.0)
+                owner = "relay:" + job_id
+                try:
+                    disk_budget.reserve(owner, path.parent, expected_size, self._disk_reserve_bytes())
+                    await db.update_telegram_relay_job(job_id, status="downloading", error=None)
+                    await self._broadcast_job_id(job_id)
+                    await self._download_message(client, message, part_path, job)
+                    if not part_path.is_file() or part_path.stat().st_size != expected_size:
+                        raise RuntimeError("Incomplete Telegram download")
+                    with part_path.open("r+b") as downloaded:
+                        os.fsync(downloaded.fileno())
+                    os.replace(part_path, path)
+                    await db.update_telegram_relay_job(
+                        job_id, download_verified=1, download_fingerprint=self._calc_upload_fingerprint(path, 0),
+                        local_path=str(path), download_progress=100.0)
+                finally:
+                    disk_budget.release(owner)
+                    part_path.unlink(missing_ok=True)
+            await db.update_telegram_relay_job(job_id, status="uploading", error=None, upload_progress=0.0)
             await self._broadcast_job_id(job_id)
-            message = await client.get_messages(int(job["source_channel_id"]), ids=int(job["source_message_id"]))
-            if message is None:
-                raise RuntimeError("source Telegram message is missing")
-            await self._download_message(client, message, path, job)
-        await db.update_telegram_relay_job(job_id, status="uploading", download_progress=100.0, upload_progress=0.0)
-        await self._broadcast_job_id(job_id)
+            result = await self._upload_local_file(path, config, job)
+            if not result.get("success"):
+                raise RuntimeError(result.get("error") or "Upload failed")
+            # Persist the irreversible commit before mapping and cleanup, which can be retried.
+            await db.update_telegram_relay_job(
+                job_id, upload_committed=1, upload_result_json=json.dumps(result),
+                status="cleaning", upload_progress=100.0)
+            job = await db.get_telegram_relay_job(job_id) or job
 
-        result = await self._upload_local_file(path, config, job)
-        if not result.get("success"):
-            raise RuntimeError(result.get("error") or "upload failed")
+        result = json.loads(job.get("upload_result_json") or "{}")
         file_id = await self._record_teldrive_mapping(config, job, result)
-        upload_id = str((result.get("upload_meta") or {}).get("upload_id") or "")
+        upload_id = str((result.get("upload_meta") or {}).get("upload_id") or job.get("upload_id") or "")
         await db.update_telegram_relay_job(
-            job_id,
-            status="cleaning",
-            upload_progress=100.0,
-            teldrive_file_id=file_id or "",
-            upload_id=upload_id,
-            upload_confirmed_parts_json="[]",
-            upload_remote_parts_json="[]",
-        )
-        await self._broadcast_job_id(job_id)
-
-        from app.modules.tel2teldrive.service import delete_telegram_messages_with_audit
-
-        source_message_id = int(job["source_message_id"])
-        source_deleted = await delete_telegram_messages_with_audit(
-            client,
-            config,
-            [source_message_id],
-            reason="relay_source_after_upload",
-            requested_channel_id=int(job["source_channel_id"]),
-            file_names=[str(job.get("file_name") or "")],
-            file_ids=[file_id] if file_id else [],
-            job_id=job_id,
-            upload_id=upload_id or None,
-        )
-        if not source_deleted:
-            raise RuntimeError("source Telegram message cleanup failed or was blocked")
+            job_id, status="cleaning", teldrive_file_id=file_id or "", upload_id=upload_id)
+        # Local space can be reclaimed even if the source deletion API is unavailable.
         await self._cleanup_local_path(str(path), job_id=job_id)
+        if not job.get("source_deleted"):
+            from app.modules.tel2teldrive.service import delete_telegram_messages_with_audit
+            source_deleted = await delete_telegram_messages_with_audit(
+                client, config, [int(job["source_message_id"])], reason="relay_source_after_upload",
+                requested_channel_id=int(job["source_channel_id"]), file_names=[str(job.get("file_name") or "")],
+                file_ids=[file_id] if file_id else [], job_id=job_id, upload_id=upload_id or None)
+            if not source_deleted:
+                raise RuntimeError("Source Telegram message cleanup failed or was blocked")
+            await db.update_telegram_relay_job(job_id, source_deleted=1)
         await db.update_telegram_relay_job(
-            job_id,
-            status="completed",
-            error=None,
-            completed_at=datetime.now().astimezone().isoformat(timespec="seconds"),
-        )
+            job_id, status="completed", error=None, download_verified=0,
+            upload_confirmed_parts_json="[]", upload_remote_parts_json="[]",
+            completed_at=self._iso_now())
         await self._broadcast_job_id(job_id)
-        self._log("INFO", f"Relay reupload completed: {job.get('file_name')} (msg_id={source_message_id})")
+        self._log("INFO", f"Relay reupload completed: {job.get('file_name')}")
+
+    @staticmethod
+    def _disk_reserve_bytes():
+        return max(1, int(load_config().get("aria2", {}).get("disk_protection_threshold_gb") or 5)) * 1024 ** 3
 
     async def _download_message(self, client: Any, message: Any, path: Path, job: dict):
         loop = asyncio.get_running_loop()
@@ -669,6 +775,9 @@ class TelegramRelayManager:
         file_size = int(job.get("file_size") or 0)
 
         def progress_callback(current: int, total: int):
+            if total and int(total) != file_size or current > file_size:
+                raise RuntimeError("Telegram download size changed")
+            disk_budget.reserve("relay:" + job_id, path.parent, max(0, file_size - current), self._disk_reserve_bytes())
             total = total or file_size
             progress = round((current / total) * 100, 1) if total else 0.0
             now = loop.time()
@@ -702,6 +811,8 @@ class TelegramRelayManager:
                 )
                 if not used_pool:
                     self._log("WARN", f"多 bot 下载未完成，回退单连接: {job.get('file_name')}")
+            except DiskSpaceUnavailable:
+                raise
             except Exception as exc:
                 self._log("WARN", f"多 bot 下载异常，回退单连接: {type(exc).__name__}: {exc}")
                 used_pool = False
@@ -709,6 +820,7 @@ class TelegramRelayManager:
                 self._download_bots.pop(job_id, None)
 
         if not used_pool:
+            path.unlink(missing_ok=True)
             downloaded = await client.download_media(message, file=str(path), progress_callback=progress_callback)
             final_path = Path(downloaded) if downloaded else path
             if final_path != path and final_path.exists():
@@ -716,9 +828,9 @@ class TelegramRelayManager:
                     path.unlink()
                 final_path.replace(path)
 
-        if not path.exists():
-            raise RuntimeError("Telegram download did not create local file")
-        await db.update_telegram_relay_job(job_id, download_progress=100.0, local_path=str(path))
+        if not path.is_file() or path.stat().st_size != file_size:
+            raise RuntimeError("Telegram download is incomplete")
+        await db.update_telegram_relay_job(job_id, download_progress=100.0)
         await self._broadcast_job_id(job_id)
 
     @staticmethod
@@ -977,24 +1089,24 @@ class TelegramRelayManager:
             root = self._download_root() if self.config is not None else None
             cleanup_empty_parent = True
             if root is not None:
-                if root not in resolved.parents and resolved != root:
-                    self._log("WARN", f"skip relay cleanup outside download dir: {resolved}")
-                    return
+                if root not in resolved.parents or resolved.parent.name != str(job_id or ""):
+                    raise RuntimeError(f"Unowned relay cleanup path: {resolved}")
             else:
                 expected = str(job_id or "").strip()
                 if not expected or (resolved.name != expected and resolved.parent.name != expected):
-                    self._log("WARN", f"skip relay cleanup without active config: {resolved}")
-                    return
+                    raise RuntimeError(f"Unowned relay cleanup path: {resolved}")
                 cleanup_empty_parent = resolved.parent.name == expected
             if resolved.is_dir():
                 shutil.rmtree(resolved)
             elif resolved.exists():
                 resolved.unlink()
+            resolved.with_name(resolved.name + ".part").unlink(missing_ok=True)
             parent = resolved.parent
             if cleanup_empty_parent and parent.exists() and (root is None or parent != root) and not any(parent.iterdir()):
                 parent.rmdir()
         except Exception as exc:
             self._log("WARN", f"Relay local cleanup failed: {local_path}, {exc}")
+            raise
 
     @staticmethod
     def _session_name(config: Any | None) -> str:

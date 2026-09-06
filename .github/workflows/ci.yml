@@ -1,0 +1,54 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            python: '3.11'
+          - os: windows-latest
+            python: '3.13'
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    env:
+      PYTHONIOENCODING: utf-8
+      PYTHONDONTWRITEBYTECODE: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Install Python dependencies
+        run: python -m pip install -r requirements.txt
+      - name: Install aria2 for Linux integration
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y aria2
+          echo "ARIA2_TEST_BINARY=$(command -v aria2c)" >> "$GITHUB_ENV"
+      - name: Python tests
+        run: python -B -m unittest discover -s tests -p 'test_*.py' -q
+      - name: JavaScript tests
+        run: node --test tests/test_update_ui.js tests/test_telegram_log_escape.js tests/test_jellyfin_rename.js tests/test_pikpak_share_name_contract.js tests/test_unified_parse_input.js tests/test_unified_share_folder_rename.js
+      - name: JavaScript syntax
+        run: node --check app/static/app.js
+      - name: Real systemd upgrade and rollback
+        if: runner.os == 'Linux'
+        run: sudo env TDM_SYSTEMD_TEST=1 PYTHONIOENCODING=utf-8 "$(command -v python)" -B -m unittest tests.test_update_process.SystemdUpdateTests -v
+      - name: Linux upgrade script syntax
+        if: runner.os == 'Linux'
+        run: bash -n deploy/update-linux.sh

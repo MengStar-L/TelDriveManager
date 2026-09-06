@@ -7,6 +7,8 @@
 
 import unittest
 from typing import Any, cast
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
 
 from app.modules.aria2teldrive import task_manager as task_manager_module
 
@@ -16,6 +18,13 @@ GB = 1024 ** 3
 
 
 class DiskGateTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        lookup = patch.object(task_manager_module.db, "get_task_by_gid", AsyncMock(return_value=None))
+        lookup.start()
+        self.addCleanup(lookup.stop)
+        task_manager_module.disk_budget.retain("aria2:", set())
+        self.addCleanup(task_manager_module.disk_budget.retain, "aria2:", set())
+
     def make_manager(self, free_gb=10, threshold_gb=5, serial=False):
         manager = task_manager_module.TaskManager()
         manager.config = {
@@ -32,6 +41,10 @@ class DiskGateTests(unittest.IsolatedAsyncioTestCase):
         }
         manager._disk_usage_info = {"free": free_gb * GB}
         manager.aria2 = cast(Any, FakeAria2())
+        disk = patch("app.disk_budget.shutil.disk_usage", side_effect=lambda _: SimpleNamespace(free=manager._disk_usage_info["free"]))
+        disk.start()
+        self.addCleanup(disk.stop)
+        manager._has_serial_resume_blockers = AsyncMock(return_value=False)
 
         # 默认 stub 自愈（依赖真实 DB）；自愈测试单独覆盖
         async def no_auto_retry():
@@ -66,7 +79,7 @@ class DiskGateTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(manager._disk_gate_paused_gids["w-1"])  # 非曾活跃
         self.assertNotIn("a-1", manager._disk_gate_paused_gids)
         self.assertTrue(manager._disk_protection_active)
-        self.assertIn("已暂停 1 个下载", manager._disk_protection_info["message"])
+        self.assertIn("1 个下载", manager._disk_protection_info["message"])
 
     async def test_sufficient_budget_pauses_nothing(self):
         # free=20G, 总需求 7G，projected=13G > 5G → 不动作
@@ -99,9 +112,7 @@ class DiskGateTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(manager._disk_protection_active)
         self.assertTrue(manager._disk_protection_info["stalled"])
 
-    async def test_free_below_threshold_keeps_smallest_remaining_running(self):
-        # 防死锁核心：free=3G < threshold 5G，但有任务剩余 2G 能塞进 → 保留它继续
-        # 跑（去下完触发上传释放空间），其余活跃任务暂停；不应 stalled。
+    async def test_free_below_threshold_preserves_system_reserve(self):
         manager = self.make_manager(free_gb=3, threshold_gb=5)
 
         await manager._sync_disk_space_download_protection(
@@ -112,11 +123,10 @@ class DiskGateTests(unittest.IsolatedAsyncioTestCase):
             waiting=[],
         )
 
-        # 最接近完成且放得下的 a-small 继续跑；a-big 暂停
-        self.assertEqual(manager.aria2.force_paused, ["a-big"])
+        self.assertEqual(manager.aria2.force_paused, ["a-big", "a-small"])
         self.assertIn("a-big", manager._disk_gate_paused_gids)
-        self.assertNotIn("a-small", manager._disk_gate_paused_gids)
-        self.assertFalse(manager._disk_protection_info["stalled"])
+        self.assertIn("a-small", manager._disk_gate_paused_gids)
+        self.assertTrue(manager._disk_protection_info["stalled"])
         self.assertTrue(manager._disk_protection_active)  # 仍有持有 → 保护激活
 
     async def test_free_below_threshold_unknown_size_always_paused(self):
@@ -133,8 +143,8 @@ class DiskGateTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertIn("a-unknown", manager.aria2.force_paused)
-        self.assertNotIn("a-small", manager.aria2.force_paused)
-        self.assertFalse(manager._disk_protection_info["stalled"])
+        self.assertIn("a-small", manager.aria2.force_paused)
+        self.assertTrue(manager._disk_protection_info["stalled"])
 
     # ── 恢复（滞回） ──
 
@@ -232,15 +242,15 @@ class DiskGateTests(unittest.IsolatedAsyncioTestCase):
 
     # ── 准入控制 ──
 
-    async def test_should_defer_new_downloads_follows_protection_state(self):
+    async def test_new_downloads_always_require_budget_admission(self):
         manager = self.make_manager()
-        self.assertFalse(manager.should_defer_new_downloads())
+        self.assertTrue(manager.should_defer_new_downloads())
         manager._disk_protection_active = True
         self.assertTrue(manager.should_defer_new_downloads())
-        # 串行模式下永不 defer（串行闸门接管）
+        # Serial transfers use the same disk budget.
         serial = self.make_manager(serial=True)
         serial._disk_protection_active = True
-        self.assertFalse(serial.should_defer_new_downloads())
+        self.assertTrue(serial.should_defer_new_downloads())
 
     async def test_hold_gids_for_disk_gate_registers_batch(self):
         manager = self.make_manager()
@@ -315,9 +325,7 @@ class DiskGateTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(retried, [])
 
-    # ── serial 模式整体禁用 ──
-
-    async def test_serial_mode_disables_disk_gate(self):
+    async def test_serial_mode_keeps_disk_gate_enabled(self):
         manager = self.make_manager(free_gb=0, serial=True)
 
         await manager._sync_disk_space_download_protection(
@@ -325,9 +333,9 @@ class DiskGateTests(unittest.IsolatedAsyncioTestCase):
             waiting=[self.item("w-1", "waiting", total_gb=4)],
         )
 
-        self.assertEqual(manager.aria2.force_paused, [])
-        self.assertEqual(manager._disk_gate_paused_gids, {})
-        self.assertFalse(manager._disk_protection_active)
+        self.assertEqual(set(manager.aria2.force_paused), {"a-1", "w-1"})
+        self.assertEqual(set(manager._disk_gate_paused_gids), {"a-1", "w-1"})
+        self.assertTrue(manager._disk_protection_active)
 
 
 if __name__ == "__main__":

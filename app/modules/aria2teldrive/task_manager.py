@@ -13,6 +13,8 @@ from typing import Optional, Set
 from pathlib import Path
 
 from app.config import load_config
+from app.disk_budget import DiskSpaceUnavailable, disk_budget
+from app.modules.aria2teldrive.disk_recovery import DiskRecovery, allocated_bytes, download_creation, download_mutation, http_file_size
 from app.aria2_client import Aria2Client, _format_size
 from app.modules.aria2teldrive.teldrive_client import TelDriveClient
 from app import database as db
@@ -50,6 +52,9 @@ class TaskManager:
         self._remote_aria2: Optional[Aria2Client] = None
         self._ws_clients: Set = set()
         self._monitor_task: Optional[asyncio.Task] = None
+        self._source_cleanup_task: Optional[asyncio.Task] = None
+        self._disk_guard_task: Optional[asyncio.Task] = None
+        self._disk_guard_error = ""
         self._running = False
         # 内存缓存：已知的 GID 集合，避免重复查库
         self._known_gids: set = set()
@@ -81,6 +86,12 @@ class TaskManager:
         self._upload_time_snapshot: float = 0.0
         self._upload_speed: float = 0.0
         self._disk_usage_info: dict = {}  # 缓存磁盘使用信息
+        self._disk_size_probes: dict[str, asyncio.Task] = {}
+        self._disk_empty_gids: set[str] = set()
+        self._disk_probe_retry_at: dict[str, float] = {}
+        self._disk_probe_slot = asyncio.Semaphore(1)
+        self._download_mutation_lock = asyncio.Lock()
+        self._disk_recovery = DiskRecovery(self)
         self._cpu_info: dict = {}
         self._last_download_speed: int = 0  # 缓存最近的 aria2 下载速度
         self._disk_protection_active: bool = False
@@ -274,7 +285,7 @@ class TaskManager:
         return (self._get_disk_protection_threshold_gb() + 1) * 1024 ** 3
 
     def _is_disk_protection_enabled(self) -> bool:
-        return not self._is_serial_transfer_mode_enabled()
+        return True
 
     def _has_active_upload_work(self) -> bool:
         return bool(self._upload_tasks or self._uploading_gids or self._active_uploads > 0)
@@ -431,13 +442,18 @@ class TaskManager:
                     expanded.append(candidate)
         return expanded
 
-    async def _cleanup_queued_aria2_files(self, task: dict, parsed: Optional[dict] = None) -> bool:
-        cleaned = False
-        for local_path in self._queued_local_candidates(task, parsed):
-            cleaned = self._delete_managed_path(local_path) or cleaned
-        if cleaned:
-            await self._check_disk_usage()
-        return cleaned
+    async def _detach_serial_download(self, task: dict):
+        """Detach a stopped download without deleting resumable or shared cache."""
+        gid = task["aria2_gid"]
+        aria2 = self._require_aria2()
+        status = await self._disk_recovery.status(gid)
+        if status and status.get("status") not in ("removed", "error"):
+            await aria2.remove_for_recovery(gid)
+            status = await self._disk_recovery.status(gid)
+        if status and status.get("status") not in ("removed", "error"):
+            raise RuntimeError("Cannot confirm download stopped; task and cache retained")
+        await aria2.save_session()
+        disk_budget.release("aria2:" + gid)
 
     async def _has_db_download_in_flight(self) -> bool:
         for task in await db.get_all_tasks():
@@ -484,6 +500,7 @@ class TaskManager:
 
         return False
 
+    @download_creation
     async def enqueue_serial_task(self, url: str, filename: Optional[str] = None,
                                   teldrive_path: str = "/", aria2_options: Optional[dict] = None,
                                   task_id: Optional[str] = None,
@@ -539,6 +556,8 @@ class TaskManager:
 
         for task in await db.get_all_tasks():
             gid = str(task.get("aria2_gid") or "")
+            if task.get("disk_recovery_json") not in (None, "", "{}"):
+                continue
             if not gid or task.get("status") != "pending":
                 continue
 
@@ -551,27 +570,17 @@ class TaskManager:
 
             parsed = self._parse_aria2_item(item) if item else {}
             if self._is_live_serial_aria2_status(parsed.get("status")):
-                if parsed.get("status") == "paused":
+                if parsed.get("status") == "paused" and not self._is_disk_gate_held(gid):
                     self._serial_gate_paused_gids.add(gid)
                 continue
             if parsed.get("status") == "complete":
                 continue
 
-            try:
-                await aria2.force_remove(gid)
-            except Exception:
-                try:
-                    await aria2.remove(gid)
-                except Exception as e:
-                    logger.debug(f"failed to remove queued aria2 gid {gid}: {e}")
-
-            await self._cleanup_queued_aria2_files(task, parsed)
+            await self._detach_serial_download(task)
             await db.update_task(
                 task["task_id"],
                 status="pending",
                 aria2_gid=None,
-                local_path=None,
-                download_progress=0.0,
                 download_speed="",
                 file_size=self._format_source_size(
                     self._coerce_source_size_bytes(task.get("source_size_bytes"))
@@ -632,7 +641,7 @@ class TaskManager:
 
             options = self._prepare_aria2_options(task)
             try:
-                gid = await aria2.add_uri(url, options)
+                gid = await aria2.add_uri(url, dict(options, pause="true", **{"file-allocation": "none"}))
             except Exception as e:
                 logger.warning(f"serial dispatcher failed to add aria2 task {task['task_id']}: {e}")
                 await db.update_task(task["task_id"], status="pending", download_speed="", error=str(e))
@@ -641,7 +650,7 @@ class TaskManager:
 
             await db.update_task(
                 task["task_id"],
-                status="downloading",
+                status="pending",
                 aria2_gid=gid,
                 aria2_options_json=self._serialize_aria2_options(options),
                 download_progress=0.0,
@@ -652,9 +661,9 @@ class TaskManager:
                     self._coerce_source_size_bytes(task.get("source_size_bytes"))
                 ),
                 error=None,
-                local_path=None,
             )
             self._known_gids.add(gid)
+            self._hold_gid_for_disk_gate(gid)
             self._terminal_gids.discard(gid)
             self._serial_gate_paused_gids.discard(gid)
             self._serial_gate_releasing_gids.discard(gid)
@@ -793,8 +802,15 @@ class TaskManager:
         aria2 = self.aria2
         if not gid or not aria2:
             return False
+        if self._is_disk_gate_held(gid):
+            return False
         try:
+            item = await aria2.tell_status(gid)
+            await self._reserve_aria2_item(item)
             await aria2.unpause(gid)
+        except DiskSpaceUnavailable:
+            self._hold_gid_for_disk_gate(gid)
+            return False
         except Exception as e:
             logger.debug(f"serial gate unpause failed: {gid}, {e}")
             return False
@@ -915,14 +931,15 @@ class TaskManager:
             return
         # 已记录为"曾活跃"的不降级
         self._disk_gate_paused_gids[gid] = was_active or self._disk_gate_paused_gids.get(gid, False)
+        self._serial_gate_paused_gids.discard(gid)
 
     def _discard_disk_gate_gid(self, gid: str):
         if gid:
             self._disk_gate_paused_gids.pop(gid, None)
 
     def should_defer_new_downloads(self) -> bool:
-        """磁盘保护激活期间，新任务应以暂停态进入 aria2（由闸门统一放行）"""
-        return self._disk_protection_active and self._is_disk_protection_enabled()
+        """All new local downloads pass through budget admission before writing."""
+        return True
 
     def hold_gids_for_disk_gate(self, gids: list):
         """批量登记外部以暂停态推入 aria2 的 GID（如 pikpak 批量推送）"""
@@ -959,204 +976,163 @@ class TaskManager:
             await aria2.unpause(gid)
         except Exception as e:
             logger.debug(f"disk gate unpause failed: {gid}, {e}")
-            # gid 可能已不在 aria2 中（被删除/重启丢失），从闸门移除避免卡死
-            self._discard_disk_gate_gid(gid)
+            # Keep gate ownership across transient RPC failures so the next cycle retries.
             return False
         self._discard_disk_gate_gid(gid)
         return True
 
-    async def _sync_disk_space_download_protection(self, active: list, waiting: list):
-        """磁盘闸门：空间不足时暂停下载，空间恢复后放行（替代旧的并发数封顶）。
+    async def _probe_download_size(self, gid, task):
+        try:
+            async with self._disk_probe_slot:
+                options = await self._require_aria2().get_option(gid)
+                options.update(self._prepare_aria2_options(task))
+                size = await http_file_size(task.get("url") or "", options)
+                latest = await db.get_task_by_gid(gid)
+                if size is not None and latest and latest["task_id"] == task["task_id"]:
+                    await db.update_task(task["task_id"], source_size_bytes=size)
+                    if size == 0:
+                        self._disk_empty_gids.add(gid)
+        except Exception:
+            logger.debug("Download size probe failed for gid=%s; download remains paused", gid)
+        finally:
+            self._disk_probe_retry_at[gid] = asyncio.get_running_loop().time() + 60
 
-        - projected_free < threshold：暂停所有 waiting（挡住即将启动的新下载，
-          避免 fallocate 失败连环灭队）
-        - free < threshold：连 active 也暂停（停止写盘，避免 No space left）
-        - free >= resume_threshold（滞回）：恢复曾活跃的任务；waiting 类每周期
-          最多放行 1 个，且放行前校验预算
-        """
-        aria2 = self.aria2
-        if not aria2:
-            return
-
-        if not self._is_disk_protection_enabled():
-            # 串行模式自带闸门，磁盘保护整体禁用；清掉历史状态
-            if self._disk_gate_paused_gids:
-                self._disk_gate_paused_gids.clear()
-            self._disk_protection_active = False
-            self._disk_protection_info = {
-                "active": False,
-                "message": "",
-                "threshold_bytes": self._get_disk_protection_threshold_bytes(),
-                "resume_threshold_bytes": self._get_disk_protection_resume_bytes(),
-                "configured_max_concurrent": self._get_user_max_concurrent_downloads(),
-                "applied_max_concurrent": self._get_user_max_concurrent_downloads(),
-            }
-            return
-
-        disk_info = self._disk_usage_info or {}
-        if "free" not in disk_info:
-            return
-
-        active = [item for item in (active or []) if item.get("gid")]
-        waiting = [item for item in (waiting or []) if item.get("gid")]
-
-        # 接管游离的暂停任务："aria2 已暂停但 DB 状态为 pending" 说明该任务
-        # 是被闸门（或重启前的闸门、或 add_task 准入竞态）暂停的，重新纳入
-        # 闸门管理，避免永远卡在暂停态无人放行。用户手动暂停的任务 DB 状态
-        # 为 paused，不会被接管。已持有的 gid 直接跳过，不产生额外查询。
-        for item in waiting:
-            gid = item.get("gid", "")
-            if item.get("status") != "paused":
-                continue
-            if self._is_disk_gate_held(gid) or self._is_serial_gate_held(gid):
-                continue
+    def _aria2_remaining_bytes(self, item, task):
+        total = max(int(item.get("totalLength") or 0), int((task or {}).get("source_size_bytes") or 0))
+        done = int(item.get("completedLength") or 0)
+        remaining = max(0, total - done)
+        if total and not int(item.get("totalLength") or 0) and not done and task:
+            # Paused session restores do not load aria2's bitmap until unpaused. Existing
+            # allocated blocks reduce future disk growth, but do not prove data completeness.
             try:
-                db_task = await db.get_task_by_gid(gid)
-            except Exception:
-                db_task = None
-            if db_task and db_task.get("status") == "pending":
-                self._hold_gid_for_disk_gate(gid)
-                logger.info(f"磁盘闸门接管游离的暂停任务: {gid}")
+                files = item.get("files", [])
+                if len(files) != 1 or not files[0].get("path"):
+                    return remaining
+                path = self._disk_recovery.safe_path(files[0]["path"])
+                control = self._disk_recovery.safe_path(str(path) + ".aria2")
+                if ((not task.get("local_path") or Path(task["local_path"]).resolve() == path)
+                        and path.is_file() and control.is_file() and path.stat().st_size <= total):
+                    remaining = total - min(total, path.stat().st_size, allocated_bytes(path))
+            except (OSError, RuntimeError, KeyError):
+                pass
+        return remaining
 
-        free_bytes = max(0, int(disk_info.get("free") or 0))
-        threshold_bytes = self._get_disk_protection_threshold_bytes()
-        resume_threshold_bytes = self._get_disk_protection_resume_bytes()
-        was_active = self._disk_protection_active
+    async def _reserve_aria2_item(self, item: dict):
+        gid = item["gid"]
+        path = item.get("dir") or get_download_dir(self.config)
+        task = await db.get_task_by_gid(gid)
+        if task and task.get("disk_recovery_json") not in (None, "", "{}"):
+            raise DiskSpaceUnavailable("缓存回收尚未完成，下载保持暂停")
+        total = max(int(item.get("totalLength") or 0), int((task or {}).get("source_size_bytes") or 0))
+        if not total and gid not in self._disk_empty_gids:
+            probe = self._disk_size_probes.get(gid)
+            if (task and task.get("url") and (probe is None or probe.done())
+                    and asyncio.get_running_loop().time() >= self._disk_probe_retry_at.get(gid, 0)):
+                self._disk_size_probes[gid] = asyncio.create_task(self._probe_download_size(gid, task))
+            raise DiskSpaceUnavailable("无法确认文件总大小，下载已暂停；等待源站提供大小信息")
+        remaining = self._aria2_remaining_bytes(item, task)
+        disk_budget.reserve("aria2:" + gid, path, remaining, self._get_disk_protection_threshold_bytes())
 
-        # 闸门集合自清理：gid 已不在 aria2 队列中（被删除/重启丢失）则移除
-        live_gids = {item.get("gid") for item in active + waiting}
+    async def _sync_disk_space_download_protection(self, active: list, waiting: list):
+        if not self.aria2:
+            return
+        active = [item for item in active or [] if item.get("gid")]
+        waiting = [item for item in waiting or [] if item.get("gid")]
+        items = active + waiting
+        live_gids = {item["gid"] for item in items}
+        self._disk_empty_gids.intersection_update(live_gids)
+        for gid in list(self._disk_size_probes):
+            if gid not in live_gids:
+                probe = self._disk_size_probes.pop(gid)
+                probe.cancel()
+                await asyncio.gather(probe, return_exceptions=True)
+                self._disk_probe_retry_at.pop(gid, None)
+        disk_budget.retain("aria2:", {"aria2:" + gid for gid in live_gids})
         for gid in list(self._disk_gate_paused_gids):
             if gid not in live_gids:
-                self._disk_gate_paused_gids.pop(gid, None)
+                self._discard_disk_gate_gid(gid)
+        for item in waiting:
+            gid = item["gid"]
+            if item.get("status") == "paused":
+                disk_budget.release("aria2:" + gid)
+                task = await db.get_task_by_gid(gid)
+                if (task and task.get("status") in ("pending", "downloading")
+                        and task.get("disk_recovery_json") in (None, "", "{}")
+                        and not self._is_serial_gate_held(gid)):
+                    self._hold_gid_for_disk_gate(gid)
 
-        # 预测核算：当前活跃 + 即将被 aria2 提升的等待任务的剩余写入量
-        # （status=paused 的任务不会被自动提升，不占预算；闸门持有的同理）
-        pending_write_bytes = sum(self._item_remaining_bytes(item) for item in active)
-        ungated_waiting = [
-            item for item in waiting
-            if item.get("status") == "waiting"
-            and not self._is_disk_gate_held(item.get("gid", ""))
-            and not self._is_serial_gate_held(item.get("gid", ""))
-        ]
-        pending_write_bytes += sum(self._item_remaining_bytes(item) for item in ungated_waiting)
-        projected_free = free_bytes - pending_write_bytes
-
-        paused_now = 0
-        disk_gate_stalled = False
-
-        # 第一级：预算不足 → 暂停等待中的任务（挡新增）
-        if projected_free < threshold_bytes and ungated_waiting:
-            for item in ungated_waiting:
-                if await self._force_pause_for_disk_gate(item, was_active=False):
-                    paused_now += 1
-
-        # 第二级：实际剩余跌破阈值 → 不再无差别全停，而是保留一个"能在当前可用
-        # 空间内下完"的最小活跃子集继续写盘（按接近完成度优先），其余暂停。这样
-        # 始终有任务能下完去触发上传、删本地文件释放空间，打破"并行任务全停且
-        # 互相等待"的死锁；保留子集的剩余写入量受可用空间约束，绝不会写穿磁盘。
-        if free_bytes < threshold_bytes:
-            gated_active = [
-                item for item in active
-                if item.get("gid") and not self._is_serial_gate_held(item.get("gid", ""))
-            ]
-            # 仅已知大小（remaining>0）的任务可作"续跑"候选：未知大小无法核算写入
-            # 预算，紧急状态下一律暂停，避免无界写盘撑爆磁盘。
-            candidates = sorted(
-                (item for item in gated_active if self._item_remaining_bytes(item) > 0),
-                key=self._item_remaining_bytes,
-            )
-            keep_running: set[str] = set()
-            budget = free_bytes
-            for item in candidates:
-                remaining = self._item_remaining_bytes(item)
-                if remaining <= budget:
-                    keep_running.add(item.get("gid", ""))
-                    budget -= remaining
+        # Existing writers are accounted before admitting any queued work or relay download.
+        for item in items:
+            if item.get("status") in ("active", "waiting"):
+                task = await db.get_task_by_gid(item["gid"])
+                total = max(int(item.get("totalLength") or 0), int((task or {}).get("source_size_bytes") or 0))
+                path = item.get("dir") or get_download_dir(self.config)
+                remaining = (self._aria2_remaining_bytes(item, task)
+                             if total or item["gid"] in self._disk_empty_gids else shutil.disk_usage(path).free)
+                disk_budget.track("aria2:" + item["gid"], path,
+                                  remaining, self._get_disk_protection_threshold_bytes())
+        running = []
+        for item in sorted(items, key=lambda value: -self._item_remaining_bytes(value)):
+            if item.get("status") not in ("active", "waiting"):
+                continue
+            try:
+                await self._reserve_aria2_item(item)
+                running.append(item["gid"])
+            except Exception as exc:
+                if await self._force_pause_for_disk_gate(item, was_active=item.get("status") == "active"):
+                    disk_budget.release("aria2:" + item["gid"])
+                    item["status"] = "paused"
                 else:
-                    break  # 升序排列：当前放不下，后续更放不下
-            for item in gated_active:
-                if item.get("gid") in keep_running:
+                    running.append(item["gid"])
+                task = await db.get_task_by_gid(item["gid"])
+                self._set_runtime_task_fields((task or {}).get("task_id", item["gid"]), download_note=str(exc))
+
+        serial = self._is_serial_transfer_mode_enabled()
+        may_resume = not serial or (not running and not await self._has_serial_resume_blockers())
+        if may_resume:
+            for item in sorted(items, key=self._item_remaining_bytes):
+                gid = item["gid"]
+                if not self._is_disk_gate_held(gid) or item.get("status") != "paused":
                     continue
-                if await self._force_pause_for_disk_gate(item, was_active=True):
-                    paused_now += 1
-            # 物理极限：连剩余最小的活跃任务都塞不进当前可用空间，无法靠"下完任一
-            # 任务"自救。已全部暂停以保护系统盘，此时只能等在传任务上传释放空间；
-            # 若无在传任务，需用户介入（扩容 / 降并发 / 取消大任务）。
-            disk_gate_stalled = bool(gated_active) and not keep_running
+                if self._is_serial_gate_held(gid):
+                    continue
+                try:
+                    await self._reserve_aria2_item(item)
+                except Exception as exc:
+                    task = await db.get_task_by_gid(gid)
+                    self._set_runtime_task_fields((task or {}).get("task_id", gid), download_note=str(exc))
+                    continue
+                if await self._release_from_disk_gate(gid):
+                    item["status"] = "waiting"
+                    running.append(gid)
+                    task = await db.get_task_by_gid(gid)
+                    self._clear_runtime_task_fields((task or {}).get("task_id", gid), "download_note")
+                    break
 
-        # 恢复（滞回）：剩余空间回到 resume 线之上
-        resumed_now = 0
-        if free_bytes >= resume_threshold_bytes and self._disk_gate_paused_gids:
-            remaining_by_gid = {
-                item.get("gid"): self._item_remaining_bytes(item)
-                for item in waiting + active
-            }
-            # 曾活跃的任务全部放行（它们的磁盘预算在被暂停前已被接受），
-            # 其剩余写入量计入预算，避免后续 waiting 类放行超卖
-            for gid, gate_was_active in list(self._disk_gate_paused_gids.items()):
-                if gate_was_active:
-                    if await self._release_from_disk_gate(gid):
-                        resumed_now += 1
-                        pending_write_bytes += remaining_by_gid.get(gid, 0)
-            # waiting 类每周期最多放行 1 个：选第一个预算放得下的
-            for gid in list(self._disk_gate_paused_gids):
-                item_remaining = remaining_by_gid.get(gid, 0)
-                if free_bytes - pending_write_bytes - item_remaining >= threshold_bytes:
-                    if await self._release_from_disk_gate(gid):
-                        resumed_now += 1
-                        pending_write_bytes += item_remaining
-                        break  # 每周期只放行一个
-
-        held_count = len(self._disk_gate_paused_gids)
-        should_protect = held_count > 0 or free_bytes < threshold_bytes
-        configured_max = self._get_user_max_concurrent_downloads()
-        self._disk_protection_active = should_protect
-        if disk_gate_stalled:
-            message = (
-                f"磁盘空间严重不足，已暂停全部 {held_count} 个下载："
-                "单个任务体积超过当前可用空间，无法靠下载完成自行释放。"
-                "请等待在传任务上传完毕，或扩容磁盘 / 降低并发 / 取消超大任务。"
-            )
-        elif should_protect:
-            message = f"磁盘空间不足，已暂停 {held_count} 个下载，等待上传释放空间"
-        else:
-            message = ""
+        if not running and may_resume and self._disk_gate_paused_gids:
+            recovered = await self._disk_recovery.run(items)
+            if recovered:
+                running.append(recovered)
+                await self._check_disk_usage()
+        free = int((self._disk_usage_info or {}).get("free") or 0)
+        held = len(self._disk_gate_paused_gids)
+        was_protected = self._disk_protection_active
+        self._disk_protection_active = bool(held or free < self._get_disk_protection_threshold_bytes())
         self._disk_protection_info = {
-            "active": should_protect,
-            "message": message,
-            "stalled": disk_gate_stalled,
-            "free_bytes": free_bytes,
-            "projected_free_bytes": projected_free,
-            "threshold_bytes": threshold_bytes,
-            "resume_threshold_bytes": resume_threshold_bytes,
-            "held_count": held_count,
-            "configured_max_concurrent": configured_max,
-            "applied_max_concurrent": configured_max,
+            "active": self._disk_protection_active,
+            "message": f"磁盘空间不足，{held} 个下载等待空间预算" if held else "",
+            "recovery_message": self._disk_recovery.message if held or running else "",
+            "stalled": bool(held and not running), "held_count": held, "free_bytes": free,
+            "threshold_bytes": self._get_disk_protection_threshold_bytes(),
+            "resume_threshold_bytes": self._get_disk_protection_resume_bytes(),
+            "configured_max_concurrent": self._get_user_max_concurrent_downloads(),
+            "applied_max_concurrent": self._get_user_max_concurrent_downloads(),
         }
-
-        if paused_now:
-            logger.warning(
-                f"磁盘闸门已暂停 {paused_now} 个下载: free={free_bytes}, "
-                f"projected_free={projected_free}, threshold={threshold_bytes}, "
-                f"held={held_count}"
-            )
-        if disk_gate_stalled:
-            logger.error(
-                f"磁盘闸门停滞：单任务体积超过可用空间，已全部暂停。"
-                f"free={free_bytes}, threshold={threshold_bytes}, held={held_count}。"
-                f"需等待在传任务释放空间，或扩容 / 降并发 / 取消超大任务"
-            )
-        if resumed_now:
-            logger.info(
-                f"磁盘空间恢复，闸门放行 {resumed_now} 个下载: free={free_bytes}, "
-                f"remaining_held={len(self._disk_gate_paused_gids)}"
-            )
-        if was_active and not should_protect:
-            logger.info(f"磁盘保护已解除: free={free_bytes}")
+        if was_protected and not self._disk_protection_active:
             await self._auto_retry_disk_failed_downloads()
 
     async def _auto_retry_disk_failed_downloads(self):
-        """磁盘保护解除时，自动重试因磁盘空间错误失败的下载（封顶 3 次）"""
+        """Requeue disk-failed downloads paused, including while protection is active."""
         disk_error_markers = (
             "No space left",
             "fallocate failed",
@@ -1183,7 +1159,7 @@ class TaskManager:
                 result = await self.retry_task(task_id)
                 if result.get("success"):
                     logger.info(
-                        f"磁盘恢复后自动重试下载: {task_id} "
+                        f"磁盘错误下载重新排队，等待空间预算: {task_id} "
                         f"(第 {attempts + 1}/3 次)"
                     )
                 else:
@@ -1202,6 +1178,7 @@ class TaskManager:
         self._init_clients()
         # 同步配置到 aria2
         await self._apply_aria2_options()
+        await self._disk_recovery.resume_interrupted()
         # 加载已有任务的 GID 到缓存
         all_tasks = await db.get_all_tasks()
         for t in all_tasks:
@@ -1244,17 +1221,59 @@ class TaskManager:
         # 预热 psutil.cpu_percent()，首次调用返回 0.0，需要先调一次建立基准
         psutil.cpu_percent(interval=None)
         self._monitor_task = asyncio.create_task(self._monitor_loop())
+        self._disk_guard_task = asyncio.create_task(self._disk_guard_loop())
         logger.info("任务管理器已启动")
+
+    async def _check_disk_guard(self):
+        try:
+            path = get_download_dir(self.config)
+            if shutil.disk_usage(path).free >= self._get_disk_protection_threshold_bytes():
+                self._disk_guard_error = ""
+                return
+            self._disk_guard_error = "磁盘可用空间低于保留值，已请求暂停全部下载"
+        except OSError:
+            self._disk_guard_error = "无法读取下载磁盘容量，已请求暂停全部下载"
+        try:
+            await asyncio.wait_for(self._require_aria2().pause_all(), timeout=3)
+        except Exception:
+            from app.aria2_service import aria2_service
+            if aria2_service.is_running():
+                await aria2_service.stop()
+                self._disk_guard_error = "磁盘告急且 RPC 无法暂停，已停止托管 aria2；恢复空间后重启服务"
+            else:
+                self._disk_guard_error = "磁盘告急且无法控制 aria2，请检查下载进程和磁盘容量"
+            logger.error(self._disk_guard_error)
+
+    async def _disk_guard_loop(self):
+        while self._running:
+            try:
+                await self._check_disk_guard()
+            except asyncio.CancelledError:
+                return
+            except Exception:
+                logger.exception("Independent disk guard failed")
+            await asyncio.sleep(2)
 
     async def stop(self):
         """停止任务管理器"""
         self._running = False
+        if self._disk_guard_task:
+            self._disk_guard_task.cancel()
+            await asyncio.gather(self._disk_guard_task, return_exceptions=True)
+            self._disk_guard_task = None
         if self._monitor_task:
             self._monitor_task.cancel()
-            try:
-                await self._monitor_task
-            except asyncio.CancelledError:
-                pass
+            await asyncio.gather(self._monitor_task, return_exceptions=True)
+            self._monitor_task = None
+        probes = list(self._disk_size_probes.values())
+        for probe in probes:
+            probe.cancel()
+        await asyncio.gather(*probes, return_exceptions=True)
+        self._disk_size_probes.clear()
+        if self._source_cleanup_task:
+            self._source_cleanup_task.cancel()
+            await asyncio.gather(self._source_cleanup_task, return_exceptions=True)
+            self._source_cleanup_task = None
                 
         # 取消所有正在进行的异步上传协程
         if self._upload_tasks:
@@ -1343,6 +1362,7 @@ class TaskManager:
             return None
         merged = dict(task)
         merged.pop("aria2_options_json", None)
+        merged.pop("disk_recovery_json", None)
         task_id = str(merged.get("task_id") or "")
         confirmed_parts = self._get_persisted_confirmed_part_numbers(merged)
         confirmed_chunks = max(
@@ -1548,9 +1568,10 @@ class TaskManager:
         try:
             if os.path.isfile(local_path):
                 stat = os.stat(local_path)
-                entries.append(f"file:{stat.st_size}:{int(stat.st_mtime)}")
+                entries.append(f"file:{stat.st_size}:{stat.st_mtime_ns}")
             elif os.path.isdir(local_path):
                 for root, _dirs, filenames in os.walk(local_path):
+                    _dirs.sort()
                     for fname in sorted(filenames):
                         full_path = os.path.join(root, fname)
                         try:
@@ -1558,7 +1579,7 @@ class TaskManager:
                         except OSError:
                             continue
                         rel = os.path.relpath(full_path, local_path).replace("\\", "/")
-                        entries.append(f"{rel}:{stat.st_size}:{int(stat.st_mtime)}")
+                        entries.append(f"{rel}:{stat.st_size}:{stat.st_mtime_ns}")
         except Exception as e:
             logger.debug(f"calc upload source fingerprint failed: {local_path}, {e}")
             return ""
@@ -1929,7 +1950,9 @@ class TaskManager:
         if self._cpu_info:
             data["cpu"] = self._cpu_info
         if self._disk_protection_info:
-            data["download_protection"] = self._disk_protection_info
+            data["download_protection"] = dict(self._disk_protection_info)
+            if self._disk_guard_error:
+                data["download_protection"].update(active=True, message=self._disk_guard_error)
         return data
 
 
@@ -1998,10 +2021,16 @@ class TaskManager:
                         await self._cleanup_completed_files()
                     except Exception as e:
                         logger.debug(f"清理异常: {e}")
+                    if self._source_cleanup_task is None or self._source_cleanup_task.done():
+                        self._source_cleanup_task = asyncio.create_task(self._cleanup_completed_sources())
 
                 # 定期自动重试失败的上传任务（每 30 秒）
                 if now - self._last_retry_time >= 30:
                     self._last_retry_time = now
+                    try:
+                        await self._auto_retry_disk_failed_downloads()
+                    except Exception as e:
+                        logger.debug(f"磁盘失败任务重新排队异常: {e}")
                     try:
                         await self._auto_retry_failed_uploads()
                     except Exception as e:
@@ -2014,6 +2043,25 @@ class TaskManager:
             except Exception as e:
                 logger.error(f"监控循环异常: {e}")
                 await asyncio.sleep(5)
+
+    async def _cleanup_completed_sources(self):
+        from app.modules.pikpak.account_pool import pikpak_account_pool
+        try:
+            ready = await db.get_ready_source_cleanups()
+        except Exception as exc:
+            logger.warning(f"读取源文件清理队列失败: {exc}")
+            return
+        for cleanup in ready:
+            try:
+                _, client = await pikpak_account_pool.client_for_account(cleanup["account_id"])
+                await client.delete_files(json.loads(cleanup["file_ids_json"]))
+                await db.finish_source_cleanup(cleanup["cleanup_id"])
+            except Exception as exc:
+                try:
+                    await db.finish_source_cleanup(cleanup["cleanup_id"], str(exc))
+                except Exception:
+                    pass
+                logger.warning(f"PikPak 源文件清理待重试: {cleanup['cleanup_id']}: {exc}")
 
     async def _check_disk_usage(self):
         """采集磁盘使用信息，供前端仪表盘显示"""
@@ -2057,23 +2105,31 @@ class TaskManager:
 
     async def _sync_aria2_tasks(self):
         """从 aria2 获取所有任务，同步到本地数据库"""
+        await self._disk_recovery.resume_interrupted()
         try:
             # 获取 aria2 全部任务
             aria2 = self._require_aria2()
             active = await aria2.tell_active() or []
-            waiting = await aria2.tell_waiting(0, 1000) or []
+            waiting = await aria2.tell_waiting_all() or []
             # 分页拉取所有 stopped 任务，避免超过 100 条后遗漏
             stopped = await aria2.tell_stopped_all() or []
         except Exception as e:
             # aria2 连接失败时静默跳过（仅每 30 秒打一次日志）
             self._last_download_speed = 0
             logger.debug(f"aria2 轮询失败: {e}")
+            try:
+                await self._require_aria2().pause_all()
+            except Exception:
+                logger.warning("无法通过 RPC 暂停 aria2，磁盘保护暂时无法控制下载进程")
             return
 
         try:
             await self._sync_disk_space_download_protection(active, waiting)
         except Exception as e:
             logger.debug(f"同步磁盘保护状态失败: {e}")
+
+        active = [item for item in active if not item.get("_disk_removed")]
+        waiting = [item for item in waiting if not item.get("_disk_removed")]
 
         removed_serial_gids: set[str] = set()
         try:
@@ -2194,10 +2250,13 @@ class TaskManager:
 
             task_id = task["task_id"]
             current_status = task["status"]
+            if task.get("disk_recovery_json") not in (None, "", "{}"):
+                continue
             if (
                 self._is_serial_transfer_mode_enabled()
                 and aria2_status == "paused"
                 and current_status == "pending"
+                and not self._is_disk_gate_held(gid)
             ):
                 self._serial_gate_paused_gids.add(gid)
 
@@ -2633,7 +2692,7 @@ class TaskManager:
         """下载完成后自动上传到 TelDrive。"""
         if not await db.confirm_upload_session_running(task_id, token):
             logger.info(f"skip duplicate upload runner for task {task_id} gid={gid}, token={token}")
-            self._upload_tasks.pop(task_id, None)
+            self._forget_upload_runner(task_id)
             await self._refresh_upload_session_from_db(task_id)
             return
         self._upload_session_state[task_id] = "running"
@@ -2643,8 +2702,10 @@ class TaskManager:
         self._uploading_gids.add(gid)
         finalized = False
         keep_session_meta = False
-        await self._wait_upload_slot()
+        slot_acquired = False
         try:
+            await self._wait_upload_slot()
+            slot_acquired = True
             task = await self._refresh_upload_session_from_db(task_id)
             if not task or not task.get("local_path") or task.get("upload_finished_at") or task.get("status") == "completed":
                 logger.warning(f"task {task_id} missing local_path, skip upload")
@@ -2680,6 +2741,7 @@ class TaskManager:
             finalized = bool(finalized_task and finalized_task.get("upload_finished_at"))
         except asyncio.CancelledError:
             logger.info(f"task {task_id} upload cancelled")
+            await db.release_upload_session(task_id, token, "idle", keep_checkpoint=True)
         except Exception as e:
             logger.error(f"task {task_id} upload failed: {e}")
             task_after_error = await db.get_task(task_id)
@@ -2697,9 +2759,10 @@ class TaskManager:
                 )
                 await self._broadcast_task_update(task_id)
         finally:
-            self._release_upload_slot()
+            if slot_acquired:
+                self._release_upload_slot()
             self._uploading_gids.discard(gid)
-            self._upload_tasks.pop(task_id, None)
+            self._forget_upload_runner(task_id)
             if finalized:
                 self._mark_upload_session_finalized(task_id)
             else:
@@ -2723,12 +2786,8 @@ class TaskManager:
             # 带重试的删除（Windows 可能因句柄延迟释放而失败）
             for attempt in range(3):
                 try:
-                    if os.path.isdir(local_path):
-                        shutil.rmtree(local_path)
-                        logger.info(f"已删除本地文件夹: {local_path}")
-                    else:
-                        os.remove(local_path)
-                        logger.info(f"已删除本地文件: {local_path}")
+                    await self._cleanup_task_local_files(task)
+                    await db.update_task(task_id, error=None)
                     await self._check_disk_usage()
                     return True
                 except PermissionError:
@@ -2739,6 +2798,7 @@ class TaskManager:
                         raise
         except Exception as e:
             logger.warning(f"删除本地文件失败: {local_path}, {e}")
+            await db.update_task(task_id, error=f"Local cleanup pending: {e}")
 
         return False
 
@@ -2767,12 +2827,7 @@ class TaskManager:
                 label = "已完成"
                 logger.info(f"兜底清理：删除{label}任务的残留文件: {local_path}")
                 try:
-                    if os.path.isdir(local_path):
-                        shutil.rmtree(local_path)
-                    else:
-                        os.remove(local_path)
-                    cleaned_any = True
-                    logger.info(f"兜底清理成功: {local_path}")
+                    cleaned_any = await self._auto_delete_local(task["task_id"], local_path) or cleaned_any
                 except Exception as e:
                     logger.warning(f"兜底清理失败: {local_path}, {e}")
             if cleaned_any:
@@ -2889,8 +2944,13 @@ class TaskManager:
         import time
         teldrive = self._require_teldrive()
         base_teldrive_path = teldrive_path.rstrip("/") if teldrive_path != "/" else "/"
+        if not os.path.isdir(dir_path):
+            raise FileNotFoundError(dir_path)
+        initial_fingerprint = self._calc_upload_source_fingerprint(dir_path)
+        def walk_error(error):
+            raise error
         all_files = []
-        for root, _dirs, filenames in os.walk(dir_path):
+        for root, _dirs, filenames in os.walk(dir_path, onerror=walk_error):
             for fname in filenames:
                 full_path = os.path.join(root, fname)
                 rel_path = os.path.relpath(full_path, dir_path)
@@ -2898,6 +2958,9 @@ class TaskManager:
                 all_files.append((full_path, rel_path, file_size))
         all_files.sort(key=lambda item: item[1].replace("\\", "/"))
         if not all_files:
+            if not initial_fingerprint or initial_fingerprint != self._calc_upload_source_fingerprint(dir_path):
+                raise RuntimeError("Local directory changed during upload")
+            await self._complete_upload_session_or_raise(task_id, token, 0, 0, stage="empty-directory-finalize")
             self._mark_upload_session_finalized(task_id)
             await db.update_task(task_id, status="completed", upload_progress=100.0)
             await self._broadcast_task_update(task_id)
@@ -2906,9 +2969,10 @@ class TaskManager:
         total_size = sum(s for _, _, s in all_files)
         total_chunks = sum(self._count_file_chunks(s) for _, _, s in all_files)
         uploaded_total = [0]
-        baseline_chunks = self._get_task_confirmed_chunk_baseline(current_task, total_chunks)
-        confirmed_chunks_total = [baseline_chunks]
-        remaining_confirmed_chunks = int(baseline_chunks)
+        directory_state = json.loads(current_task.get("upload_directory_state_json") or "{}")
+        completed_files = directory_state.setdefault("completed", {})
+        confirmed_chunks_total = [0]
+        baseline_chunks = 0
         persisted_upload_id = str(current_task.get("upload_id") or "")
         persisted_confirmed_part_numbers = self._get_persisted_confirmed_part_numbers(current_task)
         persisted_remote_parts = self._get_persisted_remote_parts(current_task)
@@ -2923,15 +2987,16 @@ class TaskManager:
                 file_uploaded_before = uploaded_total[0]
                 file_chunks_before = confirmed_chunks_total[0]
                 file_total_chunks = self._count_file_chunks(file_size)
-                resume_current_file = remaining_confirmed_chunks < file_total_chunks
-                if remaining_confirmed_chunks >= file_total_chunks:
+                signature = [file_size, os.stat(full_path).st_mtime_ns]
+                if completed_files.get(rel_path) == signature:
                     uploaded_total[0] += file_size
-                    confirmed_chunks_total[0] = min(total_chunks, confirmed_chunks_total[0] + file_total_chunks)
-                    remaining_confirmed_chunks -= file_total_chunks
+                    confirmed_chunks_total[0] += file_total_chunks
                     continue
-                current_file_baseline = max(0, remaining_confirmed_chunks)
-                if current_file_baseline > 0 and not persisted_confirmed_part_numbers:
-                    persisted_confirmed_part_numbers = list(range(1, current_file_baseline + 1))
+                if directory_state.get("current") != rel_path or directory_state.get("signature") != signature:
+                    persisted_upload_id = ""
+                    persisted_confirmed_part_numbers = []
+                    persisted_remote_parts = []
+                directory_state.update(current=rel_path, signature=signature)
                 current_file_upload_id = persisted_upload_id or uuid.uuid4().hex
                 if token:
                     prepared = await db.update_upload_session_metadata(
@@ -2949,6 +3014,7 @@ class TaskManager:
                         confirmed_chunks=float(file_chunks_before + len(persisted_confirmed_part_numbers)),
                         confirmed_total=int(total_chunks),
                         reconciled=bool(persisted_confirmed_part_numbers or persisted_remote_parts),
+                        directory_state_json=json.dumps(directory_state),
                     )
                     if not prepared:
                         raise RuntimeError(
@@ -3053,10 +3119,23 @@ class TaskManager:
                     if self._is_polluted_upload_error(result.get("error")):
                         self._set_runtime_task_fields(task_id, upload_note="remote parts polluted; clean then retry", upload_note_level="warning")
                     raise Exception(f"upload failed: {rel_path} - {result.get('error', 'unknown error')}")
-                await self._cleanup_orphan_parts(task_id, upload_meta)
+                if [os.path.getsize(full_path), os.stat(full_path).st_mtime_ns] != signature:
+                    raise RuntimeError(f"Local file changed during upload: {rel_path}")
+                completed_files[rel_path] = signature
+                directory_state.update(current="", signature=None)
                 uploaded_total[0] += file_size
-                confirmed_chunks_total[0] = min(total_chunks, confirmed_chunks_total[0] + file_total_chunks)
-                remaining_confirmed_chunks = 0
+                confirmed_chunks_total[0] += file_total_chunks
+                if token:
+                    committed = await db.update_upload_session_metadata(
+                        task_id, token, upload_id="", confirmed_parts_json="[]", remote_parts_json="[]",
+                        confirmed_chunks=float(confirmed_chunks_total[0]), confirmed_total=total_chunks,
+                        directory_state_json=json.dumps(directory_state),
+                    )
+                    if not committed:
+                        raise RuntimeError("upload_session_conflict: directory commit lost ownership")
+                else:
+                    await db.update_task(task_id, upload_directory_state_json=json.dumps(directory_state))
+                await self._cleanup_orphan_parts(task_id, upload_meta)
                 self._set_runtime_task_fields(task_id, upload_chunk_done=confirmed_chunks_total[0], upload_chunk_total=total_chunks, upload_note=None, upload_note_level=None)
                 await self._ensure_upload_checkpoint_persisted(
                     task_id,
@@ -3080,6 +3159,8 @@ class TaskManager:
                 persisted_upload_id = ""
                 persisted_confirmed_part_numbers = []
                 persisted_remote_parts = []
+            if not initial_fingerprint or initial_fingerprint != self._calc_upload_source_fingerprint(dir_path):
+                raise RuntimeError("Local directory changed during upload")
             self._set_runtime_task_fields(task_id, upload_chunk_done=total_chunks, upload_chunk_total=total_chunks, upload_note=None, upload_note_level=None)
             self._upload_confirmed_checkpoints[task_id] = float(total_chunks)
             await self._complete_upload_session_or_raise(
@@ -3287,6 +3368,7 @@ class TaskManager:
     # 手动添加任务（通过面板）
     # ===========================================
 
+    @download_creation
     async def register_external_task(self, gid: str, url: str, filename: Optional[str] = None,
                                      teldrive_path: str = "/", status: str = "pending",
                                      aria2_options: Optional[dict] = None,
@@ -3320,6 +3402,7 @@ class TaskManager:
         self.mirror_to_remote_aria2(url, filename)
         return self._merge_runtime_task_fields(await db.get_task(gid))
 
+    @download_creation
     async def add_task(self, url: str, filename: Optional[str] = None,
                        teldrive_path: str = "/") -> dict:
         """通过面板手动添加下载+上传任务"""
@@ -3356,6 +3439,7 @@ class TaskManager:
     # 任务操作
     # ===========================================
 
+    @download_mutation
     async def pause_task(self, task_id: str) -> dict:
         task = await db.get_task(task_id)
         if not task:
@@ -3365,7 +3449,7 @@ class TaskManager:
             return {"success": False, "message": "??????????????????"}
         try:
             if status == "uploading":
-                self._cancel_existing_upload(task_id)
+                await self._cancel_existing_upload(task_id)
                 self.clear_upload_progress(task_id)
                 self._set_runtime_task_fields(task_id, upload_note=None, upload_note_level=None)
                 self._clear_upload_retry_budget(task_id)
@@ -3388,24 +3472,12 @@ class TaskManager:
             aria2 = self._require_aria2()
             gid = task["aria2_gid"]
             if self._is_serial_transfer_mode_enabled() and status == "pending":
-                parsed = {}
-                try:
-                    parsed = self._parse_aria2_item(await aria2.tell_status(gid))
-                except Exception:
-                    pass
-                try:
-                    await aria2.force_remove(gid)
-                except Exception:
-                    try:
-                        await aria2.remove(gid)
-                    except Exception:
-                        pass
-                await self._cleanup_queued_aria2_files(task, parsed)
+                await self._detach_serial_download(task)
                 self._known_gids.discard(gid)
                 self._terminal_gids.add(gid)
                 self._serial_gate_paused_gids.discard(gid)
                 self._serial_gate_releasing_gids.discard(gid)
-                await db.update_task(task_id, status="paused", aria2_gid=None, local_path=None, download_progress=0.0, download_speed="", error=None)
+                await db.update_task(task_id, status="paused", aria2_gid=None, download_speed="", error=None)
                 await self._broadcast_task_update(task_id)
                 return {"success": True, "message": "???"}
             if not self._is_serial_gate_held(gid) and not self._is_disk_gate_held(gid):
@@ -3419,6 +3491,7 @@ class TaskManager:
         except Exception as e:
             return {"success": False, "message": str(e)}
 
+    @download_mutation
     async def resume_task(self, task_id: str) -> dict:
         task = await db.get_task(task_id)
         if not task:
@@ -3451,25 +3524,12 @@ class TaskManager:
                 return {"success": True, "message": "???"}
             gid = task["aria2_gid"]
             if self._is_serial_transfer_mode_enabled():
-                aria2 = self._require_aria2()
-                parsed = {}
-                try:
-                    parsed = self._parse_aria2_item(await aria2.tell_status(gid))
-                except Exception:
-                    pass
-                try:
-                    await aria2.force_remove(gid)
-                except Exception:
-                    try:
-                        await aria2.remove(gid)
-                    except Exception:
-                        pass
-                await self._cleanup_queued_aria2_files(task, parsed)
+                await self._detach_serial_download(task)
                 self._known_gids.discard(gid)
                 self._terminal_gids.add(gid)
                 self._serial_gate_paused_gids.discard(gid)
                 self._serial_gate_releasing_gids.discard(gid)
-                await db.update_task(task_id, status="pending", aria2_gid=None, local_path=None, download_progress=0.0, download_speed="", error=None)
+                await db.update_task(task_id, status="pending", aria2_gid=None, download_speed="", error=None)
                 await self._dispatch_next_serial_download()
             else:
                 aria2 = self._require_aria2()
@@ -3488,7 +3548,11 @@ class TaskManager:
         except Exception as e:
             return {"success": False, "message": str(e)}
 
+    @download_mutation
     async def cancel_task(self, task_id: str) -> dict:
+        return await self._cancel_task(task_id)
+
+    async def _cancel_task(self, task_id: str) -> dict:
         """取消任务"""
         task = await db.get_task(task_id)
         if not task:
@@ -3501,10 +3565,11 @@ class TaskManager:
                 try:
                     aria2 = self._require_aria2()
                     await aria2.force_remove(task["aria2_gid"])
-                except Exception:
-                    pass
+                except Exception as exc:
+                    if task["status"] in ("downloading", "pending", "paused"):
+                        raise RuntimeError("Cannot confirm aria2 stopped; local cache retained") from exc
 
-            self._cancel_existing_upload(task_id)
+            await self._cancel_existing_upload(task_id)
             self.clear_upload_progress(task_id)
             self._clear_runtime_task_fields(task_id)
             self._reset_upload_retry_state(task_id)
@@ -3519,13 +3584,7 @@ class TaskManager:
                 self._serial_gate_releasing_gids.discard(old_gid)
                 self._discard_disk_gate_gid(old_gid)
 
-            local = self._get_upload_path(task.get("local_path", ""))
-
-            if local and os.path.exists(local):
-                if os.path.isdir(local):
-                    shutil.rmtree(local, ignore_errors=True)
-                else:
-                    os.remove(local)
+            await self._cleanup_task_local_files(task)
 
             await db.delete_task(task_id)
             await self.broadcast({"type": "task_deleted", "data": {"task_id": task_id}})
@@ -3536,24 +3595,32 @@ class TaskManager:
 
 
 
-    def _cancel_existing_upload(self, task_id: str):
+    def _forget_upload_runner(self, task_id: str):
+        if self._upload_tasks.get(task_id) is asyncio.current_task():
+            self._upload_tasks.pop(task_id, None)
+
+    async def _cancel_existing_upload(self, task_id: str):
         """取消正在进行的上传任务（如果有）"""
-        existing_task = self._upload_tasks.pop(task_id, None)
+        existing_task = self._upload_tasks.get(task_id)
         if existing_task and not existing_task.done():
             existing_task.cancel()
+            await asyncio.gather(existing_task, return_exceptions=True)
             logger.info(f"已取消任务 {task_id} 的旧上传协程")
+        if self._upload_tasks.get(task_id) is existing_task:
+            self._upload_tasks.pop(task_id, None)
 
         # 清理 _uploading_gids 中对应的 GID，解除去重锁定
         # task_id 本身可能就是 GID（直接用 GID 做 task_id 的情况）
         self._uploading_gids.discard(task_id)
 
+    @download_mutation
     async def retry_task(self, task_id: str) -> dict:
         task = await db.get_task(task_id)
         if not task:
             return {"success": False, "message": "?????"}
         if task["status"] not in ("failed", "uploading"):
             return {"success": False, "message": "?????????????"}
-        self._cancel_existing_upload(task_id)
+        await self._cancel_existing_upload(task_id)
         self._clear_upload_session_state(task_id, keep_meta=True)
         if task.get("upload_session_token"):
             await db.release_upload_session(task_id, task["upload_session_token"], "idle", keep_checkpoint=True)
@@ -3628,14 +3695,16 @@ class TaskManager:
     async def _retry_upload(self, task_id: str, token: str):
         if not await db.confirm_upload_session_running(task_id, token):
             logger.info(f"skip duplicate retry upload runner for task {task_id}, token={token}")
-            self._upload_tasks.pop(task_id, None)
+            self._forget_upload_runner(task_id)
             await self._refresh_upload_session_from_db(task_id)
             return
         self._upload_session_state[task_id] = "running"
         keep_session_meta = False
         finalized = False
-        await self._wait_upload_slot()
+        slot_acquired = False
         try:
+            await self._wait_upload_slot()
+            slot_acquired = True
             task = await self._refresh_upload_session_from_db(task_id)
             if not task:
                 return
@@ -3669,6 +3738,7 @@ class TaskManager:
             finalized = bool(finalized_task and finalized_task.get("upload_finished_at"))
         except asyncio.CancelledError:
             logger.info(f"task {task_id} retry upload cancelled")
+            await db.release_upload_session(task_id, token, "idle", keep_checkpoint=True)
         except Exception as e:
             logger.error(f"task {task_id} retry upload failed: {e}")
             keep_session_meta = self._is_polluted_upload_error(str(e))
@@ -3678,19 +3748,46 @@ class TaskManager:
             await db.release_upload_session(task_id, token, next_state, error=str(e), keep_checkpoint=True)
             await self._broadcast_task_update(task_id)
         finally:
-            self._release_upload_slot()
-            self._upload_tasks.pop(task_id, None)
+            if slot_acquired:
+                self._release_upload_slot()
+            self._forget_upload_runner(task_id)
             if finalized:
                 self._mark_upload_session_finalized(task_id)
             else:
                 self._clear_upload_session_state(task_id, keep_meta=keep_session_meta)
 
+    async def _cleanup_task_local_files(self, task: dict):
+        candidates = self._queued_local_candidates(task)
+        local = task.get("local_path")
+        if local:
+            candidates.append(self._get_upload_path(local))
+        other_tasks = await db.get_all_tasks()
+        for candidate in dict.fromkeys(candidates):
+            if not candidate or not os.path.exists(candidate):
+                continue
+            target = Path(candidate).resolve()
+            for other in other_tasks:
+                if other["task_id"] == task["task_id"] or not other.get("local_path"):
+                    continue
+                other_path = Path(self._get_upload_path(other["local_path"])).resolve()
+                if target == other_path or target in other_path.parents or other_path in target.parents:
+                    raise RuntimeError(f"Local path is still owned by task {other['task_id']}")
+            if not self._delete_managed_path(candidate):
+                raise RuntimeError(f"Local cleanup failed; task retained: {candidate}")
+
+    @download_mutation
     async def delete_task(self, task_id: str) -> dict:
         task = await db.get_task(task_id)
         if not task:
             return {"success": False, "message": "?????"}
         if task["status"] in ("downloading", "uploading", "pending", "paused"):
-            await self.cancel_task(task_id)
+            return await self._cancel_task(task_id)
+        try:
+            await self._cancel_existing_upload(task_id)
+            await self._cleanup_task_local_files(task)
+        except Exception as exc:
+            await db.update_task(task_id, error=str(exc))
+            return {"success": False, "message": str(exc)}
         gid = task.get("aria2_gid")
         if gid:
             self._known_gids.discard(gid)

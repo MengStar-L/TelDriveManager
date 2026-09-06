@@ -15,6 +15,13 @@ from typing import Optional, List
 logger = logging.getLogger(__name__)
 
 
+class Aria2RPCError(RuntimeError):
+    def __init__(self, error):
+        self.code = error.get("code")
+        self.message = str(error.get("message", ""))
+        super().__init__(f"aria2 RPC error: {self.message}")
+
+
 class Aria2Client:
     """aria2 JSON-RPC 客户端（统一版）"""
 
@@ -74,7 +81,7 @@ class Aria2Client:
             async with session.post(self.rpc_url, json=payload) as resp:
                 result = await resp.json()
                 if "error" in result:
-                    raise Exception(f"aria2 RPC error: {result['error']}")
+                    raise Aria2RPCError(result["error"])
                 return result.get("result")
         except aiohttp.ClientError as e:
             await self.close()
@@ -88,7 +95,8 @@ class Aria2Client:
 
     async def add_uri(self, uri: str, options: dict = None) -> str:
         """添加下载任务，返回 GID"""
-        opts = options or {}
+        opts = dict(options or {})
+        opts.setdefault("file-allocation", "none")
         return await self._call("aria2.addUri", [uri], opts)
 
     async def tell_status(self, gid: str) -> dict:
@@ -130,6 +138,24 @@ class Aria2Client:
     async def tell_waiting(self, offset: int = 0, num: int = 100) -> list:
         return await self._call("aria2.tellWaiting", offset, num)
 
+    async def tell_waiting_all(self, page_size: int = 500) -> list:
+        items = []
+        while True:
+            batch = await self.tell_waiting(len(items), page_size) or []
+            items.extend(batch)
+            if len(batch) < page_size:
+                return items
+
+    async def get_option(self, gid: str) -> dict:
+        return await self._call("aria2.getOption", gid)
+
+    async def save_session(self):
+        return await self._call("aria2.saveSession")
+
+    async def remove_for_recovery(self, gid: str):
+        # No removeDownloadResult fallback: cache deletion requires a confirmed stop.
+        return await self._call("aria2.forceRemove", gid)
+
     async def tell_stopped(self, offset: int = 0, num: int = 100) -> list:
         return await self._call("aria2.tellStopped", offset, num)
 
@@ -152,6 +178,9 @@ class Aria2Client:
 
     async def change_global_option(self, options: dict):
         return await self._call("aria2.changeGlobalOption", options)
+
+    async def change_option(self, gid: str, options: dict):
+        return await self._call("aria2.changeOption", gid, options)
 
     # ─── 批量推送（原 AutoPikDown 的 add_uris_batch） ───
 

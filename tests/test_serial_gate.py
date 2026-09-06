@@ -6,6 +6,7 @@ import uuid
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
+from unittest.mock import AsyncMock, patch
 
 from app.modules.aria2teldrive import task_manager as task_manager_module
 from app.modules.aria2teldrive.teldrive_client import TelDriveClient
@@ -44,6 +45,14 @@ class FakeAria2:
         self.removed.append(gid)
         return gid
 
+    async def remove_for_recovery(self, gid):
+        self.removed.append(gid)
+        self.status_by_gid[gid] = {"gid": gid, "status": "removed"}
+        return gid
+
+    async def save_session(self):
+        return "OK"
+
     async def add_uri(self, url, options=None):
         self.added.append((url, dict(options or {})))
         return f"gid-{len(self.added)}"
@@ -52,11 +61,20 @@ class FakeAria2:
         self.global_option_changes.append(dict(options or {}))
         return "OK"
 
+    async def change_option(self, gid, options):
+        return "OK"
+
     async def tell_active(self):
         return list(self.active)
 
     async def tell_waiting(self, offset=0, num=1000):
         return list(self.waiting)
+
+    async def tell_waiting_all(self):
+        return list(self.waiting)
+
+    async def get_option(self, gid):
+        return {}
 
     async def tell_stopped_all(self):
         return list(self.stopped)
@@ -81,6 +99,13 @@ class FakeTelDrive:
 
 
 class SerialGateTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        self.db_lookup = patch.object(task_manager_module.db, "get_task_by_gid", AsyncMock(return_value=None))
+        self.db_lookup.start()
+        self.addCleanup(self.db_lookup.stop)
+        task_manager_module.disk_budget.retain("aria2:", set())
+        self.addCleanup(task_manager_module.disk_budget.retain, "aria2:", set())
+
     def make_manager(self, download_dir="."):
         manager = task_manager_module.TaskManager()
         manager.config = {
@@ -99,6 +124,9 @@ class SerialGateTests(unittest.IsolatedAsyncioTestCase):
         }
         manager._disk_usage_info = {"free": 3 * 1024 ** 3}
         manager.aria2 = cast(Any, FakeAria2())
+        disk = patch("app.disk_budget.shutil.disk_usage", side_effect=lambda _: SimpleNamespace(free=manager._disk_usage_info["free"]))
+        disk.start()
+        self.addCleanup(disk.stop)
 
         async def no_blockers(stopped=None):
             return False
@@ -136,7 +164,7 @@ class SerialGateTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(manager.aria2.force_paused, [])
         self.assertEqual(manager._visible_aria2_status("active", "next-active"), "downloading")
 
-    async def test_dispatch_ignores_low_disk_space_in_serial_mode(self):
+    async def test_dispatch_submits_paused_for_budget_admission_in_serial_mode(self):
         manager = self.make_manager()
         manager._disk_usage_info = {"free": 0}
         queued_task = {
@@ -178,9 +206,10 @@ class SerialGateTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(released)
         self.assertEqual(len(manager.aria2.added), 1)
-        self.assertEqual(updates["status"], "downloading")
+        self.assertEqual(updates["status"], "pending")
+        self.assertEqual(manager.aria2.added[0][1]["pause"], "true")
 
-    async def test_serial_mode_disables_disk_protection_status_and_limit(self):
+    async def test_serial_mode_preserves_disk_protection(self):
         manager = self.make_manager()
         manager._disk_usage_info = {"free": 0}
         manager._disk_protection_active = True
@@ -190,16 +219,15 @@ class SerialGateTests(unittest.IsolatedAsyncioTestCase):
             active=[{"gid": "a-1", "status": "active"}], waiting=[]
         )
 
-        self.assertFalse(manager._disk_protection_active)
-        self.assertEqual(manager._disk_protection_info["active"], False)
-        self.assertEqual(manager._disk_protection_info["message"], "")
-        # 串行模式下磁盘闸门不动作：不暂停任何任务、清空历史持有
-        self.assertEqual(manager.aria2.force_paused, [])
-        self.assertEqual(manager._disk_gate_paused_gids, {})
+        self.assertTrue(manager._disk_protection_active)
+        self.assertTrue(manager._disk_protection_info["active"])
+        self.assertEqual(manager.aria2.force_paused, ["a-1"])
+        self.assertEqual(manager._disk_gate_paused_gids, {"a-1": True})
 
     async def test_disk_recovered_releases_gate_held_paused_item(self):
         manager = self.make_manager()
         manager._serial_gate_paused_gids.add("held-1")
+        manager.aria2.status_by_gid["held-1"] = {"gid": "held-1", "status": "paused", "totalLength": "1024"}
 
         await manager._sync_serial_transfer_gate(
             active=[],
@@ -213,6 +241,7 @@ class SerialGateTests(unittest.IsolatedAsyncioTestCase):
         manager = self.make_manager()
         manager.config["upload"]["serial_transfer_mode"] = False
         manager._serial_gate_paused_gids.add("system-held")
+        manager.aria2.status_by_gid["system-held"] = {"gid": "system-held", "status": "paused", "totalLength": "1024"}
 
         await manager._sync_serial_transfer_gate(
             active=[],
@@ -339,7 +368,8 @@ class SerialGateTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(released)
         self.assertEqual(len(manager.aria2.added), 1)
         self.assertEqual(manager.aria2.added[0][0], queued_task["url"])
-        self.assertEqual(updates["status"], "downloading")
+        self.assertEqual(updates["status"], "pending")
+        self.assertEqual(manager.aria2.added[0][1]["pause"], "true")
         self.assertEqual(updates["aria2_gid"], "gid-1")
 
     async def test_dispatch_stays_pending_when_cleanup_blocker_exists(self):
@@ -444,7 +474,7 @@ class SerialGateTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(released)
         self.assertEqual(manager.aria2.added, [])
 
-    async def test_normalize_pending_stale_gid_removes_aria2_and_local_residue(self):
+    async def test_normalize_pending_stale_gid_preserves_resumable_cache(self):
         with tempfile.TemporaryDirectory() as tmp:
             residue = Path(tmp) / "queued.bin"
             residue.write_bytes(b"partial")
@@ -494,11 +524,37 @@ class SerialGateTests(unittest.IsolatedAsyncioTestCase):
                 cast(Any, task_manager_module.db).update_task = original_update_task
 
             self.assertEqual(removed, {"old-gid"})
-            self.assertEqual(manager.aria2.removed, ["old-gid"])
-            self.assertFalse(residue.exists())
-            self.assertFalse(aria2_control.exists())
+            self.assertEqual(manager.aria2.removed, [])
+            self.assertTrue(residue.exists())
+            self.assertTrue(aria2_control.exists())
+            self.assertNotIn("local_path", updates)
             self.assertIsNone(updates["aria2_gid"])
             self.assertEqual(updates["status"], "pending")
+
+    async def test_serial_resume_remove_failure_preserves_shared_file_and_task(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "shared.bin"
+            path.write_bytes(b"another upload still uses this")
+            manager = self.make_manager(tmp)
+            task = {"task_id": "paused", "aria2_gid": "gid", "status": "paused",
+                    "local_path": str(path), "download_progress": 20}
+            manager.aria2.remove_for_recovery = AsyncMock(side_effect=RuntimeError("RPC unavailable"))
+            with patch.object(task_manager_module.db, "get_task", AsyncMock(return_value=task)), \
+                    patch.object(task_manager_module.db, "update_task", AsyncMock()) as update:
+                result = await manager.resume_task(task["task_id"])
+            self.assertFalse(result["success"])
+            self.assertEqual(path.read_bytes(), b"another upload still uses this")
+            update.assert_not_awaited()
+
+    async def test_serial_pause_does_not_detach_until_stop_is_confirmed(self):
+        manager = self.make_manager()
+        task = {"task_id": "pending", "aria2_gid": "gid", "status": "pending"}
+        manager.aria2.remove_for_recovery = AsyncMock(return_value="gid")
+        with patch.object(task_manager_module.db, "get_task", AsyncMock(return_value=task)), \
+                patch.object(task_manager_module.db, "update_task", AsyncMock()) as update:
+            result = await manager.pause_task(task["task_id"])
+        self.assertFalse(result["success"])
+        update.assert_not_awaited()
 
     async def test_normalize_keeps_live_pending_gid_and_residue(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1156,6 +1212,7 @@ class TelDriveClientTests(unittest.TestCase):
             return list(remote_parts)
 
         client._get_file_parts = fake_get_file_parts
+        client._find_file = AsyncMock(return_value=None)
 
         result = asyncio.run(
             client._create_file_record(

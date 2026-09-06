@@ -654,6 +654,9 @@ class ShareDownloadIsolationRouteTests(unittest.IsolatedAsyncioTestCase):
             )
         }
         self.original_add_error = pikpak_routes.db.add_pikpak_account_error
+        self.original_add_cleanup = pikpak_routes.db.add_source_cleanup
+        self.cleanup = AsyncMock()
+        pikpak_routes.db.add_source_cleanup = self.cleanup
         self.original_defer = (
             pikpak_routes.task_manager.should_defer_new_downloads
         )
@@ -664,6 +667,7 @@ class ShareDownloadIsolationRouteTests(unittest.IsolatedAsyncioTestCase):
         for name, value in self.originals.items():
             setattr(pikpak_routes, name, value)
         pikpak_routes.db.add_pikpak_account_error = self.original_add_error
+        pikpak_routes.db.add_source_cleanup = self.original_add_cleanup
         pikpak_routes.task_manager.should_defer_new_downloads = self.original_defer
         pikpak_routes.task_manager.hold_gids_for_disk_gate = self.original_hold
         pikpak_routes.task_manager.enqueue_serial_task = self.original_enqueue
@@ -766,7 +770,9 @@ class ShareDownloadIsolationRouteTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(aria2.added[0][1]["dir"], "C:/downloads")
         self.assertEqual(aria2.added[0][1]["out"], "Series S01E01.mp4")
-        self.assertEqual(pikpak.deleted, [["owned-scope"]])
+        self.assertEqual(pikpak.deleted, [])
+        self.cleanup.assert_awaited_once()
+        self.assertEqual(self.cleanup.call_args.args[:2], ("account-1", ["owned-scope"]))
 
     async def test_serial_mode_enqueues_only_the_isolated_url(self):
         class PikPak:
@@ -827,7 +833,8 @@ class ShareDownloadIsolationRouteTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(queued), 1)
         self.assertEqual(queued[0][0], "https://download/selected")
         self.assertEqual(aria2.added, [])
-        self.assertEqual(pikpak.deleted, [["owned-scope"]])
+        self.assertEqual(pikpak.deleted, [])
+        self.cleanup.assert_awaited_once_with("account-1", ["owned-scope"], ["queued-1"])
 
     async def test_isolation_failure_pushes_nothing_and_cleans_scope(self):
         class PikPak:

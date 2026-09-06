@@ -1515,6 +1515,7 @@ async def _aria2_push_only(files: List[dict], index: int, delete_pikpak_ids: Lis
                            keep_structure: bool = True, teldrive_path: str = "/",
                            delete_account_id: str | None = None):
     """外部接收端模式：仅推送下载链接，不触发 TelDrive 上传"""
+    transfer_ids = []
     try:
         aria2 = await _ensure_aria2_client()
         cfg = load_config()
@@ -1558,12 +1559,13 @@ async def _aria2_push_only(files: List[dict], index: int, delete_pikpak_ids: Lis
                         opts["dir"] = os.path.join(download_dir, task_spec["subdir"]).replace("\\", "/")
                     else:
                         opts["dir"] = download_dir
-                await task_manager.enqueue_serial_task(
+                queued_task = await task_manager.enqueue_serial_task(
                     task_ctx["url"], task_ctx["name"],
                     teldrive_path=task_ctx["teldrive_path"],
                     aria2_options=opts,
                     source_size_bytes=int(file_info.get("size", 0) or 0),
                 )
+                transfer_ids.append(queued_task["task_id"])
                 success_count += 1
                 await _broadcast_link_pushed(index, file_info, sequence, len(files), push_target)
         else:
@@ -1587,6 +1589,7 @@ async def _aria2_push_only(files: List[dict], index: int, delete_pikpak_ids: Lis
                     aria2_options=opts,
                     source_size_bytes=int(file_info.get("size", 0) or 0),
                 )
+                transfer_ids.append(gid)
                 success_count += 1
                 await _broadcast_link_pushed(index, file_info, sequence, len(files), push_target)
         await _broadcast({"type": "push_done", "index": index,
@@ -1595,18 +1598,16 @@ async def _aria2_push_only(files: List[dict], index: int, delete_pikpak_ids: Lis
     except Exception as e:
         await _broadcast({"type": "task_error", "index": index,
                           "message": f"下载链接推送失败: {e}"})
+        return []
 
-    if delete_pikpak_ids:
-        try:
-            if delete_account_id:
-                _account, pikpak = await pikpak_account_pool.client_for_account(delete_account_id)
-            else:
-                pikpak, _ = await _ensure_clients()
-            cfg = load_config()
-            if cfg.get("pikpak", {}).get("delete_after_download", False):
-                await pikpak.delete_files(delete_pikpak_ids)
-        except Exception:
-            pass
+    if len(transfer_ids) != len(files):
+        return []
+    if delete_pikpak_ids and cfg.get("pikpak", {}).get("delete_after_download", False):
+        if delete_account_id:
+            await db.add_source_cleanup(delete_account_id, delete_pikpak_ids, transfer_ids)
+        else:
+            logger.warning("PikPak 源文件账号未确认，已保留源文件")
+    return transfer_ids
 
 
 async def _process_magnets(magnets: List[str], teldrive_path: Optional[str] = None,
@@ -1766,8 +1767,8 @@ async def _process_magnet_selected(root_file_ids: List[str], selected_ids: List[
                 else:
                     account, pikpak = await _next_pikpak_client()
                 root_files = await pikpak.get_download_urls(root_file_id)
-                if delete_after:
-                    delete_by_account.setdefault(account.id, []).append(root_file_id)
+                for entry in root_files or []:
+                    entry["_source_account_id"] = account.id
             except Exception as e:
                 logger.warning(f"磁链根目录直链获取失败: root={root_file_id}, error={e}")
                 continue
@@ -1784,6 +1785,12 @@ async def _process_magnet_selected(root_file_ids: List[str], selected_ids: List[
         if not files:
             await _broadcast({"type": "task_error", "index": 1, "message": "选中的文件不存在"})
             return
+        if delete_after:
+            for entry in files:
+                account_id = entry.get("_source_account_id")
+                file_id = entry.get("file_id")
+                if account_id and file_id:
+                    delete_by_account.setdefault(account_id, []).append(file_id)
         # Jellyfin 一键格式化：按 file_id 覆盖文件名（完整名，含扩展名），下载/上传同步生效
         if name_overrides:
             for f in files:
@@ -1800,20 +1807,16 @@ async def _process_magnet_selected(root_file_ids: List[str], selected_ids: List[
         resolved_teldrive_path = _normalize_teldrive_path(
             cfg.get("teldrive", {}).get("target_path", "/") if teldrive_path is None else teldrive_path
         )
-        await _aria2_push_only(
+        transfer_ids = await _aria2_push_only(
             files,
             1,
             delete_pikpak_ids=delete_ids,
             keep_structure=keep_structure,
             teldrive_path=resolved_teldrive_path,
         )
-        if delete_after:
+        if delete_after and transfer_ids:
             for account_id, ids in delete_by_account.items():
-                try:
-                    _account, account_client = await pikpak_account_pool.client_for_account(account_id)
-                    await account_client.delete_files(ids)
-                except Exception as e:
-                    logger.warning(f"清理磁链临时文件失败: account={account_id}, error={e}")
+                await db.add_source_cleanup(account_id, ids, transfer_ids)
 
         await _broadcast({"type": "all_done", "total": 1})
     except Exception as e:
@@ -1825,6 +1828,8 @@ async def _process_share_download(share_id: str, file_ids: List[str], pass_code_
                                     rename_by_folder: bool = False, teldrive_path: Optional[str] = None,
                                     job_key: str = "", name_overrides: Dict[str, str] | None = None):
     owned_scope_id = ""
+    transfer_ids = []
+    push_started = False
     account: PikPakAccountContext | None = None
     pikpak = None
     try:
@@ -1897,6 +1902,7 @@ async def _process_share_download(share_id: str, file_ids: List[str], pass_code_
         # 确保 aria2 客户端已初始化（分享流程此前未经 _ensure_aria2_client，
         # 全新进程首个动作若为分享下载会导致 _aria2 为 None → 'NoneType' has no attribute 'add_uri'）
         aria2 = await _ensure_aria2_client()
+        push_started = True
         for sequence, url_info in enumerate(all_urls, 1):
             try:
                 opts = {}
@@ -1928,13 +1934,14 @@ async def _process_share_download(share_id: str, file_ids: List[str], pass_code_
 
                 source_size = int(display_info.get("size") or url_info.get("size") or 0)
                 if cfg.get("upload", {}).get("serial_transfer_mode", False):
-                    await task_manager.enqueue_serial_task(
+                    queued_task = await task_manager.enqueue_serial_task(
                         url_info["url"],
                         display_info.get("name") or url_info.get("name") or "",
                         teldrive_path=task_teldrive_path,
                         aria2_options=opts,
                         source_size_bytes=source_size,
                     )
+                    transfer_ids.append(queued_task["task_id"])
                     success_count += 1
                     await _broadcast_link_pushed(1, display_info, sequence, len(all_urls), push_target)
                     continue
@@ -1953,12 +1960,17 @@ async def _process_share_download(share_id: str, file_ids: List[str], pass_code_
                         aria2_options=opts,
                         source_size_bytes=source_size,
                     )
+                    transfer_ids.append(gid)
                     success_count += 1
                     await _broadcast_link_pushed(1, display_info, sequence, len(all_urls), push_target)
             except Exception as e:
                 await _broadcast({"type": "task_error", "index": 1,
                                   "message": f"下载链接推送失败: {url_info.get('name', '未知文件')} - {e}"})
 
+        if len(transfer_ids) == len(all_urls) and account is not None:
+            await db.add_source_cleanup(account.id, [owned_scope_id], transfer_ids)
+        else:
+            logger.warning(f"分享推送不完整，保留 PikPak 隔离目录: {owned_scope_id}")
         await _broadcast({"type": "push_done", "index": 1,
                           "success_count": success_count, "total_count": len(all_urls),
                           "target": push_target})
@@ -1973,7 +1985,7 @@ async def _process_share_download(share_id: str, file_ids: List[str], pass_code_
             "toast_type": "error",
         })
     finally:
-        if owned_scope_id and pikpak is not None:
+        if owned_scope_id and pikpak is not None and not push_started:
             try:
                 await pikpak.delete_files([owned_scope_id])
             except Exception as error:

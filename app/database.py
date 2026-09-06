@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any, Optional
 import logging
 import asyncio
+import uuid
 
 logger = logging.getLogger(__name__)
 
@@ -147,17 +148,36 @@ async def init_db():
     await _ensure_column(conn, "tasks", "upload_confirmed_total", "INTEGER DEFAULT 0")
     await _ensure_column(conn, "tasks", "upload_confirmed_parts_json", "TEXT DEFAULT '[]'")
     await _ensure_column(conn, "tasks", "upload_remote_parts_json", "TEXT DEFAULT '[]'")
+    await _ensure_column(conn, "tasks", "upload_directory_state_json", "TEXT DEFAULT '{}'")
     await _ensure_column(conn, "tasks", "upload_last_reconciled_at", "TIMESTAMP")
     await _ensure_column(conn, "tasks", "upload_started_at", "TIMESTAMP")
     await _ensure_column(conn, "tasks", "upload_finished_at", "TIMESTAMP")
     await _ensure_column(conn, "tasks", "upload_source_fingerprint", "TEXT")
     await _ensure_column(conn, "tasks", "source_size_bytes", "INTEGER DEFAULT 0")
+    await _ensure_column(conn, "tasks", "disk_recovery_json", "TEXT DEFAULT '{}'")
     await conn.execute(CREATE_PROGRESS_LOGS_TABLE_SQL)
     await conn.execute(CREATE_TELEGRAM_RELAY_JOBS_TABLE_SQL)
     # 回源上传断点续传所需列（旧库迁移）
     await _ensure_column(conn, "telegram_relay_jobs", "upload_confirmed_parts_json", "TEXT DEFAULT '[]'")
     await _ensure_column(conn, "telegram_relay_jobs", "upload_remote_parts_json", "TEXT DEFAULT '[]'")
     await _ensure_column(conn, "telegram_relay_jobs", "upload_source_fingerprint", "TEXT DEFAULT ''")
+    await _ensure_column(conn, "telegram_relay_jobs", "download_verified", "INTEGER DEFAULT 0")
+    await _ensure_column(conn, "telegram_relay_jobs", "download_fingerprint", "TEXT DEFAULT ''")
+    await _ensure_column(conn, "telegram_relay_jobs", "upload_committed", "INTEGER DEFAULT 0")
+    await _ensure_column(conn, "telegram_relay_jobs", "upload_result_json", "TEXT DEFAULT '{}'")
+    await _ensure_column(conn, "telegram_relay_jobs", "source_deleted", "INTEGER DEFAULT 0")
+    await conn.execute("""UPDATE telegram_relay_jobs
+        SET upload_committed = 1, upload_result_json = json_object('success', json('true'),
+            'data', json_object('id', teldrive_file_id))
+        WHERE status <> 'completed' AND teldrive_file_id <> ''
+          AND upload_committed = 0""")
+    await conn.execute("""CREATE TABLE IF NOT EXISTS transfer_completions (
+        task_id TEXT PRIMARY KEY, completed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)""")
+    await conn.execute("""INSERT OR IGNORE INTO transfer_completions(task_id)
+        SELECT task_id FROM tasks WHERE status = 'completed'""")
+    await conn.execute("""CREATE TABLE IF NOT EXISTS source_cleanups (
+        cleanup_id TEXT PRIMARY KEY, account_id TEXT NOT NULL, file_ids_json TEXT NOT NULL,
+        task_ids_json TEXT NOT NULL, error TEXT, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)""")
     await conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_telegram_relay_jobs_status ON telegram_relay_jobs(status, updated_at DESC)")
     await conn.execute(
@@ -272,10 +292,12 @@ async def update_task(task_id: str, **kwargs) -> None:
     values = list(kwargs.values())
     values.append(task_id)
     conn = await _get_conn()
-    await conn.execute(
+    cursor = await conn.execute(
         f"UPDATE tasks SET {fields}, updated_at = CURRENT_TIMESTAMP WHERE task_id = ?",
         values
     )
+    if kwargs.get("status") == "completed" and cursor.rowcount > 0:
+        await conn.execute("INSERT OR IGNORE INTO transfer_completions(task_id) VALUES (?)", (task_id,))
     await conn.commit()
 
 
@@ -420,8 +442,45 @@ async def complete_upload_session(
         """,
         (*params, task_id, token),
     )
+    if cursor.rowcount > 0:
+        await conn.execute("INSERT OR IGNORE INTO transfer_completions(task_id) VALUES (?)", (task_id,))
     await conn.commit()
     return cursor.rowcount > 0
+
+
+async def add_source_cleanup(account_id: str, file_ids: list[str], task_ids: list[str]):
+    if not account_id or not file_ids or not task_ids or any(not value for value in task_ids):
+        raise ValueError("Source cleanup requires an account and every transfer dependency")
+    conn = await _get_conn()
+    await conn.execute("INSERT INTO source_cleanups(cleanup_id, account_id, file_ids_json, task_ids_json) VALUES (?, ?, ?, ?)",
+                       (uuid.uuid4().hex, account_id, json.dumps(file_ids), json.dumps(list(dict.fromkeys(task_ids)))))
+    await conn.commit()
+
+
+async def get_ready_source_cleanups():
+    conn = await _get_conn()
+    async with conn.execute("SELECT * FROM source_cleanups ORDER BY created_at") as cursor:
+        rows = [dict(row) for row in await cursor.fetchall()]
+    ready = []
+    for row in rows:
+        task_ids = json.loads(row["task_ids_json"])
+        if not task_ids:
+            continue
+        placeholders = ",".join("?" for _ in task_ids)
+        async with conn.execute(f"SELECT count(*) FROM transfer_completions WHERE task_id IN ({placeholders})", task_ids) as cursor:
+            count = (await cursor.fetchone())[0]
+        if count == len(set(task_ids)):
+            ready.append(row)
+    return ready
+
+
+async def finish_source_cleanup(cleanup_id: str, error: str | None = None):
+    conn = await _get_conn()
+    if error is None:
+        await conn.execute("DELETE FROM source_cleanups WHERE cleanup_id = ?", (cleanup_id,))
+    else:
+        await conn.execute("UPDATE source_cleanups SET error = ? WHERE cleanup_id = ?", (error, cleanup_id))
+    await conn.commit()
 
 
 async def update_upload_session_metadata(
@@ -434,6 +493,7 @@ async def update_upload_session_metadata(
     confirmed_chunks: Optional[float] = None,
     confirmed_total: Optional[int] = None,
     reconciled: bool = False,
+    directory_state_json: Optional[str] = None,
 ) -> bool:
     fields: list[str] = []
     params: list[Any] = []
@@ -447,8 +507,12 @@ async def update_upload_session_metadata(
         fields.append("upload_remote_parts_json = ?")
         params.append(remote_parts_json)
     if confirmed_chunks is not None:
-        fields.append("upload_confirmed_chunks = MAX(COALESCE(upload_confirmed_chunks, 0), ?)")
+        fields.append("upload_confirmed_chunks = ?" if directory_state_json is not None else
+                      "upload_confirmed_chunks = MAX(COALESCE(upload_confirmed_chunks, 0), ?)")
         params.append(confirmed_chunks)
+    if directory_state_json is not None:
+        fields.append("upload_directory_state_json = ?")
+        params.append(directory_state_json)
     if confirmed_total is not None:
         fields.append(
             """upload_confirmed_total = CASE
@@ -588,6 +652,18 @@ async def get_telegram_relay_job_by_source(source_channel_id: int, source_messag
         return dict(row) if row else None
 
 
+async def get_telegram_relay_cache_paths() -> list[str]:
+    conn = await _get_conn()
+    async with conn.execute("SELECT local_path FROM telegram_relay_jobs WHERE local_path <> ''") as cursor:
+        return [row[0] for row in await cursor.fetchall()]
+
+
+async def get_telegram_relay_partial_caches() -> list[dict]:
+    conn = await _get_conn()
+    async with conn.execute("SELECT job_id, file_name, local_path FROM telegram_relay_jobs WHERE local_path <> ''") as cursor:
+        return [dict(row) for row in await cursor.fetchall()]
+
+
 async def get_all_telegram_relay_jobs(limit: int = 200) -> list[dict]:
     conn = await _get_conn()
     async with conn.execute(
@@ -608,7 +684,7 @@ async def get_active_telegram_relay_jobs(limit: int = 200) -> list[dict]:
         """
         SELECT * FROM telegram_relay_jobs
         WHERE status IN ('pending', 'downloading', 'uploading', 'cleaning')
-        ORDER BY created_at ASC, rowid ASC
+        ORDER BY upload_committed DESC, download_verified DESC, updated_at ASC, rowid ASC
         LIMIT ?
         """,
         (max(1, int(limit or 200)),),
@@ -633,6 +709,8 @@ async def update_telegram_relay_job(job_id: str, **kwargs) -> None:
         "error",
         "retry_count",
         "completed_at",
+        "file_size", "download_verified", "download_fingerprint", "upload_committed",
+        "upload_result_json", "source_deleted",
     }
     fields = []
     values: list[Any] = []

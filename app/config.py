@@ -5,6 +5,8 @@ import sys
 import copy
 import hashlib
 import logging
+import tempfile
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -32,6 +34,7 @@ except ImportError:
 
 # 内存缓存
 _config_cache: dict | None = None
+_config_lock = threading.RLock()
 
 # 默认配置（作为 fallback）
 DEFAULTS: dict[str, Any] = {
@@ -212,6 +215,8 @@ def load_config(force_reload: bool = False) -> dict:
 
     with open(CONFIG_PATH, "rb") as f:
         raw = tomllib.load(f)
+    if not raw:
+        raise ValueError("config.toml is empty; refusing to disable authentication via defaults")
 
     # 环境变量覆盖（格式: TDM_SECTION_KEY，如 TDM_ARIA2_RPC_SECRET）
     for section, items in DEFAULTS.items():
@@ -447,6 +452,11 @@ def _normalize_config(merged: dict, raw: dict | None = None) -> dict:
 
 
 def save_config(data: dict) -> None:
+    with _config_lock:
+        _save_config(data)
+
+
+def _save_config(data: dict) -> None:
     """保存配置到 config.toml"""
     global _config_cache
     if tomli_w is None:
@@ -469,8 +479,22 @@ def save_config(data: dict) -> None:
     serializable.pop("_meta", None)
     if isinstance(serializable.get("telegram"), dict):
         serializable["telegram"].pop("channel_id", None)
-    with open(CONFIG_PATH, "wb") as f:
-        tomli_w.dump(serializable, f)
+    temp_path = None
+    try:
+        with tempfile.NamedTemporaryFile(mode="wb", dir=CONFIG_PATH.parent,
+                                         prefix=".config-", suffix=".tmp", delete=False) as f:
+            temp_path = Path(f.name)
+            tomli_w.dump(serializable, f)
+            f.flush()
+            os.fsync(f.fileno())
+        with temp_path.open("rb") as f:
+            tomllib.load(f)
+        if CONFIG_PATH.exists():
+            os.chmod(temp_path, CONFIG_PATH.stat().st_mode & 0o777)
+        os.replace(temp_path, CONFIG_PATH)
+    finally:
+        if temp_path is not None:
+            temp_path.unlink(missing_ok=True)
     _config_cache = merged
     logger.info("配置已保存到 config.toml")
 

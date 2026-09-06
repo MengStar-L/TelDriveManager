@@ -73,10 +73,11 @@ class ParallelDispatchTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(released, 3)
         self.assertEqual(len(manager.aria2.added), 3)
         for task in queued:
-            self.assertEqual(updates[task["task_id"]]["status"], "downloading")
+            self.assertEqual(updates[task["task_id"]]["status"], "pending")
             self.assertTrue(updates[task["task_id"]]["aria2_gid"])
         submitted_urls = [url for url, _opts in manager.aria2.added]
         self.assertEqual(submitted_urls, [t["url"] for t in queued])
+        self.assertTrue(all(opts.get("pause") == "true" for _, opts in manager.aria2.added))
 
     async def test_dispatch_noop_in_serial_mode(self):
         manager = self.make_manager(serial_mode=True)

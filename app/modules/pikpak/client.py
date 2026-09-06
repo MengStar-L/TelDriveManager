@@ -553,7 +553,10 @@ class PikPakClient:
         if not isinstance(result, dict):
             raise RuntimeError("PikPak 分享接口响应格式无效")
 
-        roots = list(result.get("files", []) or [])
+        roots = await self._collect_share_pages(result, "/drive/v1/share", {
+            "limit": "100", "thumbnail_size": "SIZE_LARGE", "order": "3",
+            "share_id": share_id, "parent_id": target_locator, "pass_code": pass_code or None,
+        })
         if not roots:
             raise RuntimeError("PikPak 分享目标没有返回可解析节点")
 
@@ -568,16 +571,49 @@ class PikPakClient:
             "files": files,
         }
 
+    async def _collect_share_pages(self, first: Dict, endpoint: str, params: Dict) -> List[Dict]:
+        result = first
+        items = []
+        seen_tokens = set()
+        seen_ids = set()
+        while True:
+            if not isinstance(result, dict) or result.get("error") or not isinstance(result.get("files"), list):
+                raise RuntimeError("PikPak 分享分页响应无效，列表不完整")
+            for item in result["files"]:
+                if not isinstance(item, dict) or not item.get("id"):
+                    raise RuntimeError("PikPak 分享节点无效")
+                if item["id"] in seen_ids:
+                    raise RuntimeError("PikPak 分享分页节点重复，列表不一致")
+                seen_ids.add(item["id"])
+                items.append(item)
+            token = result.get("next_page_token")
+            if not token:
+                return items
+            if token in seen_tokens:
+                raise RuntimeError("PikPak 分享分页游标重复，列表不完整")
+            seen_tokens.add(token)
+            result = await self.client._request_get(
+                url=f"https://{self.client.PIKPAK_API_HOST}{endpoint}",
+                params={**params, "page_token": token})
+
     async def _collect_share_files(self, share_id: str, pass_code_token: str,
-                                    file_info: Dict, files: List[Dict], prefix: str = ""):
+                                    file_info: Dict, files: List[Dict], prefix: str = "", ancestors=None):
         kind = file_info.get("kind", "")
         file_id = file_info.get("id", "")
         name = file_info.get("name", "")
         full_path = f"{prefix}/{name}" if prefix else name
         if kind == "drive#folder":
+            ancestors = set(ancestors or ())
+            if file_id in ancestors:
+                raise RuntimeError("PikPak 分享目录存在循环引用")
+            ancestors.add(file_id)
             resp = await self.client.get_share_folder(share_id, pass_code_token, parent_id=file_id)
-            for f in resp.get("files", []):
-                await self._collect_share_files(share_id, pass_code_token, f, files, full_path)
+            children = await self._collect_share_pages(resp, "/drive/v1/share/detail", {
+                "limit": "100", "thumbnail_size": "SIZE_LARGE", "order": "6",
+                "share_id": share_id, "parent_id": file_id, "pass_code_token": pass_code_token,
+            })
+            for f in children:
+                await self._collect_share_files(share_id, pass_code_token, f, files, full_path, ancestors)
         elif kind == "drive#file":
             files.append({
                 "id": file_id,

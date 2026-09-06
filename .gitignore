@@ -40,3 +40,9 @@ history_*.md
 downloads/
 
 db_backup_*.json
+
+.tdm-version
+.tdm-update-*
+.tdm-update-lock
+.tdm-runtime
+.tdm-runtimes/

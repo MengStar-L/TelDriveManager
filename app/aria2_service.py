@@ -10,6 +10,7 @@ import shutil
 import stat
 import subprocess
 import tarfile
+import threading
 import zipfile
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -21,6 +22,7 @@ from app.aria2_client import Aria2Client
 from app.config import FIXED_ARIA2_HOME, FIXED_DOWNLOAD_DIR, load_config, save_config
 
 import logging
+from logging.handlers import RotatingFileHandler
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +54,7 @@ class Aria2Service:
     def __init__(self):
         self._process: Optional[subprocess.Popen] = None
         self._log_handle = None
+        self._log_thread = None
         self._install_task: Optional[asyncio.Task] = None
         self._install_lock = asyncio.Lock()
         self._state = InstallState()
@@ -140,7 +143,9 @@ class Aria2Service:
         if not ARIA2_LOG_FILE.exists():
             return ""
         try:
-            lines = ARIA2_LOG_FILE.read_text(encoding="utf-8", errors="ignore").splitlines()
+            with ARIA2_LOG_FILE.open("rb") as handle:
+                handle.seek(max(0, handle.seek(0, os.SEEK_END) - 64 * 1024))
+                lines = handle.read().decode("utf-8", errors="replace").splitlines()
             tail = [line.strip() for line in lines[-max_lines:] if line.strip()]
             return " | ".join(tail[-6:])
         except Exception:
@@ -198,6 +203,10 @@ class Aria2Service:
             f"--max-connection-per-server={int(aria2_cfg.get('max_connection_per_server') or 8)}",
             f"--min-split-size={int(aria2_cfg.get('min_split_size_mb') or 5)}M",
             "--continue=true",
+            "--pause=true",
+            "--enable-console-readout=false",
+            "--summary-interval=0",
+            "--console-log-level=warn",
             "--allow-overwrite=true",
             "--auto-file-renaming=false",
             # 不预分配文件：避免剩余空间不足时启动即 fallocate 失败，
@@ -218,15 +227,23 @@ class Aria2Service:
             lib_path = str(binary_path.parent)
             current_lib_path = str(env.get("LD_LIBRARY_PATH") or "").strip()
             env["LD_LIBRARY_PATH"] = f"{lib_path}{os.pathsep}{current_lib_path}" if current_lib_path else lib_path
-        self._log_handle = open(ARIA2_LOG_FILE, "ab")
-        self._process = subprocess.Popen(
-            command,
-            cwd=str(binary_path.parent),
-            stdout=self._log_handle,
-            stderr=self._log_handle,
-            creationflags=creationflags,
-            env=env,
-        )
+        self._log_handle = RotatingFileHandler(ARIA2_LOG_FILE, maxBytes=2 * 1024 ** 2, backupCount=2, encoding="utf-8")
+        try:
+            self._process = subprocess.Popen(
+                command,
+                cwd=str(binary_path.parent),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                creationflags=creationflags,
+                env=env,
+            )
+        except BaseException:
+            self._log_handle.close()
+            self._log_handle = None
+            raise
+        self._log_thread = threading.Thread(target=self._drain_process_log,
+                                            args=(self._process, self._log_handle), daemon=True)
+        self._log_thread.start()
         try:
             await self._wait_until_ready(cfg)
         except Exception as exc:
@@ -238,6 +255,16 @@ class Aria2Service:
         logger.info("本地 aria2 服务已启动")
 
 
+    @staticmethod
+    def _drain_process_log(process, handler):
+        try:
+            with process.stdout as stream:
+                while chunk := stream.read1(8192):
+                    handler.handle(logging.LogRecord("aria2", logging.WARNING, "", 0,
+                                                     chunk.decode("utf-8", errors="replace"), (), None))
+        except Exception:
+            logger.exception("aria2 log reader failed")
+
     async def stop(self):
         process = self._process
         self._process = None
@@ -247,6 +274,10 @@ class Aria2Service:
                 await asyncio.wait_for(asyncio.to_thread(process.wait, 8), timeout=10)
             except Exception:
                 process.kill()
+                await asyncio.wait_for(asyncio.to_thread(process.wait, 8), timeout=10)
+        if self._log_thread:
+            await asyncio.to_thread(self._log_thread.join, 5)
+            self._log_thread = None
         if self._log_handle:
             try:
                 self._log_handle.close()

@@ -276,8 +276,10 @@ class TelDriveClient:
         for number, candidates in by_number.items():
             expected_size = self._expected_part_size(file_size, number, total_parts)
             matching = [c for c in candidates if self._part_size_matches(c, expected_size)]
-            pool = matching or candidates
-            best = max(pool, key=lambda c: self._get_part_message_id(c) or 0)
+            if not matching:
+                orphans.extend(candidates)
+                continue
+            best = max(matching, key=lambda c: self._get_part_message_id(c) or 0)
             selected[number] = best
             orphans.extend(c for c in candidates if c is not best)
         return selected, orphans
@@ -784,6 +786,10 @@ class TelDriveClient:
             return validation_error
 
         ordered_remote_parts = self._order_remote_parts(remote_parts)
+        if all(self._get_part_size(part) is not None for part in ordered_remote_parts):
+            actual_size = sum(self._get_part_size(part) for part in ordered_remote_parts)
+            if actual_size != total_size:
+                return self._structured_error("remote_parts_size_mismatch", "Remote parts total size does not match source")
 
         # 构建 parts 列表（使用远程返回的 partId 和 salt）
         format_parts = []
@@ -801,6 +807,12 @@ class TelDriveClient:
             "size": total_size,
         }
 
+        existing = await self._find_file(session, path, name)
+        if (existing and self._coerce_int(existing.get("size")) == total_size
+                and existing.get("parts") == format_parts):
+            return {"success": True, "data": existing, "already_exists": True,
+                    "remote_parts": ordered_remote_parts, "orphan_parts": orphan_parts}
+
         async with session.post(
             f"{self.api_host}/api/files",
             headers={**self._get_headers(), "Content-Type": "application/json"},
@@ -808,6 +820,8 @@ class TelDriveClient:
         ) as resp:
             if resp.status in (200, 201):
                 result = await resp.json()
+                if not isinstance(result, dict) or not result.get("id"):
+                    return {"success": False, "error": "File record commit could not be confirmed"}
                 return {
                     "success": True,
                     "data": result,
@@ -1031,6 +1045,10 @@ class TelDriveClient:
                             await asyncio.wait(pending)
                         raise task.exception()
             finally:
+                for task in tasks:
+                    if not task.done():
+                        task.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
                 if concurrency_callback:
                     try:
                         concurrency_callback(0)
@@ -1057,13 +1075,13 @@ class TelDriveClient:
 
         流程（参考 OpenList driver.go 的 Put 方法）：
         1. 生成 upload_id (UUID)
-        2. 查找并删除同名文件
+        2. 记录已有同名文件，保留旧版本直到新记录创建成功
         3. 初始化上传会话
         4. 空文件 → touch
         5. 单块文件 → 串行上传
         6. 多块文件 → 并发上传
         7. 创建文件记录（含 parts 校验）
-        8. finally: 清理上传记录
+        8. 成功后清理旧版本与上传记录
 
         Args:
             file_path: 本地文件路径
@@ -1079,7 +1097,8 @@ class TelDriveClient:
         if not file_path.exists():
             raise FileNotFoundError(f"文件不存在: {file_path}")
 
-        file_size = file_path.stat().st_size
+        source_stat = file_path.stat()
+        file_size = source_stat.st_size
         filename = file_path.name
         upload_id = str(upload_id or uuid.uuid4())
 
@@ -1114,31 +1133,8 @@ class TelDriveClient:
         should_cleanup_upload = False
         async with aiohttp.ClientSession(timeout=upload_session_timeout) as session:
             try:
-                # 步骤 1: 查找并删除同名文件（对标 driver.go Put 中的逻辑）
-                if not confirmed_numbers:
-                    existing_file = await self._find_file(session, teldrive_path, filename)
-                    if existing_file:
-                        file_id = existing_file.get("id")
-                        if file_id:
-                            logger.info(f"发现同名文件 {filename} (id={file_id})，删除后重新上传")
-                            await self._delete_file(session, file_id)
-                else:
-                    # 断点续传场景：若上次重试已成功创建了文件记录（完成态未落库），
-                    # 同名同尺寸文件已存在 → 直接判定成功，避免重复上传+重复记录
-                    existing_file = await self._find_file(session, teldrive_path, filename)
-                    if existing_file and self._coerce_int(existing_file.get("size")) == file_size:
-                        logger.info(
-                            f"目标路径已存在同名同尺寸文件 {filename} (size={file_size})，"
-                            f"判定上次上传已成功，跳过重传"
-                        )
-                        should_cleanup_upload = True
-                        upload_meta["confirmed_part_numbers"] = list(range(1, total_parts + 1))
-                        return {
-                            "success": True,
-                            "data": existing_file,
-                            "already_exists": True,
-                            "upload_meta": upload_meta,
-                        }
+                # Keep the old version until the replacement record is committed.
+                existing_file = await self._find_file(session, teldrive_path, filename)
 
                 # 步骤 2: 初始化上传会话 — GET /api/uploads/{uploadId}
                 async with session.get(
@@ -1200,6 +1196,9 @@ class TelDriveClient:
                     )
                 upload_meta["confirmed_part_numbers"] = self._extract_confirmed_part_numbers(uploaded_parts)
                 upload_meta["uploaded_parts"] = uploaded_parts
+                current_stat = file_path.stat()
+                if (current_stat.st_size, current_stat.st_mtime_ns) != (source_stat.st_size, source_stat.st_mtime_ns):
+                    raise ChunkSourceReadError("Local file changed during upload")
 
                 # 步骤 5: 创建文件记录（含 parts 校验）
                 result = await self._create_file_record(
@@ -1222,6 +1221,23 @@ class TelDriveClient:
 
                 if result.get("success"):
                     should_cleanup_upload = True
+                    new_id = (result.get("data") or {}).get("id")
+                    old_id = (existing_file or {}).get("id")
+                    if old_id and new_id and str(old_id) != str(new_id):
+                        old_parts = existing_file.get("parts")
+                        old_part_ids = {self._get_part_message_id(part) for part in old_parts
+                                        if isinstance(part, dict)} if isinstance(old_parts, list) else set()
+                        new_part_ids = {self._get_part_message_id(part) for part in upload_meta["remote_parts"]}
+                        if (isinstance(old_parts, list) and None not in old_part_ids
+                                and len(old_part_ids) == len(old_parts)
+                                and not (old_part_ids & new_part_ids)):
+                            try:
+                                if not await self._delete_file(session, old_id):
+                                    logger.warning(f"旧版本清理失败，已保留: {old_id}")
+                            except Exception as exc:
+                                logger.warning(f"旧版本清理失败，已保留: {old_id}: {exc}")
+                        else:
+                            logger.warning(f"旧版本分块归属无法确认或与新文件重叠，已保留: {old_id}")
                     logger.info(f"文件 {filename} 上传成功")
                 else:
                     logger.error(f"文件 {filename} 创建记录失败: {result.get('error')}")

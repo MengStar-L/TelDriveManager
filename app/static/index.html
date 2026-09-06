@@ -783,6 +783,16 @@
         .pikpak-error-row strong { display: block; color: var(--text-primary); margin-bottom: 4px; }
         .pikpak-error-row p { margin: 4px 0 0; color: var(--text-secondary); font-size: 12px; word-break: break-all; }
         .legacy-pikpak-settings-card { display: none !important; }
+        .update-card { grid-column: span 2/span 2; }
+        .update-status-row { display:flex; align-items:center; justify-content:space-between; gap:16px; flex-wrap:wrap; }
+        .update-status-main { min-width:0; flex:1; }
+        .update-status-line { display:flex; align-items:center; gap:8px; flex-wrap:wrap; color:var(--text-secondary); font-size:13px; }
+        .update-status-badge { display:inline-flex; align-items:center; gap:6px; border-radius:999px; padding:5px 10px; font-size:12px; font-weight:600; background:rgba(59,130,246,.1); color:#1d4ed8; }
+        .update-status-badge.success { background:rgba(16,185,129,.1); color:#047857; }
+        .update-status-badge.warning { background:rgba(245,158,11,.12); color:#b45309; }
+        .update-status-badge.error { background:rgba(239,68,68,.1); color:#b91c1c; }
+        .update-release-notes { margin-top:12px; max-height:140px; overflow:auto; white-space:pre-wrap; word-break:break-word; color:var(--text-dim); font-size:12px; line-height:1.55; }
+        .update-actions { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
         @media (max-width: 1180px) {
             .pikpak-account-add-panel .card-body { grid-template-columns: 1fr; }
             .pikpak-account-add-panel #pikpakAccountPasswordFields,
@@ -792,6 +802,8 @@
             .pikpak-account-actions { flex-wrap: wrap; overflow-x: visible; }
         }
         @media (max-width: 720px) {
+            .settings-row { grid-template-columns: 1fr; }
+            .settings-row > .card { grid-column: auto !important; }
             .pikpak-account-add-panel .field-grid.cols-1,
             .pikpak-account-add-panel #pikpakAccountPasswordFields { grid-template-columns: 1fr; }
             .pikpak-account-list { grid-template-columns: 1fr; }
@@ -1835,6 +1847,27 @@
 
                 <div class="page" id="page-settings">
                     <div class="settings-row">
+                        <div class="card update-card">
+                            <div class="card-header"><h3><i class="ph-fill ph-download-simple"></i> 应用更新</h3></div>
+                            <div class="card-body">
+                                <div class="update-status-row">
+                                    <div class="update-status-main">
+                                        <div class="update-status-line">
+                                            <span>当前版本 <strong id="updateCurrentVersion">--</strong></span>
+                                            <span aria-hidden="true">·</span>
+                                            <span>最新版本 <strong id="updateLatestVersion">--</strong></span>
+                                            <span class="update-status-badge" id="updateStatus"><i class="ph ph-circle-dashed"></i> 检查中</span>
+                                        </div>
+                                        <div class="update-release-notes" id="updateReleaseNotes" style="display:none;"></div>
+                                    </div>
+                                    <div class="update-actions">
+                                        <a class="btn btn-ghost btn-sm" id="updateReleaseLink" href="#" target="_blank" rel="noopener" style="display:none;"><i class="ph ph-github-logo"></i> 查看发布</a>
+                                        <button type="button" class="btn btn-ghost btn-sm" id="updateCheckBtn" onclick="checkForUpdates(true)"><i class="ph ph-arrows-clockwise"></i> 检查更新</button>
+                                        <button type="button" class="btn btn-primary btn-sm" id="updateApplyBtn" onclick="applyUpdate()" style="display:none;"><i class="ph ph-download-simple"></i> 立即更新</button>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
                         <!-- System Authorization -->
                         <div class="card">
                             <div class="card-header"><h3><i class="ph-fill ph-lock-key"></i> 本地面板权限</h3></div>
@@ -2149,7 +2182,7 @@
         </div>
     </div>
 
-    <script src="/static/app.js?v=20260802a"></script>
+    <script src="/static/app.js?v=20260905-update"></script>
 
 
 

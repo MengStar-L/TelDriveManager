@@ -16,7 +16,7 @@ username = ""
 password = ""
 session = ""                        # 当 login_mode = "token" 时填写 encoded_token
 save_dir = "/"
-delete_after_download = true
+delete_after_download = true        # 对应传输任务完成后清理源文件，排队或失败时保留
 parse_concurrency = 1               # 磁链解析并发数，1-16
 accounts = []                        # Web 页面会维护多个 PikPak 账号；旧 username/password/session 会自动迁移
 poll_interval = 3
@@ -43,7 +43,7 @@ max_concurrent = 3                   # 最大同时下载任务数
 split = 8                            # 单任务分块数
 max_connection_per_server = 8        # 单服务器最大连接数
 min_split_size_mb = 5                # 最小分块大小（MB）
-disk_protection_threshold_gb = 5     # 剩余空间低于该值时自动保护并暂停 aria2 新下载
+disk_protection_threshold_gb = 5     # 本地 aria2 与回源共享的磁盘保留空间，串行模式同样生效
 download_dir = "./downloads"        # 固定由程序托管到项目 downloads 目录
 
 # ─── 远程 aria2 推送（可选） ───
@@ -73,7 +73,7 @@ target_path = "/"
 [upload]
 max_retries = 3
 auto_delete = true
-serial_transfer_mode = false       # 开启后下载/上传总占用强制为 1，需等上一个上传完成并释放磁盘后才继续下一个下载
+serial_transfer_mode = false       # 普通任务按下载、上传顺序串行执行；回源并发单独配置，磁盘预算共用
 min_throughput_kbps = 100          # 上传超时按此最低吞吐估算（KB/s）；链路慢可调低，避免大文件被超时中断
 parallel_chunk_upload = false      # 试验功能：单文件多分块并行上传（并发数取 teldrive.upload_concurrency）；默认关闭走串行
 

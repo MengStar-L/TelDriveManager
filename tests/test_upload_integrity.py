@@ -9,6 +9,7 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import AsyncMock, patch
 
 from aiohttp import web
 
@@ -268,6 +269,52 @@ class UploadIntegrityTests(unittest.IsolatedAsyncioTestCase):
         # part 1 未被重传（字节对象不变）
         self.assertIs(self.server.uploads[upload_id][1], uploaded_before[1])
         self.assertEqual(self.server.reassembled(upload_id), payload)
+
+    async def test_resume_does_not_accept_unrelated_same_name_same_size(self):
+        payload = make_test_payload(2 * MB + 7)
+        client = self.make_client(MB)
+        path = self.write_file("same.bin", payload)
+        client._find_file = AsyncMock(return_value={"id": "unrelated", "size": len(payload),
+                                                   "parts": [{"id": 9999}]})
+        client._delete_file = AsyncMock(return_value=True)
+        self.server.uploads["resume-new"] = {1: payload[:MB]}
+        result = await client.upload_file_chunked(path, upload_id="resume-new", confirmed_part_numbers=[1])
+        self.assertTrue(result["success"])
+        self.assertFalse(result.get("already_exists"))
+        self.assertEqual(self.server.reassembled("resume-new"), payload)
+        self.assertEqual(len(self.server.created_files), 1)
+        client._delete_file.assert_awaited_once()
+
+    async def test_wrong_sized_final_remote_part_does_not_create_record(self):
+        import aiohttp
+        client = self.make_client(4096)
+        client._get_file_parts_with_retry = AsyncMock(return_value=[{"partNo": 1, "partId": 101, "size": 1024}])
+        async with aiohttp.ClientSession() as session:
+            with patch.object(asyncio, "sleep", AsyncMock()):
+                result = await client._create_file_record(session, "bad.bin", "bad", "/", [], 4096, 1)
+        self.assertFalse(result["success"])
+        self.assertEqual(self.server.created_files, [])
+        self.assertEqual([p["partId"] for p in result["orphan_parts"]], [101])
+
+    async def test_failed_replacement_keeps_old_file(self):
+        client = self.make_client(4096)
+        path = self.write_file("same.bin", b"x" * 4096)
+        client._find_file = AsyncMock(return_value={"id": "old", "size": 4096})
+        client._do_single_upload = AsyncMock(side_effect=RuntimeError("upload failed"))
+        client._delete_file = AsyncMock()
+        result = await client.upload_file_chunked(path)
+        self.assertFalse(result["success"])
+        client._delete_file.assert_not_awaited()
+
+    async def test_replacement_never_deletes_old_record_with_overlapping_parts(self):
+        client = self.make_client(4096)
+        path = self.write_file("overlap.bin", b"x" * 4096)
+        client._find_file = AsyncMock(return_value={"id": "old", "size": 4096,
+                                                   "parts": [{"id": 1001, "salt": ""}]})
+        client._delete_file = AsyncMock()
+        result = await client.upload_file_chunked(path)
+        self.assertTrue(result["success"])
+        client._delete_file.assert_not_awaited()
 
 
 if __name__ == "__main__":
