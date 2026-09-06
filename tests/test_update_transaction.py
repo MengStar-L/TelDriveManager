@@ -16,7 +16,7 @@ class TransactionTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
-        self.project = Path(self.temp.name) / "project"
+        self.project = Path(self.temp.name).resolve() / "project"
         self.stage = self.project / ".tdm-update-stage-test"
         self.source = self.stage / "source"
         self.backup = self.project / ".tdm-update-backup-test"

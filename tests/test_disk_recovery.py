@@ -46,7 +46,7 @@ class DiskRecoveryTests(unittest.IsolatedAsyncioTestCase):
         await db.close_db()
         self.folder = tempfile.TemporaryDirectory()
         self.addCleanup(self.folder.cleanup)
-        self.root = Path(self.folder.name)
+        self.root = Path(self.folder.name).resolve()
         db_path = patch.object(db, 'DB_PATH', self.root / 'tasks.db')
         db_path.start()
         self.addCleanup(db_path.stop)

@@ -20,7 +20,9 @@
 
 本轮最终验证在 `D:\RunTime\Temp\TelDriveManager-updatefix-20260905` 隔离副本运行：Python 共 253 项，252 项通过、1 项真实 aria2 测试因未配置二进制跳过；6 个 JavaScript 测试文件全部通过，`node --check` 和 `git diff --check` 通过。覆盖真实应用子进程健康后提交、新版启动失败后旧版恢复响应、安装进程硬退出后恢复，以及模拟磁盘不足、依赖失败、锁竞争和 systemd 启停顺序。正式配置、数据库、Telegram/PikPak/TelDrive 均未用于故障测试。
 
-Linux/systemd 未在实机运行验证，当前 Windows 主机没有可用 Linux/WSL 环境。独立环境安装仅接受 wheel，不兼容平台或升级启动协议时需手动更新；更新回滚不撤销远端操作及未来的破坏性数据库迁移。磁盘预留与巡检不是系统配额，不能保证其他程序或底层存储故障下绝不耗尽空间。代码尚未发布或部署。
+上述本机验证未覆盖 Linux/systemd。2026-09-06 发布前另在 GitHub Actions 的 Ubuntu 主机完成验证：255 项 Python 测试中 253 项通过、2 项 systemd 测试在普通步骤中跳过，随后以 root 单独运行这 2 项真实 systemd 测试并全部通过；覆盖升级后配置、数据库、会话和下载缓存内容保留，以及新版启动失败后恢复旧服务。完整测试包含真实 aria2，6 个 JavaScript 测试文件及 Shell 语法检查通过。验证记录：[Linux CI](https://github.com/MengStar-L/TelDriveManager/actions/runs/34015180067/job/101437596394)。Windows CI 中临时目录的短路径与规范路径不一致，已统一测试夹具路径，确保中断故障注入和回收断言实际触发。
+
+独立环境安装仅接受 wheel，不兼容平台或升级启动协议时需手动更新；更新回滚不撤销远端操作及未来的破坏性数据库迁移。磁盘预留与巡检不是系统配额，不能保证其他程序或底层存储故障下绝不耗尽空间。以上测试均未部署到用户生产服务器。
 
 ## 磁盘停滞专项补修
 
