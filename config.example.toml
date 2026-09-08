@@ -101,6 +101,7 @@ proxy_password = ""
 # New jobs use this server directory; existing jobs keep their recorded paths.
 # Relative paths are based on the project directory. Absolute paths and ~ are supported.
 download_dir = "./telegram_relay"
+target_path = ""                  # TelDrive 回源上传目录；留空沿用 teldrive.target_path
 concurrency = 1
 max_retries = 3
 

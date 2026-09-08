@@ -119,15 +119,17 @@ Linux/systemd 自动更新使用独立的临时 systemd 服务执行安装，由
 首次从没有自更新功能的版本升级时，可使用 Release 附带的脚本。它适用于以 root、systemd 和项目内 `venv` 或 `.venv` 部署的服务；准备失败不停止原服务，新版启动失败恢复旧版。配置、任务数据库、下载缓存、Telegram 会话均保留。
 
 ```bash
-curl -fL --retry 3 https://github.com/MengStar-L/TelDriveManager/releases/download/v1.1.2/update-linux.sh -o /tmp/tdm-update-v1.1.2.sh
-sudo bash /tmp/tdm-update-v1.1.2.sh /opt/TelDriveManager teldrive-manager.service v1.1.2
+curl -fL --retry 3 https://github.com/MengStar-L/TelDriveManager/releases/download/v1.1.3/update-linux.sh -o /tmp/tdm-update-v1.1.3.sh
+sudo bash /tmp/tdm-update-v1.1.3.sh /opt/TelDriveManager teldrive-manager.service v1.1.3
 ```
 
 按实际部署修改第二行的目录和服务名。脚本校验发布包 SHA-256，需要至少 6 GiB 空闲空间供初始解压；后续安装还会按配置检查磁盘保留值、依赖和备份容量。失败原因可从脚本输出的 `journalctl` 命令查看，恢复记录和备份不要手动删除。脚本按发布包更新源码，不修改 `.git` 元数据；后续推荐使用设置页继续更新。
 
 ## 配置说明
 
-回源页的“设置”及全局设置均可设置回源文件目录。路径指程序所在服务器，支持绝对路径、相对程序目录的路径和 `~`，留空恢复 `./telegram_relay`。保存时检查目录是否可写；新任务使用新目录，已有任务按数据库记录保留原位置，继续恢复、上传和清理，不自动搬移缓存。磁盘空间预算按任务实际所在文件系统计算。
+回源页的“设置”及全局设置均可设置“回源上传目录（TelDrive）”。点击文件夹按钮可逐级浏览并选择 TelDrive 中的文件夹（包括根目录），也可直接填写 `/回源/视频` 等云端路径。对应配置为 `telegram_relay.target_path`，留空沿用 `teldrive.target_path`。目录修改对尚未开始上传的任务生效；已开始上传的任务会记录原目录，失败重试和程序重启后继续上传到原位置。
+
+服务器只保存回源临时文件，确认上传成功后自动删除；该清理不受上述云端目录设置影响。本地缓存位置仍兼容已有 `telegram_relay.download_dir` 配置，磁盘空间预算按实际缓存所在文件系统计算。
 
 Telegram 活动日志按 5 MiB 轮转并保留 3 份备份。后台消息全量核验最短间隔为 5 分钟，查询超时或限流后自动退避；实时消息监听与文件快照同步仍照常运行。aria2 RPC 故障会在面板显示并自动退避重试，避免持续刷日志。部署时还应给 systemd journal 和 Docker 日志设置容量上限，它们不受应用日志轮转控制。
 

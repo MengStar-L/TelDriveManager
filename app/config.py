@@ -19,6 +19,22 @@ FIXED_DOWNLOAD_DIR = str((PROJECT_ROOT / "downloads").resolve())
 FIXED_ARIA2_HOME = str((PROJECT_ROOT / "aria2").resolve())
 
 
+def normalize_teldrive_target_path(value: Any) -> str:
+    if value is None:
+        return ""
+    if not isinstance(value, str):
+        raise ValueError("TelDrive 目标目录必须是路径文本")
+    text = value.strip()
+    if not text:
+        return ""
+    parts = [part for part in text.split("/") if part]
+    if ("://" in text or (len(text) > 1 and text[0].isalpha() and text[1] == ":")
+            or "\\" in text or any(ord(char) < 32 or ord(char) == 127 for char in text)
+            or any(part in (".", "..") for part in parts)):
+        raise ValueError("TelDrive 目标目录无效，请使用 / 开头的云端目录路径")
+    return "/" + "/".join(parts)
+
+
 def resolve_relay_download_dir(value, base_dir: Path | None = None) -> Path:
     raw = str(value or "./telegram_relay").strip() or "./telegram_relay"
     if "\x00" in raw or "://" in raw:
@@ -122,6 +138,7 @@ DEFAULTS: dict[str, Any] = {
         "proxy_username": "",
         "proxy_password": "",
         "download_dir": "./telegram_relay",
+        "target_path": "",
         "concurrency": 1,
         "max_retries": 3,
         "multibot_enabled": True,
@@ -450,6 +467,7 @@ def _normalize_config(merged: dict, raw: dict | None = None) -> dict:
     telegram_relay_cfg["proxy_username"] = str(telegram_relay_cfg.get("proxy_username") or "").strip()
     telegram_relay_cfg["proxy_password"] = str(telegram_relay_cfg.get("proxy_password") or "")
     telegram_relay_cfg["download_dir"] = str(telegram_relay_cfg.get("download_dir") or "./telegram_relay").strip() or "./telegram_relay"
+    telegram_relay_cfg["target_path"] = normalize_teldrive_target_path(telegram_relay_cfg.get("target_path"))
     telegram_relay_cfg["concurrency"] = max(1, int(telegram_relay_cfg.get("concurrency") or 1))
     telegram_relay_cfg["max_retries"] = max(1, int(telegram_relay_cfg.get("max_retries") or 3))
     telegram_relay_cfg["multibot_enabled"] = bool(telegram_relay_cfg.get("multibot_enabled", True))

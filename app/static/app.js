@@ -3373,7 +3373,7 @@ function collectSettingsConfig() {
             proxy_port: Math.max(1, parseInt(document.getElementById('cfgTelegramRelayProxyPort')?.value, 10) || currentRelay.proxy_port || 1080),
             proxy_username: document.getElementById('cfgTelegramRelayProxyUsername')?.value.trim() || '',
             proxy_password: document.getElementById('cfgTelegramRelayProxyPassword')?.value || '',
-            download_dir: document.getElementById('cfgTelegramRelayDownloadDir')?.value.trim() || './telegram_relay',
+            target_path: normalizeRelayTargetPath(document.getElementById('cfgTelegramRelayTargetPath')?.value || ''),
             concurrency: Math.max(1, parseInt(document.getElementById('cfgTelegramRelayConcurrency')?.value, 10) || currentRelay.concurrency || 1),
             max_retries: Math.max(1, parseInt(document.getElementById('cfgTelegramRelayMaxRetries')?.value, 10) || currentRelay.max_retries || 3),
             multibot_enabled: !!document.getElementById('cfgTelegramRelayMultibotEnabled')?.checked,
@@ -3465,7 +3465,8 @@ async function loadConfig() {
         document.getElementById('cfgTelegramRelayProxyPort').value = cfg.telegram_relay?.proxy_port || 1080;
         document.getElementById('cfgTelegramRelayProxyUsername').value = cfg.telegram_relay?.proxy_username || '';
         document.getElementById('cfgTelegramRelayProxyPassword').value = cfg.telegram_relay?.proxy_password || '';
-        document.getElementById('cfgTelegramRelayDownloadDir').value = cfg.telegram_relay?.download_dir || './telegram_relay';
+        document.getElementById('cfgTelegramRelayTargetPath').value = cfg.telegram_relay?.target_path || '';
+        document.getElementById('cfgTelegramRelayTargetPath').placeholder = `默认上传目录：${cfg.teldrive?.target_path || '/'}`;
         document.getElementById('cfgTelegramRelayConcurrency').value = cfg.telegram_relay?.concurrency || 1;
         document.getElementById('cfgTelegramRelayMaxRetries').value = cfg.telegram_relay?.max_retries || 3;
         const relayMultibot = document.getElementById('cfgTelegramRelayMultibotEnabled');
@@ -3517,10 +3518,8 @@ async function saveConfig() {
     const btn = document.getElementById('saveBtn');
     btn.disabled = true; btn.innerHTML = '<span class="spinner"></span> 保存...';
     
-    const cfg = collectSettingsConfig();
-    
-
     try {
+        const cfg = collectSettingsConfig();
         validateAria2AccessConfig(cfg.aria2);
 
         const resp = await fetch('/api/settings', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(cfg) });
@@ -3556,10 +3555,8 @@ function initAutoSave() {
 }
 
 async function doAutoSave(triggerInput) {
-    const cfg = collectSettingsConfig();
-
-
     try {
+        const cfg = collectSettingsConfig();
         const resp = await fetch('/api/settings', {
             method: 'PUT',
             headers: { 'Content-Type': 'application/json' },
@@ -4115,10 +4112,103 @@ function getTelegramRelaySettingsEls() {
         modal: document.getElementById('telegramRelaySettingsModal'),
         enabled: document.getElementById('telegramRelaySettingEnabled'),
         url: document.getElementById('telegramRelaySocksUrl'),
-        downloadDir: document.getElementById('telegramRelayDownloadDir'),
+        targetPath: document.getElementById('telegramRelayTargetPath'),
         status: document.getElementById('telegramRelaySettingsStatus'),
         testBtn: document.getElementById('telegramRelayTestProxyBtn'),
     };
+}
+
+function normalizeRelayTargetPath(value) {
+    const text = String(value || '').trim();
+    if (!text) return '';
+    const parts = text.split('/').filter(Boolean);
+    if (text.includes('://') || /^[a-z]:/i.test(text) || /[\\\x00-\x1f\x7f]/.test(text)
+            || parts.some(part => part === '.' || part === '..')) {
+        throw new Error('TelDrive 目标目录无效，请使用 / 开头的云端目录路径');
+    }
+    return '/' + parts.join('/');
+}
+
+const teldriveFolderPicker = { input: null, trigger: null, path: '/', parentPath: '/', requestId: 0, controller: null };
+
+async function openTelDriveFolderPicker(inputId, trigger = null) {
+    initTelegramRelaySettingsModal();
+    const input = document.getElementById(inputId);
+    const modal = document.getElementById('teldriveFolderPickerModal');
+    if (!input || input.disabled || !modal) return;
+    let path;
+    try {
+        path = normalizeRelayTargetPath(input.value || window.currentConfig?.teldrive?.target_path || '/') || '/';
+    } catch (_) {
+        path = '/';
+    }
+    teldriveFolderPicker.input = input;
+    teldriveFolderPicker.trigger = trigger || input;
+    modal.classList.add('show');
+    modal.setAttribute('aria-hidden', 'false');
+    modal.querySelector('button')?.focus();
+    await loadTelDrivePickerFolders(path);
+}
+
+function closeTelDriveFolderPicker(event) {
+    if (event && event.target !== event.currentTarget) return;
+    const modal = document.getElementById('teldriveFolderPickerModal');
+    modal?.classList.remove('show');
+    modal?.setAttribute('aria-hidden', 'true');
+    teldriveFolderPicker.requestId += 1;
+    teldriveFolderPicker.controller?.abort();
+    teldriveFolderPicker.input = null;
+    teldriveFolderPicker.trigger?.focus();
+}
+
+async function loadTelDrivePickerFolders(path) {
+    const list = document.getElementById('teldriveFolderPickerList');
+    const select = document.getElementById('teldriveFolderSelectBtn');
+    if (!list || !select) return;
+    const requestId = ++teldriveFolderPicker.requestId;
+    teldriveFolderPicker.controller?.abort();
+    teldriveFolderPicker.controller = new AbortController();
+    teldriveFolderPicker.path = path;
+    teldriveFolderPicker.parentPath = path.split('/').slice(0, -1).join('/') || '/';
+    document.getElementById('teldriveFolderPickerPath').textContent = path;
+    document.getElementById('teldriveFolderParentBtn').disabled = path === '/';
+    select.disabled = true;
+    list.innerHTML = '<div class="teldrive-folder-message">正在读取...</div>';
+    try {
+        const resp = await fetch(`/api/t2td/folders?${new URLSearchParams({path})}`, {
+            cache: 'no-store', signal: teldriveFolderPicker.controller.signal,
+        });
+        const data = await readJsonSafe(resp);
+        if (requestId !== teldriveFolderPicker.requestId) return;
+        if (!resp.ok) throw new Error(data.detail || data.message || '读取 TelDrive 文件夹失败');
+        if (typeof data.path !== 'string' || !Array.isArray(data.folders)) throw new Error('TelDrive 文件夹响应无效');
+        teldriveFolderPicker.path = data.path;
+        teldriveFolderPicker.parentPath = data.parent_path || '/';
+        document.getElementById('teldriveFolderPickerPath').textContent = data.path;
+        document.getElementById('teldriveFolderParentBtn').disabled = data.path === '/';
+        list.replaceChildren();
+        for (const folder of data.folders) {
+            const button = document.createElement('button');
+            button.type = 'button';
+            button.className = 'teldrive-folder-row';
+            button.innerHTML = `<i class="ph ph-folder" aria-hidden="true"></i><span>${escapeA2TDHtml(folder.name)}</span><i class="ph ph-caret-right" aria-hidden="true"></i>`;
+            button.addEventListener('click', () => loadTelDrivePickerFolders(folder.path));
+            list.appendChild(button);
+        }
+        if (!data.folders.length) list.innerHTML = '<div class="teldrive-folder-message">此目录没有子文件夹</div>';
+        select.disabled = false;
+    } catch (e) {
+        if (requestId !== teldriveFolderPicker.requestId) return;
+        list.innerHTML = `<div class="teldrive-folder-message" role="alert">${escapeA2TDHtml(e.message || '读取 TelDrive 文件夹失败')}</div>`;
+    }
+}
+
+function selectTelDrivePickerFolder() {
+    const input = teldriveFolderPicker.input;
+    if (!input || document.getElementById('teldriveFolderSelectBtn')?.disabled) return;
+    input.value = teldriveFolderPicker.path;
+    input.dispatchEvent(new Event('change', {bubbles: true}));
+    closeTelDriveFolderPicker();
 }
 
 function safeDecodeUrlPart(value) {
@@ -4214,7 +4304,7 @@ function applyTelegramRelayConfigToSettingsInputs(relay = {}) {
         ['cfgTelegramRelayProxyPort', relay.proxy_port || 1080],
         ['cfgTelegramRelayProxyUsername', relay.proxy_username || ''],
         ['cfgTelegramRelayProxyPassword', relay.proxy_password || ''],
-        ['cfgTelegramRelayDownloadDir', relay.download_dir || './telegram_relay'],
+        ['cfgTelegramRelayTargetPath', relay.target_path || ''],
         ['cfgTelegramRelayConcurrency', relay.concurrency || 1],
         ['cfgTelegramRelayDownloadConnections', relay.download_connections || 6],
         ['cfgTelegramRelayMaxRetries', relay.max_retries || 3],
@@ -4230,10 +4320,13 @@ function applyTelegramRelayConfigToSettingsInputs(relay = {}) {
 }
 
 function fillTelegramRelaySettingsForm(relay = {}) {
-    const { enabled, url, downloadDir } = getTelegramRelaySettingsEls();
+    const { enabled, url, targetPath } = getTelegramRelaySettingsEls();
     if (enabled) enabled.checked = !!relay.enabled;
     if (url) url.value = buildTelegramRelaySocksUrl(relay);
-    if (downloadDir) downloadDir.value = relay.download_dir || './telegram_relay';
+    if (targetPath) {
+        targetPath.value = relay.target_path || '';
+        targetPath.placeholder = `默认上传目录：${window.currentConfig?.teldrive?.target_path || '/'}`;
+    }
 }
 
 async function loadTelegramRelaySettingsConfig() {
@@ -4252,11 +4345,11 @@ async function loadTelegramRelaySettingsConfig() {
 }
 
 function collectTelegramRelaySettingsPayload() {
-    const { enabled, url, downloadDir } = getTelegramRelaySettingsEls();
+    const { enabled, url, targetPath } = getTelegramRelaySettingsEls();
     const parsed = parseTelegramRelaySocksUrl(url?.value || '');
     const payload = {
         enabled: !!enabled?.checked,
-        download_dir: downloadDir?.value.trim() || './telegram_relay',
+        target_path: normalizeRelayTargetPath(targetPath?.value || ''),
         ...parsed,
     };
     // 代理留空 → 回源直连 Telegram（云端服务器通常可直连）；启用回源不再强制填写代理。
@@ -4320,17 +4413,17 @@ function scheduleTelegramRelaySettingsSave(triggerInput) {
 
 async function openTelegramRelaySettingsModal() {
     initTelegramRelaySettingsModal();
-    const { modal, enabled, url, downloadDir } = getTelegramRelaySettingsEls();
+    const { modal, enabled, url, targetPath } = getTelegramRelaySettingsEls();
     if (!modal) return;
     await telegramRelaySettingsSaveQueue;
     fillTelegramRelaySettingsForm(window.currentConfig?.telegram_relay || {});
     modal.setAttribute('aria-hidden', 'false');
     modal.classList.add('show');
-    const controls = [enabled, url, downloadDir, document.getElementById('telegramRelaySaveBtn'), document.getElementById('telegramRelayTestProxyBtn')];
+    const controls = [enabled, url, targetPath, document.getElementById('telegramRelayBrowseBtn'), document.getElementById('telegramRelaySaveBtn'), document.getElementById('telegramRelayTestProxyBtn')];
     controls.forEach(control => { if (control) control.disabled = true; });
     await loadTelegramRelaySettingsConfig();
     controls.forEach(control => { if (control) control.disabled = false; });
-    setTimeout(() => downloadDir?.focus(), 120);
+    setTimeout(() => targetPath?.focus(), 120);
 }
 
 function closeTelegramRelaySettingsModal(event) {
@@ -4344,12 +4437,29 @@ function closeTelegramRelaySettingsModal(event) {
 function initTelegramRelaySettingsModal() {
     if (telegramRelaySettingsInitDone) return;
     telegramRelaySettingsInitDone = true;
-    const { enabled, url, downloadDir } = getTelegramRelaySettingsEls();
+    const { enabled, url, targetPath } = getTelegramRelaySettingsEls();
     enabled?.addEventListener('change', () => scheduleTelegramRelaySettingsSave(enabled));
     url?.addEventListener('change', () => scheduleTelegramRelaySettingsSave(url));
-    downloadDir?.addEventListener('change', () => scheduleTelegramRelaySettingsSave(downloadDir));
+    targetPath?.addEventListener('change', () => scheduleTelegramRelaySettingsSave(targetPath));
     document.addEventListener('keydown', (event) => {
+        const pickerModal = document.getElementById('teldriveFolderPickerModal');
+        if (event.key === 'Tab' && pickerModal?.classList.contains('show')) {
+            const buttons = [...pickerModal.querySelectorAll('button:not(:disabled)')];
+            const first = buttons[0];
+            const last = buttons[buttons.length - 1];
+            if (event.shiftKey && document.activeElement === first) {
+                event.preventDefault();
+                last?.focus();
+            } else if (!event.shiftKey && document.activeElement === last) {
+                event.preventDefault();
+                first?.focus();
+            }
+        }
         if (event.key === 'Escape') {
+            if (document.getElementById('teldriveFolderPickerModal')?.classList.contains('show')) {
+                closeTelDriveFolderPicker();
+                return;
+            }
             const { modal } = getTelegramRelaySettingsEls();
             if (modal?.classList.contains('show')) closeTelegramRelaySettingsModal();
             const logModal = document.getElementById('telegramRelayLogModal');

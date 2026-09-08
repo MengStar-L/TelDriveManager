@@ -10,7 +10,7 @@ from fastapi import APIRouter, Body, File, Form, HTTPException, UploadFile
 
 from app.aria2_client import Aria2Client
 from app.aria2_service import ARIA2_TMP_DIR, aria2_service
-from app.config import load_config, needs_setup, prepare_relay_download_dir, reload_config, save_config
+from app.config import load_config, needs_setup, normalize_teldrive_target_path, prepare_relay_download_dir, reload_config, save_config
 from app import database as db
 from app.modules.aria2teldrive.task_manager import task_manager
 from app.modules.aria2teldrive.teldrive_client import TelDriveClient
@@ -48,6 +48,11 @@ async def get_settings():
 async def update_settings(request_body: dict):
     previous = load_config(force_reload=True)
     relay = request_body.get("telegram_relay")
+    if isinstance(relay, dict) and "target_path" in relay:
+        try:
+            relay["target_path"] = normalize_teldrive_target_path(relay["target_path"])
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
     if isinstance(relay, dict) and "download_dir" in relay:
         directory = str(relay.get("download_dir") or "").strip() or "./telegram_relay"
         if directory != previous.get("telegram_relay", {}).get("download_dir", "./telegram_relay"):

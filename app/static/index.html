@@ -7,7 +7,8 @@
     <link rel="icon" type="image/png" href="/favicon.png">
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
-    <script src="https://unpkg.com/@phosphor-icons/web"></script>
+    <link rel="stylesheet" href="/static/vendor/phosphor/src/regular/style.css">
+    <link rel="stylesheet" href="/static/vendor/phosphor/src/fill/style.css">
     <style>
         :root {
             --bg-body: #eef2f5;
@@ -1046,6 +1047,20 @@
             margin-bottom: 8px;
         }
 
+        .teldrive-path-field { display: flex; gap: 8px; min-width: 0; }
+        .teldrive-path-field .form-input { flex: 1; min-width: 0; }
+        .teldrive-path-field .auto-save-check { right: 56px !important; pointer-events: none; }
+        .teldrive-path-field .btn, .teldrive-folder-toolbar .btn { flex: 0 0 40px; width: 40px; height: 40px; padding: 0; }
+        #teldriveFolderPickerModal { z-index: 1270; }
+        #teldriveFolderPickerModal .telegram-relay-settings-dialog { border-radius: 8px; }
+        .teldrive-folder-toolbar { display: flex; gap: 8px; }
+        .teldrive-folder-path { font-size: 14px; line-height: 1.5; overflow-wrap: anywhere; min-width: 0; }
+        .teldrive-folder-list { height: 260px; overflow-y: auto; min-width: 0; border-block: 1px solid var(--border); }
+        .teldrive-folder-row { width: 100%; display: flex; align-items: center; gap: 10px; min-height: 44px; padding: 10px 8px; border: 0; border-bottom: 1px solid var(--border); background: transparent; text-align: left; color: var(--text-primary); cursor: pointer; font: inherit; }
+        .teldrive-folder-row:hover, .teldrive-folder-row:focus-visible { background: var(--accent-light); }
+        .teldrive-folder-row span { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+        .teldrive-folder-row i { flex-shrink: 0; }
+        .teldrive-folder-message { padding: 16px 8px; font-size: 14px; overflow-wrap: anywhere; }
         .telegram-relay-settings-modal {
             position: fixed;
             inset: 0;
@@ -2102,7 +2117,13 @@
                                         <div class="form-group"><label>代理端口</label><input class="form-input" type="number" id="cfgTelegramRelayProxyPort" min="1" max="65535" placeholder="1080"></div>
                                         <div class="form-group"><label>代理用户名</label><input class="form-input" type="text" id="cfgTelegramRelayProxyUsername" placeholder="可留空"></div>
                                         <div class="form-group"><label>代理密码</label><input class="form-input" type="password" id="cfgTelegramRelayProxyPassword" placeholder="可留空"></div>
-                                        <div class="form-group"><label for="cfgTelegramRelayDownloadDir">回源文件目录（服务器）</label><input class="form-input" type="text" id="cfgTelegramRelayDownloadDir" placeholder="./telegram_relay" autocomplete="off" spellcheck="false"></div>
+                                        <div class="form-group">
+                                            <label for="cfgTelegramRelayTargetPath">回源上传目录（TelDrive）</label>
+                                            <div class="teldrive-path-field">
+                                                <input class="form-input" type="text" id="cfgTelegramRelayTargetPath" placeholder="默认上传目录" autocomplete="off" spellcheck="false">
+                                                <button class="btn btn-ghost" type="button" title="选择 TelDrive 文件夹" aria-label="选择 TelDrive 文件夹" onclick="openTelDriveFolderPicker('cfgTelegramRelayTargetPath', this)"><i class="ph ph-folder-open"></i></button>
+                                            </div>
+                                        </div>
                                         <div class="form-group"><label>回源并发数（同时下几个文件）</label><input class="form-input" type="number" id="cfgTelegramRelayConcurrency" min="1" max="16" placeholder="1"></div>
                                         <div class="form-group"><label>下载连接数（单文件用几个 bot）</label><input class="form-input" type="number" id="cfgTelegramRelayDownloadConnections" min="1" max="16" placeholder="6"></div>
                                         <div class="form-group"><label>失败重试次数</label><input class="form-input" type="number" id="cfgTelegramRelayMaxRetries" min="1" max="20" placeholder="3"></div>
@@ -2171,8 +2192,11 @@
                     </div>
                 </label>
                 <div class="form-group">
-                    <label for="telegramRelayDownloadDir">回源文件目录（服务器）</label>
-                    <input class="form-input" type="text" id="telegramRelayDownloadDir" placeholder="/mnt/data/telegram_relay" autocomplete="off" spellcheck="false">
+                    <label for="telegramRelayTargetPath">回源上传目录（TelDrive）</label>
+                    <div class="teldrive-path-field">
+                        <input class="form-input" type="text" id="telegramRelayTargetPath" placeholder="默认上传目录" autocomplete="off" spellcheck="false">
+                        <button class="btn btn-ghost" type="button" id="telegramRelayBrowseBtn" title="选择 TelDrive 文件夹" aria-label="选择 TelDrive 文件夹" onclick="openTelDriveFolderPicker('telegramRelayTargetPath', this)"><i class="ph ph-folder-open"></i></button>
+                    </div>
                 </div>
                 <div class="form-group">
                     <label for="telegramRelaySocksUrl">代理链接</label>
@@ -2202,7 +2226,28 @@
         </div>
     </div>
 
-    <script src="/static/app.js?v=20260908-relay-directory"></script>
+    <div id="teldriveFolderPickerModal" class="telegram-relay-settings-modal" aria-hidden="true" onclick="closeTelDriveFolderPicker(event)">
+        <div class="telegram-relay-settings-dialog" role="dialog" aria-modal="true" aria-labelledby="teldriveFolderPickerTitle" onclick="event.stopPropagation()">
+            <div class="telegram-relay-settings-header">
+                <h3 class="picker-panel-title" id="teldriveFolderPickerTitle"><i class="ph ph-folder-open"></i> TelDrive 文件夹</h3>
+                <button class="btn btn-ghost btn-sm" type="button" title="关闭" aria-label="关闭" onclick="closeTelDriveFolderPicker()"><i class="ph ph-x"></i></button>
+            </div>
+            <div class="telegram-relay-settings-body">
+                <div class="teldrive-folder-toolbar">
+                    <button class="btn btn-ghost" type="button" title="根目录" aria-label="根目录" onclick="loadTelDrivePickerFolders('/')"><i class="ph ph-house"></i></button>
+                    <button class="btn btn-ghost" type="button" id="teldriveFolderParentBtn" title="上一级" aria-label="上一级" onclick="loadTelDrivePickerFolders(teldriveFolderPicker.parentPath)"><i class="ph ph-arrow-up"></i></button>
+                    <button class="btn btn-ghost" type="button" title="刷新" aria-label="刷新" onclick="loadTelDrivePickerFolders(teldriveFolderPicker.path)"><i class="ph ph-arrow-clockwise"></i></button>
+                </div>
+                <div id="teldriveFolderPickerPath" class="teldrive-folder-path"></div>
+                <div id="teldriveFolderPickerList" class="teldrive-folder-list" aria-live="polite"></div>
+            </div>
+            <div class="telegram-relay-settings-footer">
+                <button class="btn btn-primary btn-sm" id="teldriveFolderSelectBtn" type="button" onclick="selectTelDrivePickerFolder()"><i class="ph ph-check"></i> 选择此目录</button>
+            </div>
+        </div>
+    </div>
+
+    <script src="/static/app.js?v=20260908-relay-teldrive-target"></script>
 
 
 

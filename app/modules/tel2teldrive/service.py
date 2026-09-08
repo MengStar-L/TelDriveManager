@@ -54,7 +54,7 @@ from telethon.tl.types import (
 )
 
 from app.modules.tel2teldrive.relay import TelegramRelayManager
-from app.config import normalize_telegram_channel_id, telegram_channel_ids_equivalent
+from app.config import normalize_telegram_channel_id, normalize_teldrive_target_path, telegram_channel_ids_equivalent
 
 BASE_DIR = Path(__file__).parent
 STATIC_DIR = BASE_DIR / "static"
@@ -118,6 +118,7 @@ DEFAULT_CONFIG: dict[str, dict[str, Any]] = {
         "proxy_username": "",
         "proxy_password": "",
         "download_dir": "./telegram_relay",
+        "target_path": "",
         "concurrency": 1,
         "max_retries": 3,
         # 多 bot 并行下载：复用 TelDrive 在 teldrive.bots 里的 bot token，
@@ -217,6 +218,7 @@ class RuntimeConfig:
     log_file: str
 
     missing_fields: list[str]
+    relay_target_path: str = ""
 
     @property
     def session_file(self) -> str:
@@ -318,6 +320,7 @@ class ConfigStore:
             relay_proxy_username=relay.get("proxy_username", ""),
             relay_proxy_password=relay.get("proxy_password", ""),
             relay_download_dir=relay.get("download_dir", "./telegram_relay"),
+            relay_target_path=relay.get("target_path", ""),
             relay_concurrency=relay.get("concurrency", 1),
             relay_max_retries=relay.get("max_retries", 3),
             relay_multibot_enabled=relay.get("multibot_enabled", DEFAULT_CONFIG["telegram_relay"]["multibot_enabled"]),
@@ -380,6 +383,7 @@ class ConfigStore:
                 "proxy_username": runtime.relay_proxy_username,
                 "proxy_password": runtime.relay_proxy_password,
                 "download_dir": runtime.relay_download_dir,
+                "target_path": runtime.relay_target_path,
                 "concurrency": runtime.relay_concurrency,
                 "max_retries": runtime.relay_max_retries,
                 "multibot_enabled": runtime.relay_multibot_enabled,
@@ -540,6 +544,7 @@ class ConfigStore:
             relay_payload.get("download_dir"),
             fallback=DEFAULT_CONFIG["telegram_relay"]["download_dir"],
         )
+        relay["target_path"] = normalize_teldrive_target_path(relay_payload.get("target_path"))
         relay["concurrency"] = self._parse_positive_int(
             relay_payload.get("concurrency"),
             "relay concurrency",

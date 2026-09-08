@@ -18,7 +18,7 @@ from telethon.tl.types import InputChannel, InputPeerChannel
 from telethon.utils import resolve_id
 
 from app import database as db
-from app.config import load_config
+from app.config import load_config, normalize_teldrive_target_path
 from app.disk_budget import disk_budget, DiskSpaceUnavailable
 from app.modules.aria2teldrive.teldrive_client import TelDriveClient
 
@@ -846,6 +846,14 @@ class TelegramRelayManager:
         return data if isinstance(data, list) else []
 
     async def _upload_local_file(self, path: Path, config: Any, job: dict) -> dict:
+        # Pin the destination before the first upload so retries survive settings changes.
+        target_path = str(job.get("target_path") or "")
+        if not target_path:
+            current = self.config or config
+            target_path = normalize_teldrive_target_path(
+                getattr(current, "relay_target_path", "") or current.teldrive_target_path or "/") or "/"
+            await db.update_telegram_relay_job(job["job_id"], target_path=target_path)
+            job["target_path"] = target_path
         teldrive = TelDriveClient(
             api_host=config.teldrive_url,
             access_token=config.bearer_token,
@@ -934,7 +942,7 @@ class TelegramRelayManager:
         try:
             return await teldrive.upload_file_chunked(
                 str(path),
-                str(config.teldrive_target_path or "/"),
+                target_path,
                 progress_callback,
                 upload_id=upload_id,
                 confirmed_part_numbers=confirmed_part_numbers,

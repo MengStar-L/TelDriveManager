@@ -324,6 +324,7 @@ class TelegramRelayIndependentTests(unittest.IsolatedAsyncioTestCase):
             await db.delete_telegram_relay_job(job_id)
 
         self.assertEqual(completed["status"], "completed")
+        self.assertFalse(Path(job["local_path"]).exists())
         self.assertEqual(fake_client.deleted, [(config.telegram_channel_id, [222])])
         self.assertEqual(remembered_ids, [222])
         self.assertEqual([record["status"] for record in audit_records], ["deleted"])
@@ -331,7 +332,7 @@ class TelegramRelayIndependentTests(unittest.IsolatedAsyncioTestCase):
     async def test_relay_upload_resumes_with_persisted_checkpoint(self):
         """上传失败后，重试复用同一 upload_id + 已确认分块续传，而非整文件重传。"""
         manager = relay_module.TelegramRelayManager(FakeLogger(), FakeBroker())
-        config = make_runtime()
+        config = make_runtime(relay_target_path="/relay/original")
         manager.config = config
         job_id = relay_module.make_relay_job_id(config.telegram_channel_id, 555)
         local_path = Path(config.relay_download_dir) / job_id / "resume.bin"
@@ -365,6 +366,7 @@ class TelegramRelayIndependentTests(unittest.IsolatedAsyncioTestCase):
                                           concurrency_callback=None):
                 calls.append({
                     "upload_id": upload_id,
+                    "target": target,
                     "confirmed": list(confirmed_part_numbers or []),
                     "remote": list(remote_parts or []),
                 })
@@ -388,8 +390,11 @@ class TelegramRelayIndependentTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(json.loads(after1["upload_confirmed_parts_json"]), [1])
             self.assertEqual(json.loads(after1["upload_remote_parts_json"]), [remote_p1])
             self.assertTrue(after1["upload_source_fingerprint"])
+            self.assertEqual(after1["target_path"], "/relay/original")
 
             # 第二次（重试）：同一 job 行带着 checkpoint 进来，必须续传
+            manager = relay_module.TelegramRelayManager(FakeLogger(), FakeBroker())
+            manager.config = make_runtime(relay_target_path="/relay/changed")
             result = await manager._upload_local_file(local_path, config, after1)
             self.assertTrue(result["success"])
         finally:
@@ -397,6 +402,7 @@ class TelegramRelayIndependentTests(unittest.IsolatedAsyncioTestCase):
             await db.delete_telegram_relay_job(job_id)
 
         self.assertEqual(len(calls), 2)
+        self.assertEqual([call["target"] for call in calls], ["/relay/original", "/relay/original"])
         self.assertEqual(calls[1]["upload_id"], first_uid)      # 复用 upload_id
         self.assertEqual(calls[1]["confirmed"], [1])            # 跳过已确认的块 1
         self.assertEqual(calls[1]["remote"], [remote_p1])

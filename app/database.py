@@ -70,6 +70,7 @@ CREATE TABLE IF NOT EXISTS telegram_relay_jobs (
     upload_progress REAL DEFAULT 0.0,
     local_path TEXT DEFAULT '',
     teldrive_file_id TEXT DEFAULT '',
+    target_path TEXT DEFAULT '',
     upload_id TEXT DEFAULT '',
     upload_confirmed_parts_json TEXT DEFAULT '[]',
     upload_remote_parts_json TEXT DEFAULT '[]',
@@ -161,6 +162,7 @@ async def init_db():
     await _ensure_column(conn, "telegram_relay_jobs", "upload_confirmed_parts_json", "TEXT DEFAULT '[]'")
     await _ensure_column(conn, "telegram_relay_jobs", "upload_remote_parts_json", "TEXT DEFAULT '[]'")
     await _ensure_column(conn, "telegram_relay_jobs", "upload_source_fingerprint", "TEXT DEFAULT ''")
+    await _ensure_column(conn, "telegram_relay_jobs", "target_path", "TEXT DEFAULT ''")
     await _ensure_column(conn, "telegram_relay_jobs", "download_verified", "INTEGER DEFAULT 0")
     await _ensure_column(conn, "telegram_relay_jobs", "download_fingerprint", "TEXT DEFAULT ''")
     await _ensure_column(conn, "telegram_relay_jobs", "upload_committed", "INTEGER DEFAULT 0")
@@ -702,6 +704,7 @@ async def update_telegram_relay_job(job_id: str, **kwargs) -> None:
         "upload_progress",
         "local_path",
         "teldrive_file_id",
+        "target_path",
         "upload_id",
         "upload_confirmed_parts_json",
         "upload_remote_parts_json",

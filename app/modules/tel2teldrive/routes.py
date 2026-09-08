@@ -349,6 +349,36 @@ async def delete_relay_job(job_id: str):
     return result
 
 
+@router.get("/folders")
+async def get_teldrive_folders(path: str = "/"):
+    from app.config import normalize_teldrive_target_path
+    from app.modules.tel2teldrive.service import list_teldrive_dir
+
+    try:
+        path = normalize_teldrive_target_path(path) or "/"
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    _, _, config_store, _ = _get_deps()
+    config = config_store.runtime()
+    if not config.teldrive_url or not config.bearer_token:
+        raise HTTPException(status_code=400, detail="请先配置 TelDrive 地址和访问令牌")
+    try:
+        items = await asyncio.to_thread(list_teldrive_dir, config, path)
+        folders = []
+        for item in items:
+            if item.get("type") != "folder":
+                continue
+            name = item["name"]
+            child_path = path.rstrip("/") + "/" + name
+            if "/" in name or normalize_teldrive_target_path(child_path) != child_path:
+                raise ValueError("TelDrive 返回了无效的文件夹名称")
+            folders.append({"name": name, "path": child_path})
+        folders.sort(key=lambda folder: folder["name"].casefold())
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"读取 TelDrive 文件夹失败：{exc}") from exc
+    return {"path": path, "parent_path": path.rsplit("/", 1)[0] or "/", "folders": folders}
+
+
 @router.get("/folder-tree")
 async def get_folder_tree():
     _, _, config_store, _ = _get_deps()
