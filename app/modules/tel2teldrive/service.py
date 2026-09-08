@@ -4,6 +4,8 @@ import asyncio
 import base64
 import hashlib
 import json
+import logging
+from logging.handlers import RotatingFileHandler
 import mimetypes
 import os
 import re
@@ -11,6 +13,7 @@ import secrets
 import tempfile
 import tomllib
 import traceback
+import time
 from collections import deque
 from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass
@@ -71,6 +74,8 @@ T2TD_ACTION_LOG_MIN_LIMIT = 500
 # 已删除的 file_id/msg_id 不会再有真实的外部删除事件，放宽是安全的
 INTERNAL_DELETE_GRACE_SECONDS = 900.0
 MESSAGE_FETCH_BATCH_SIZE = 100
+MESSAGE_AUDIT_INTERVAL = 300
+MESSAGE_QUERY_TIMEOUT = 15
 INITIAL_MAPPING_SCAN_TIMEOUT = 90
 INITIAL_MAPPING_PROGRESS_EVERY = 100
 # 安全保护连续触发的退避：连续 N 次 100% 缺失后，按倍数拉长检查间隔，
@@ -895,13 +900,26 @@ class DashboardBroker:
 class ActivityLogger:
     def __init__(self, broker: DashboardBroker, log_path: Path):
         self.broker = broker
-        self.log_path = log_path
-        self.log_path.parent.mkdir(parents=True, exist_ok=True)
+        self.log_path = None
+        self._handler = None
+        self._disk_error_reported = False
+        self.set_log_path(log_path)
         self._counter = count(1)
 
     def set_log_path(self, log_path: Path):
+        log_path = Path(log_path)
+        if self.log_path == log_path:
+            return
+        self.close()
         self.log_path = log_path
         self.log_path.parent.mkdir(parents=True, exist_ok=True)
+        self._handler = RotatingFileHandler(log_path, maxBytes=5 * 1024 ** 2, backupCount=3,
+                                           encoding="utf-8", delay=True)
+
+    def close(self):
+        if self._handler is not None:
+            self._handler.close()
+            self._handler = None
 
     def info(self, message: str):
         self._write("INFO", message)
@@ -914,10 +932,24 @@ class ActivityLogger:
 
     def _write(self, level: str, message: str):
         timestamp = iso_now()
+        message = str(message)[:16384]
         line = f"{format_local_time(timestamp)} [{level}] {message}"
         print(line, flush=True)
-        with self.log_path.open("a", encoding="utf-8") as f:
-            f.write(line + "\\n")
+        # Logging must not abort transfers when storage is unavailable.
+        try:
+            record = logging.LogRecord("telegram", logging.INFO, "", 0, line, (), None)
+            with self._handler.lock:
+                if self._handler.shouldRollover(record):
+                    self._handler.doRollover()
+                if self._handler.stream is None:
+                    self._handler.stream = self._handler._open()
+                self._handler.stream.write(line + "\n")
+                self._handler.flush()
+            self._disk_error_reported = False
+        except OSError as exc:
+            if not self._disk_error_reported:
+                print(f"活动日志写入失败，继续处理任务: {type(exc).__name__}", flush=True)
+                self._disk_error_reported = True
         self.broker.push_log(
             {
                 "id": str(next(self._counter)),
@@ -1896,7 +1928,9 @@ async def get_existing_message_ids(client: TelegramClient, channel_id: int, mess
     for index in range(0, len(normalized_ids), MESSAGE_FETCH_BATCH_SIZE):
         batch = normalized_ids[index:index + MESSAGE_FETCH_BATCH_SIZE]
         try:
-            messages = await client.get_messages(channel_id, ids=batch)
+            if index:
+                await asyncio.sleep(0.5)
+            messages = await asyncio.wait_for(client.get_messages(channel_id, ids=batch), MESSAGE_QUERY_TIMEOUT)
         except Exception as exc:
             logger.warning(f"批量查询 Telegram 消息状态失败: {exc}")
             # 查询异常时返回 None，表示无法确认消息状态，调用方应跳过删除
@@ -2195,6 +2229,8 @@ async def sync_deletions(client: TelegramClient, config: RuntimeConfig):
     # 反复全量查询只会刷屏 + 浪费 Telegram API 配额
     safe_guard_strikes = 0
     skip_message_check_rounds = 0
+    next_message_check = 0.0
+    message_check_failures = 0
 
     while True:
         await asyncio.sleep(config.sync_interval)
@@ -2206,10 +2242,13 @@ async def sync_deletions(client: TelegramClient, config: RuntimeConfig):
             tracked_message_ids = merge_message_ids(*mapping.values())
             if tracked_message_ids and skip_message_check_rounds > 0:
                 skip_message_check_rounds -= 1
-            elif tracked_message_ids:
+            elif tracked_message_ids and time.monotonic() >= next_message_check:
                 existing_message_ids = await get_existing_message_ids(client, config.telegram_channel_id, tracked_message_ids)
+                message_check_failures = message_check_failures + 1 if existing_message_ids is None else 0
+                audit_delay = max(config.sync_interval, MESSAGE_AUDIT_INTERVAL) * min(8, 2 ** min(message_check_failures, 3))
+                next_message_check = time.monotonic() + audit_delay
                 if existing_message_ids is None:
-                    logger.warning("Telegram 消息状态查询失败，本轮跳过删除同步")
+                    logger.warning(f"Telegram 消息查询失败或限流，{audit_delay} 秒后重试消息核验；文件快照和实时监听继续")
                 else:
                     missing_message_ids = [msg_id for msg_id in tracked_message_ids if msg_id not in existing_message_ids]
                     if missing_message_ids:
@@ -2698,25 +2737,19 @@ class Tel2TelDriveService:
         stop_task = asyncio.create_task(self.stop_event.wait())
         reload_task = asyncio.create_task(self.reload_event.wait())
         try:
-            done, pending = await asyncio.wait(
+            done, _ = await asyncio.wait(
                 {stop_task, reload_task},
                 timeout=timeout,
                 return_when=asyncio.FIRST_COMPLETED,
             )
         finally:
-            pass
+            for task in (stop_task, reload_task):
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(stop_task, reload_task, return_exceptions=True)
 
         if not done:
-            for task in (stop_task, reload_task):
-                task.cancel()
-                with suppress(asyncio.CancelledError):
-                    await task
             return None
-
-        for task in pending:
-            task.cancel()
-            with suppress(asyncio.CancelledError):
-                await task
 
         if stop_task in done and stop_task.result():
             return "stop"

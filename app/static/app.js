@@ -2258,7 +2258,9 @@ function renderA2TDStats(stats) {
             const thresholdText = protection.threshold_bytes !== undefined ? formatBytes(getA2TDNumber(protection.threshold_bytes), 0) : '--';
             diskProtectNotice.style.display = 'flex';
             if (diskProtectNoticeText) {
-                diskProtectNoticeText.textContent = `${protection.message || '磁盘不足，已自动保护'}（当前剩余 ${freeText}，保护阈值 ${thresholdText}）${protection.recovery_message ? '；' + protection.recovery_message : ''}`;
+                diskProtectNoticeText.textContent = stats.aria2?.error
+                    ? stats.aria2.error
+                    : `${protection.message || '磁盘不足，已自动保护'}（当前剩余 ${freeText}，保护阈值 ${thresholdText}）${protection.recovery_message ? '；' + protection.recovery_message : ''}`;
             }
         } else {
             diskProtectNotice.style.display = 'none';

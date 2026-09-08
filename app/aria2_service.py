@@ -114,15 +114,35 @@ class Aria2Service:
             client = None
             try:
                 client = self._build_client(cfg)
-                version = await client.get_version()
+                version = await asyncio.wait_for(client.get_version(), timeout=2)
                 snapshot["version"] = str(version.get("version") or "")
             except Exception:
                 snapshot["running"] = False
+                snapshot["error"] = "aria2 RPC 无响应，请检查进程和 RPC 配置"
             finally:
                 if client is not None:
                     await client.close()
 
+        if snapshot["installed"] and not snapshot["running"] and not snapshot["error"]:
+            snapshot["error"] = "本地 aria2 未运行，请检查启动日志"
         return snapshot
+
+    async def update_health(self) -> dict:
+        """Require the configured download backend before committing an update."""
+        cfg = load_config()
+        required = self.is_installed(cfg) or bool(cfg.get("aria2", {}).get("installed"))
+        if not required:
+            return {"required": False, "ready": True, "error": ""}
+        if not self.is_running():
+            return {"required": True, "ready": False, "error": self._state.error or "本地 aria2 未运行"}
+        client = self._build_client(cfg)
+        try:
+            await asyncio.wait_for(client.get_version(), timeout=2)
+            return {"required": True, "ready": True, "error": ""}
+        except Exception:
+            return {"required": True, "ready": False, "error": "aria2 RPC 无响应"}
+        finally:
+            await client.close()
 
     def _build_client(self, cfg: Optional[dict] = None) -> Aria2Client:
         cfg = cfg or load_config()
@@ -204,7 +224,7 @@ class Aria2Service:
             f"--min-split-size={int(aria2_cfg.get('min_split_size_mb') or 5)}M",
             "--continue=true",
             "--pause=true",
-            "--enable-console-readout=false",
+            "--show-console-readout=false",
             "--summary-interval=0",
             "--console-log-level=warn",
             "--allow-overwrite=true",
@@ -224,6 +244,9 @@ class Aria2Service:
         creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
         env = os.environ.copy()
         if os.name != "nt":
+            # Some static aria2 builds crash before logging when systemd omits HOME.
+            if not env.get("HOME"):
+                env["HOME"] = str(Path.home())
             lib_path = str(binary_path.parent)
             current_lib_path = str(env.get("LD_LIBRARY_PATH") or "").strip()
             env["LD_LIBRARY_PATH"] = f"{lib_path}{os.pathsep}{current_lib_path}" if current_lib_path else lib_path
@@ -237,9 +260,10 @@ class Aria2Service:
                 creationflags=creationflags,
                 env=env,
             )
-        except BaseException:
+        except BaseException as exc:
             self._log_handle.close()
             self._log_handle = None
+            self._set_state(status="error", running=False, error=f"aria2 启动失败: {exc}")
             raise
         self._log_thread = threading.Thread(target=self._drain_process_log,
                                             args=(self._process, self._log_handle), daemon=True)
@@ -247,11 +271,11 @@ class Aria2Service:
         try:
             await self._wait_until_ready(cfg)
         except Exception as exc:
-            log_tail = self._read_log_tail()
             await self.stop()
-            if log_tail:
-                raise RuntimeError(f"{exc}；最近 aria2 日志: {log_tail}") from exc
-            raise
+            log_tail = self._read_log_tail()
+            message = f"{exc}；最近 aria2 日志: {log_tail}" if log_tail else str(exc)
+            self._set_state(status="error", running=False, error=message)
+            raise RuntimeError(message) from exc
         logger.info("本地 aria2 服务已启动")
 
 
@@ -294,11 +318,11 @@ class Aria2Service:
         last_error = None
         while asyncio.get_running_loop().time() < deadline:
             if self._process and self._process.poll() is not None:
-                raise RuntimeError("aria2 进程启动后立即退出，请检查安装包或日志")
+                raise RuntimeError(f"aria2 进程启动后立即退出（退出码 {self._process.returncode}），请检查安装包或日志")
             client = None
             try:
                 client = self._build_client(cfg)
-                version = await client.get_version()
+                version = await asyncio.wait_for(client.get_version(), timeout=min(2, max(0.1, deadline - asyncio.get_running_loop().time())))
                 self._set_state(
                     status="completed",
                     progress=100.0,

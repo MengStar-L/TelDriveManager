@@ -118,7 +118,9 @@ class Tel2TelDriveResilienceTests(unittest.IsolatedAsyncioTestCase):
         original_run_blocking_io = service_module.run_blocking_io
         original_get_existing = service_module.get_existing_message_ids
         original_diagnose = service_module.diagnose_full_missing
+        original_interval = service_module.MESSAGE_AUDIT_INTERVAL
         try:
+            service_module.MESSAGE_AUDIT_INTERVAL = 0
             service_module.logger = cast(Any, fake_logger)
             service_module.broker = cast(Any, fake_broker)
             service_module.run_blocking_io = cast(Any, fake_run_blocking_io)
@@ -133,6 +135,7 @@ class Tel2TelDriveResilienceTests(unittest.IsolatedAsyncioTestCase):
             service_module.run_blocking_io = original_run_blocking_io
             service_module.get_existing_message_ids = original_get_existing
             service_module.diagnose_full_missing = original_diagnose
+            service_module.MESSAGE_AUDIT_INTERVAL = original_interval
 
         # 8 轮快照（首轮为初始化），但消息检查应因退避而少于轮数
         self.assertLess(message_check_calls, rounds - 1)

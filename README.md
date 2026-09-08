@@ -108,7 +108,7 @@ http://localhost:8888
 
 安装前会验证 Python 依赖、源码语法和应用导入。依赖需要变化时，在 `.tdm-runtimes/` 中建立独立虚拟环境，安装新版依赖并运行 `pip check`，不会修改当前环境；依赖下载、兼容性或磁盘检查失败时，原服务继续运行。自动安装只接受当前平台可用的 wheel，缺少 wheel、Python 版本不兼容或更新启动协议不兼容时需要手动升级。启动器按 `.tdm-runtime` 选择环境，原来的启动命令仍然可用。
 
-更新器完整备份后才开始替换文件；新版必须通过带本次更新标识的本机 HTTP 就绪检查，才会确认成功并清理备份。失败时恢复源码、版本标记和旧环境指针。回滚失败会保留备份和 `.tdm-update-lock`，阻止混合版本启动；修复空间或权限问题后重新启动，启动器会重试恢复。该回滚不撤销远端操作，也不承诺兼容未来的破坏性数据库迁移。
+更新器完整备份后才开始替换文件；新版必须通过带本次更新标识的本机 HTTP 就绪检查，已安装的托管 aria2 也必须运行且 RPC 可用，才会确认成功并清理备份。失败时恢复源码、版本标记和旧环境指针。回滚失败会保留备份和 `.tdm-update-lock`，阻止混合版本启动；修复空间或权限问题后重新启动，启动器会重试恢复。该回滚不撤销远端操作，也不承诺兼容未来的破坏性数据库迁移。
 
 Linux/systemd 自动更新使用独立的临时 systemd 服务执行安装，由它停止、更新、启动原服务，不依赖子进程逃离原控制组。需要 systemd 支持 `systemd-run --collect`，服务以 root 运行且 `MainPID` 是 `main.py` 进程；仓库附带的部署方式符合此要求。权限或服务识别不满足时，更新会在停机前拒绝。安装进程意外退出会重试恢复；整机重启后由启动器读取持久化记录恢复。恢复期间不要手动删除锁或备份。
 
@@ -119,13 +119,15 @@ Linux/systemd 自动更新使用独立的临时 systemd 服务执行安装，由
 首次从没有自更新功能的版本升级时，可使用 Release 附带的脚本。它适用于以 root、systemd 和项目内 `venv` 或 `.venv` 部署的服务；准备失败不停止原服务，新版启动失败恢复旧版。配置、任务数据库、下载缓存、Telegram 会话均保留。
 
 ```bash
-curl -fL --retry 3 https://github.com/MengStar-L/TelDriveManager/releases/download/v1.1.0/update-linux.sh -o /tmp/tdm-update-v1.1.0.sh
-sudo bash /tmp/tdm-update-v1.1.0.sh /opt/TelDriveManager teldrive-manager.service v1.1.0
+curl -fL --retry 3 https://github.com/MengStar-L/TelDriveManager/releases/download/v1.1.1/update-linux.sh -o /tmp/tdm-update-v1.1.1.sh
+sudo bash /tmp/tdm-update-v1.1.1.sh /opt/TelDriveManager teldrive-manager.service v1.1.1
 ```
 
 按实际部署修改第二行的目录和服务名。脚本校验发布包 SHA-256，需要至少 6 GiB 空闲空间供初始解压；后续安装还会按配置检查磁盘保留值、依赖和备份容量。失败原因可从脚本输出的 `journalctl` 命令查看，恢复记录和备份不要手动删除。脚本按发布包更新源码，不修改 `.git` 元数据；后续推荐使用设置页继续更新。
 
 ## 配置说明
+
+Telegram 活动日志按 5 MiB 轮转并保留 3 份备份。后台消息全量核验最短间隔为 5 分钟，查询超时或限流后自动退避；实时消息监听与文件快照同步仍照常运行。aria2 RPC 故障会在面板显示并自动退避重试，避免持续刷日志。部署时还应给 systemd journal 和 Docker 日志设置容量上限，它们不受应用日志轮转控制。
 
 完整示例见 [`config.example.toml`](./config.example.toml)。常用配置段如下：
 

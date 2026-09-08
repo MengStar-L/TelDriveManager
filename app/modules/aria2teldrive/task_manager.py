@@ -55,6 +55,11 @@ class TaskManager:
         self._source_cleanup_task: Optional[asyncio.Task] = None
         self._disk_guard_task: Optional[asyncio.Task] = None
         self._disk_guard_error = ""
+        self._aria2_rpc_error = ""
+        self._aria2_poll_after = 0.0
+        self._aria2_poll_failures = 0
+        self._aria2_error_logged_at = None
+        self._disk_guard_logged_at = None
         self._running = False
         # 内存缓存：已知的 GID 集合，避免重复查库
         self._known_gids: set = set()
@@ -226,6 +231,8 @@ class TaskManager:
         await self._close_clients()
         self.config = load_config(force_reload=True)
         self._init_clients()
+        self._aria2_poll_after = 0.0
+        self._aria2_poll_failures = 0
 
         # upload_concurrency 变更后无需重建对象，
 
@@ -1242,7 +1249,10 @@ class TaskManager:
                 self._disk_guard_error = "磁盘告急且 RPC 无法暂停，已停止托管 aria2；恢复空间后重启服务"
             else:
                 self._disk_guard_error = "磁盘告急且无法控制 aria2，请检查下载进程和磁盘容量"
-            logger.error(self._disk_guard_error)
+            now = asyncio.get_running_loop().time()
+            if self._disk_guard_logged_at is None or now - self._disk_guard_logged_at >= 60:
+                logger.error(self._disk_guard_error)
+                self._disk_guard_logged_at = now
 
     async def _disk_guard_loop(self):
         while self._running:
@@ -1943,6 +1953,8 @@ class TaskManager:
                 "aria2": int(self._last_download_speed),
             },
             "upload_speed": int(self._upload_speed),
+            "aria2": {"connected": self.aria2 is not None and not self._aria2_rpc_error,
+                      "error": self._aria2_rpc_error},
         }
 
         if self._disk_usage_info:
@@ -1953,6 +1965,10 @@ class TaskManager:
             data["download_protection"] = dict(self._disk_protection_info)
             if self._disk_guard_error:
                 data["download_protection"].update(active=True, message=self._disk_guard_error)
+            if self._aria2_rpc_error:
+                data["download_protection"].update(active=True, message=self._aria2_rpc_error)
+        elif self._aria2_rpc_error:
+            data["download_protection"] = {"active": True, "message": self._aria2_rpc_error}
         return data
 
 
@@ -2105,6 +2121,9 @@ class TaskManager:
 
     async def _sync_aria2_tasks(self):
         """从 aria2 获取所有任务，同步到本地数据库"""
+        now = asyncio.get_running_loop().time()
+        if now < self._aria2_poll_after:
+            return
         await self._disk_recovery.resume_interrupted()
         try:
             # 获取 aria2 全部任务
@@ -2114,14 +2133,26 @@ class TaskManager:
             # 分页拉取所有 stopped 任务，避免超过 100 条后遗漏
             stopped = await aria2.tell_stopped_all() or []
         except Exception as e:
-            # aria2 连接失败时静默跳过（仅每 30 秒打一次日志）
             self._last_download_speed = 0
-            logger.debug(f"aria2 轮询失败: {e}")
+            self._aria2_poll_failures += 1
+            delay = min(30, 2 ** min(self._aria2_poll_failures, 5))
+            self._aria2_poll_after = now + delay
+            self._aria2_rpc_error = "aria2 连接异常，无法确认或控制下载；请检查本地 aria2 状态和 RPC 配置"
             try:
-                await self._require_aria2().pause_all()
+                await asyncio.wait_for(self._require_aria2().pause_all(), timeout=3)
             except Exception:
-                logger.warning("无法通过 RPC 暂停 aria2，磁盘保护暂时无法控制下载进程")
+                pass
+            if self._aria2_error_logged_at is None or now - self._aria2_error_logged_at >= 60:
+                logger.warning("%s（%s，%s 秒后重试）", self._aria2_rpc_error, type(e).__name__, delay)
+                self._aria2_error_logged_at = now
             return
+
+        if self._aria2_rpc_error:
+            logger.info("aria2 RPC 已恢复，继续核算空间并同步任务")
+        self._aria2_rpc_error = ""
+        self._aria2_poll_after = 0.0
+        self._aria2_poll_failures = 0
+        self._aria2_error_logged_at = None
 
         try:
             await self._sync_disk_space_download_protection(active, waiting)

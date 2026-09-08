@@ -9,6 +9,7 @@ import update_worker as installer
 from app.updater import PROJECT_ROOT
 
 from app.updater import update_manager
+from app.aria2_service import aria2_service
 
 router = APIRouter(prefix="/api/update", tags=["update"])
 
@@ -29,8 +30,9 @@ def verify_worker(request: Request):
 async def update_health(request: Request):
     state = verify_worker(request)
     token = os.environ.get("TDM_UPDATE_TOKEN", "")
-    return {"ready": bool(token and token == state["token"] and getattr(request.app.state, "ready", False)),
-            "token": token, "version": update_manager._startup_version, "pid": os.getpid()}
+    backend = await aria2_service.update_health()
+    return {"ready": bool(token and token == state["token"] and getattr(request.app.state, "ready", False) and backend["ready"]),
+            "token": token, "version": update_manager._startup_version, "pid": os.getpid(), "aria2": backend}
 
 
 @router.post("/shutdown")
