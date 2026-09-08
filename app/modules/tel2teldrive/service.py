@@ -408,7 +408,11 @@ class ConfigStore:
     def save(self, payload: Any) -> RuntimeConfig:
         if not isinstance(payload, dict):
             raise ValueError("配置数据格式错误")
-        self._data = self._normalize(payload, strict=True)
+        data = self._normalize(payload, strict=True)
+        if data["telegram_relay"]["download_dir"] != self._data["telegram_relay"]["download_dir"]:
+            from app.config import prepare_relay_download_dir
+            prepare_relay_download_dir(data["telegram_relay"]["download_dir"], self.path.parent)
+        self._data = data
         self.path.write_text(self._dump_toml(self._data), encoding="utf-8")
         self._config_exists = True
         self._config_error = None

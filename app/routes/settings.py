@@ -6,11 +6,11 @@ import time
 import uuid
 from pathlib import Path
 
-from fastapi import APIRouter, Body, File, Form, UploadFile
+from fastapi import APIRouter, Body, File, Form, HTTPException, UploadFile
 
 from app.aria2_client import Aria2Client
 from app.aria2_service import ARIA2_TMP_DIR, aria2_service
-from app.config import load_config, needs_setup, reload_config, save_config
+from app.config import load_config, needs_setup, prepare_relay_download_dir, reload_config, save_config
 from app import database as db
 from app.modules.aria2teldrive.task_manager import task_manager
 from app.modules.aria2teldrive.teldrive_client import TelDriveClient
@@ -47,6 +47,14 @@ async def get_settings():
 @router.put("")
 async def update_settings(request_body: dict):
     previous = load_config(force_reload=True)
+    relay = request_body.get("telegram_relay")
+    if isinstance(relay, dict) and "download_dir" in relay:
+        directory = str(relay.get("download_dir") or "").strip() or "./telegram_relay"
+        if directory != previous.get("telegram_relay", {}).get("download_dir", "./telegram_relay"):
+            try:
+                await asyncio.to_thread(prepare_relay_download_dir, directory)
+            except (OSError, ValueError, RuntimeError) as exc:
+                raise HTTPException(status_code=422, detail=str(exc)) from exc
     save_config(_sanitize_payload(request_body))
     current = reload_config()
     await aria2_service.handle_config_update(previous, current)

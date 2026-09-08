@@ -3373,7 +3373,7 @@ function collectSettingsConfig() {
             proxy_port: Math.max(1, parseInt(document.getElementById('cfgTelegramRelayProxyPort')?.value, 10) || currentRelay.proxy_port || 1080),
             proxy_username: document.getElementById('cfgTelegramRelayProxyUsername')?.value.trim() || '',
             proxy_password: document.getElementById('cfgTelegramRelayProxyPassword')?.value || '',
-            download_dir: document.getElementById('cfgTelegramRelayDownloadDir')?.value.trim() || currentRelay.download_dir || './telegram_relay',
+            download_dir: document.getElementById('cfgTelegramRelayDownloadDir')?.value.trim() || './telegram_relay',
             concurrency: Math.max(1, parseInt(document.getElementById('cfgTelegramRelayConcurrency')?.value, 10) || currentRelay.concurrency || 1),
             max_retries: Math.max(1, parseInt(document.getElementById('cfgTelegramRelayMaxRetries')?.value, 10) || currentRelay.max_retries || 3),
             multibot_enabled: !!document.getElementById('cfgTelegramRelayMultibotEnabled')?.checked,
@@ -3524,7 +3524,9 @@ async function saveConfig() {
         validateAria2AccessConfig(cfg.aria2);
 
         const resp = await fetch('/api/settings', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(cfg) });
-        if (resp.ok) { 
+        const result = await readJsonSafe(resp);
+        if (!resp.ok || result.success === false) throw new Error(result.detail || result.message || '保存失败');
+        if (resp.ok) {
             const msg = document.getElementById('saveMsg'); 
             msg.classList.add('show'); 
             setTimeout(() => msg.classList.remove('show'), 2500); 
@@ -3563,12 +3565,16 @@ async function doAutoSave(triggerInput) {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(cfg)
         });
+        const result = await readJsonSafe(resp);
+        if (!resp.ok || result.success === false) throw new Error(result.detail || result.message || '保存失败');
         if (resp.ok) {
             window.currentConfig = { ...(window.currentConfig || {}), ...cfg };
             showFieldCheck(triggerInput);
         }
 
-    } catch (e) { /* silent fail */ }
+    } catch (e) {
+        showA2TDToast(e.message || '保存失败', 'error');
+    }
 }
 
 function showFieldCheck(input) {
@@ -3791,6 +3797,7 @@ let telegramRelayState = {};
 let telegramRelayLogs = [];
 let telegramRelayQrRefreshPending = false;
 let telegramRelaySettingsSaveTimer = null;
+let telegramRelaySettingsSaveQueue = Promise.resolve();
 let telegramRelaySettingsInitDone = false;
 const T2TD_RUNTIME_LOG_LIMIT = 400;
 const T2TD_RELAY_ACTIVE_STATUSES = new Set(['pending', 'downloading', 'uploading', 'cleaning']);
@@ -4108,6 +4115,7 @@ function getTelegramRelaySettingsEls() {
         modal: document.getElementById('telegramRelaySettingsModal'),
         enabled: document.getElementById('telegramRelaySettingEnabled'),
         url: document.getElementById('telegramRelaySocksUrl'),
+        downloadDir: document.getElementById('telegramRelayDownloadDir'),
         status: document.getElementById('telegramRelaySettingsStatus'),
         testBtn: document.getElementById('telegramRelayTestProxyBtn'),
     };
@@ -4196,7 +4204,7 @@ function setTelegramRelaySettingsStatus(message, type = 'info') {
         info: 'ph-info',
     };
     status.className = `telegram-relay-settings-status ${type === 'info' ? '' : type}`.trim();
-    status.innerHTML = `<i class="ph ${icons[type] || icons.info}"></i> ${escapeA2TDHtml(message || '')}`;
+    status.innerHTML = `<i class="ph ${icons[type] || icons.info}"></i><span>${escapeA2TDHtml(message || '')}</span>`;
 }
 
 function applyTelegramRelayConfigToSettingsInputs(relay = {}) {
@@ -4222,9 +4230,10 @@ function applyTelegramRelayConfigToSettingsInputs(relay = {}) {
 }
 
 function fillTelegramRelaySettingsForm(relay = {}) {
-    const { enabled, url } = getTelegramRelaySettingsEls();
+    const { enabled, url, downloadDir } = getTelegramRelaySettingsEls();
     if (enabled) enabled.checked = !!relay.enabled;
     if (url) url.value = buildTelegramRelaySocksUrl(relay);
+    if (downloadDir) downloadDir.value = relay.download_dir || './telegram_relay';
 }
 
 async function loadTelegramRelaySettingsConfig() {
@@ -4234,7 +4243,7 @@ async function loadTelegramRelaySettingsConfig() {
         if (!resp.ok) throw new Error(cfg.detail || cfg.message || '读取回源设置失败');
         window.currentConfig = cfg;
         fillTelegramRelaySettingsForm(cfg.telegram_relay || {});
-        setTelegramRelaySettingsStatus('输入后会自动保存。');
+        setTelegramRelaySettingsStatus('已加载');
         return cfg.telegram_relay || {};
     } catch (e) {
         setTelegramRelaySettingsStatus(e.message || '读取回源设置失败', 'error');
@@ -4243,12 +4252,11 @@ async function loadTelegramRelaySettingsConfig() {
 }
 
 function collectTelegramRelaySettingsPayload() {
-    const { enabled, url } = getTelegramRelaySettingsEls();
-    const currentRelay = window.currentConfig?.telegram_relay || {};
+    const { enabled, url, downloadDir } = getTelegramRelaySettingsEls();
     const parsed = parseTelegramRelaySocksUrl(url?.value || '');
     const payload = {
-        ...currentRelay,
         enabled: !!enabled?.checked,
+        download_dir: downloadDir?.value.trim() || './telegram_relay',
         ...parsed,
     };
     // 代理留空 → 回源直连 Telegram（云端服务器通常可直连）；启用回源不再强制填写代理。
@@ -4265,37 +4273,41 @@ async function saveTelegramRelaySocksSettings(triggerInput = null, options = {})
     try {
         relayPayload = collectTelegramRelaySettingsPayload();
     } catch (e) {
-        setTelegramRelaySettingsStatus(e.message || '代理设置无效，未保存', 'error');
+        setTelegramRelaySettingsStatus(e.message || '回源设置无效，未保存', 'error');
         return null;
     }
 
-    try {
-        setTelegramRelaySettingsStatus('正在自动保存代理设置...', 'saving');
-        const resp = await fetch('/api/settings', {
-            method: 'PUT',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ telegram_relay: relayPayload }),
-        });
-        const data = await readJsonSafe(resp);
-        if (!resp.ok || data.success === false) {
-            throw new Error(data.detail || data.message || '保存代理设置失败');
+    const save = async () => {
+        try {
+            setTelegramRelaySettingsStatus('正在保存...', 'saving');
+            const resp = await fetch('/api/settings', {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ telegram_relay: relayPayload }),
+            });
+            const data = await readJsonSafe(resp);
+            if (!resp.ok || data.success === false) {
+                throw new Error(data.detail || data.message || '保存回源设置失败');
+            }
+
+            window.currentConfig = {
+                ...(window.currentConfig || {}),
+                telegram_relay: {
+                    ...(window.currentConfig?.telegram_relay || {}),
+                    ...relayPayload,
+                },
+            };
+            applyTelegramRelayConfigToSettingsInputs(window.currentConfig.telegram_relay || {});
+            if (triggerInput) showFieldCheck(triggerInput);
+            if (!options.quiet) setTelegramRelaySettingsStatus('已保存', 'success');
+            return window.currentConfig.telegram_relay;
+        } catch (e) {
+            setTelegramRelaySettingsStatus(e.message || '保存回源设置失败', 'error');
+            return null;
         }
-
-        window.currentConfig = {
-            ...(window.currentConfig || {}),
-            telegram_relay: {
-                ...(window.currentConfig?.telegram_relay || {}),
-                ...relayPayload,
-            },
-        };
-        applyTelegramRelayConfigToSettingsInputs(window.currentConfig.telegram_relay || {});
-        if (triggerInput) showFieldCheck(triggerInput);
-        if (!options.quiet) setTelegramRelaySettingsStatus('代理设置已自动保存。', 'success');
-        return window.currentConfig.telegram_relay;
-    } catch (e) {
-        setTelegramRelaySettingsStatus(e.message || '保存代理设置失败', 'error');
-        return null;
-    }
+    };
+    telegramRelaySettingsSaveQueue = telegramRelaySettingsSaveQueue.then(save, save);
+    return telegramRelaySettingsSaveQueue;
 }
 
 function scheduleTelegramRelaySettingsSave(triggerInput) {
@@ -4308,13 +4320,17 @@ function scheduleTelegramRelaySettingsSave(triggerInput) {
 
 async function openTelegramRelaySettingsModal() {
     initTelegramRelaySettingsModal();
-    const { modal } = getTelegramRelaySettingsEls();
+    const { modal, enabled, url, downloadDir } = getTelegramRelaySettingsEls();
     if (!modal) return;
+    await telegramRelaySettingsSaveQueue;
     fillTelegramRelaySettingsForm(window.currentConfig?.telegram_relay || {});
     modal.setAttribute('aria-hidden', 'false');
     modal.classList.add('show');
+    const controls = [enabled, url, downloadDir, document.getElementById('telegramRelaySaveBtn'), document.getElementById('telegramRelayTestProxyBtn')];
+    controls.forEach(control => { if (control) control.disabled = true; });
     await loadTelegramRelaySettingsConfig();
-    setTimeout(() => document.getElementById('telegramRelaySocksUrl')?.focus(), 120);
+    controls.forEach(control => { if (control) control.disabled = false; });
+    setTimeout(() => downloadDir?.focus(), 120);
 }
 
 function closeTelegramRelaySettingsModal(event) {
@@ -4328,9 +4344,10 @@ function closeTelegramRelaySettingsModal(event) {
 function initTelegramRelaySettingsModal() {
     if (telegramRelaySettingsInitDone) return;
     telegramRelaySettingsInitDone = true;
-    const { enabled, url } = getTelegramRelaySettingsEls();
+    const { enabled, url, downloadDir } = getTelegramRelaySettingsEls();
     enabled?.addEventListener('change', () => scheduleTelegramRelaySettingsSave(enabled));
-    url?.addEventListener('input', () => scheduleTelegramRelaySettingsSave(url));
+    url?.addEventListener('change', () => scheduleTelegramRelaySettingsSave(url));
+    downloadDir?.addEventListener('change', () => scheduleTelegramRelaySettingsSave(downloadDir));
     document.addEventListener('keydown', (event) => {
         if (event.key === 'Escape') {
             const { modal } = getTelegramRelaySettingsEls();

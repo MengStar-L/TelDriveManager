@@ -419,6 +419,73 @@ class TransferDatabaseRegressions(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await db.get_telegram_relay_job(job_id))['status'], 'pending')
         manager._upload_local_file.assert_not_awaited()
 
+    async def test_relay_directory_change_keeps_verified_cache_after_restart(self):
+        manager, job_id, path = await self.make_relay()
+        path.parent.mkdir()
+        path.write_bytes(b"a" * 4096)
+        await db.update_telegram_relay_job(job_id, download_verified=1, status="uploading",
+            download_fingerprint=manager._calc_upload_fingerprint(path, 0))
+        await db.close_db()
+        await db.init_db()
+        manager.config = runtime(relay_download_dir=str(self.root / "new-volume"))
+        with patch.object(service, "delete_telegram_messages_with_audit", AsyncMock(return_value=True)):
+            await manager._process_job(await db.get_telegram_relay_job(job_id))
+        manager._download_message.assert_not_awaited()
+        self.assertEqual(manager._upload_local_file.call_args.args[0], path)
+        self.assertFalse(path.exists())
+        self.assertEqual((await db.get_telegram_relay_job(job_id))["status"], "completed")
+
+    async def test_directory_change_during_download_cleans_old_path_and_places_new_jobs(self):
+        manager, job_id, path = await self.make_relay()
+        new_root = self.root / "new-volume"
+        async def download(_client, _message, target, _job):
+            target.write_bytes(b"a" * 4096)
+            manager.config = runtime(relay_download_dir=str(new_root))
+        manager._download_message = AsyncMock(side_effect=download)
+        manager._schedule = AsyncMock()
+        reserve = relay.disk_budget.reserve
+        with patch.object(service, "delete_telegram_messages_with_audit", AsyncMock(return_value=True)), \
+                patch.object(relay.disk_budget, "reserve", wraps=reserve) as budget:
+            await manager._process_job(await db.get_telegram_relay_job(job_id))
+        self.assertEqual(budget.call_args.args[1], path.parent)
+        self.assertFalse(path.parent.exists())
+        new_job = await manager.enqueue_message(None, manager.config, SimpleNamespace(id=102),
+                                               {"name": "new.bin", "size": 100})
+        self.assertEqual(Path(new_job["local_path"]).parent.parent, new_root)
+
+    async def test_old_directory_inactive_parts_are_reclaimed_without_removing_other_files(self):
+        manager, job_id, path = await self.make_relay()
+        path.parent.mkdir()
+        path.write_bytes(b"verified cache")
+        part = path.with_name(path.name + ".part")
+        part.write_bytes(b"interrupted")
+        unrelated = path.parent / "user-file.txt"
+        unrelated.write_bytes(b"keep")
+        manager.config = runtime(relay_download_dir=str(self.root / "new-volume"))
+        await manager._cleanup_inactive_parts()
+        self.assertFalse(part.exists())
+        self.assertTrue(path.exists())
+        with self.assertRaises(RuntimeError):
+            await manager._cleanup_local_path(str(unrelated), job_id=job_id)
+        await manager._cleanup_local_path(str(path), job_id=job_id)
+        self.assertEqual(unrelated.read_bytes(), b"keep")
+
+    async def test_relay_rejects_symlinked_job_directory(self):
+        manager, job_id, path = await self.make_relay()
+        outside = self.root / "outside"
+        outside.mkdir()
+        original = outside / path.name
+        original.write_bytes(b"keep")
+        try:
+            path.parent.symlink_to(outside, target_is_directory=True)
+        except OSError:
+            self.skipTest("Directory symlinks require Windows developer mode or privileges")
+        with self.assertRaises(RuntimeError):
+            await manager._process_job(await db.get_telegram_relay_job(job_id))
+        with self.assertRaises(RuntimeError):
+            await manager._cleanup_local_path(str(path), job_id=job_id)
+        self.assertEqual(original.read_bytes(), b"keep")
+
     async def test_retry_semaphore_waiter_reschedules_without_cancelling_caller(self):
         manager, job_id, _ = await self.make_relay()
         async with manager._semaphore:

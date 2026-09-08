@@ -1090,6 +1090,7 @@
         }
         .telegram-relay-settings-header {
             display: flex;
+            flex-shrink: 0;
             align-items: center;
             justify-content: space-between;
             gap: 12px;
@@ -1123,6 +1124,9 @@
         }
         .telegram-relay-settings-body {
             display: grid;
+            grid-auto-rows: max-content;
+            min-width: 0;
+            min-height: 0;
             gap: 16px;
             padding: 18px;
             overflow-y: auto;
@@ -1145,6 +1149,7 @@
             color: var(--text-secondary);
             font-size: 12px;
             line-height: 1.4;
+            overflow-wrap: anywhere;
             transition: all 0.2s ease;
         }
         .telegram-relay-settings-status.success {
@@ -1163,8 +1168,15 @@
             border-color: rgba(59, 130, 246, 0.2);
             color: #1d4ed8;
         }
+        .telegram-relay-settings-status span {
+            min-width: 0;
+        }
+        .telegram-relay-settings-status i {
+            flex-shrink: 0;
+        }
         .telegram-relay-settings-footer {
             display: flex;
+            flex-shrink: 0;
             justify-content: flex-end;
             gap: 10px;
             padding: 14px 18px 18px;
@@ -1204,6 +1216,9 @@
                 max-height: calc(100vh - 28px);
                 border-radius: 14px;
                 transform: translateY(24px) scale(1);
+            }
+            .telegram-relay-settings-footer {
+                flex-direction: column;
             }
             .telegram-relay-settings-footer .btn {
                 width: 100%;
@@ -2087,7 +2102,7 @@
                                         <div class="form-group"><label>代理端口</label><input class="form-input" type="number" id="cfgTelegramRelayProxyPort" min="1" max="65535" placeholder="1080"></div>
                                         <div class="form-group"><label>代理用户名</label><input class="form-input" type="text" id="cfgTelegramRelayProxyUsername" placeholder="可留空"></div>
                                         <div class="form-group"><label>代理密码</label><input class="form-input" type="password" id="cfgTelegramRelayProxyPassword" placeholder="可留空"></div>
-                                        <div class="form-group"><label>本地下载目录</label><input class="form-input" type="text" id="cfgTelegramRelayDownloadDir" placeholder="./telegram_relay"></div>
+                                        <div class="form-group"><label for="cfgTelegramRelayDownloadDir">回源文件目录（服务器）</label><input class="form-input" type="text" id="cfgTelegramRelayDownloadDir" placeholder="./telegram_relay" autocomplete="off" spellcheck="false"></div>
                                         <div class="form-group"><label>回源并发数（同时下几个文件）</label><input class="form-input" type="number" id="cfgTelegramRelayConcurrency" min="1" max="16" placeholder="1"></div>
                                         <div class="form-group"><label>下载连接数（单文件用几个 bot）</label><input class="form-input" type="number" id="cfgTelegramRelayDownloadConnections" min="1" max="16" placeholder="6"></div>
                                         <div class="form-group"><label>失败重试次数</label><input class="form-input" type="number" id="cfgTelegramRelayMaxRetries" min="1" max="20" placeholder="3"></div>
@@ -2156,14 +2171,19 @@
                     </div>
                 </label>
                 <div class="form-group">
+                    <label for="telegramRelayDownloadDir">回源文件目录（服务器）</label>
+                    <input class="form-input" type="text" id="telegramRelayDownloadDir" placeholder="/mnt/data/telegram_relay" autocomplete="off" spellcheck="false">
+                </div>
+                <div class="form-group">
                     <label for="telegramRelaySocksUrl">代理链接</label>
                     <input class="form-input" type="text" id="telegramRelaySocksUrl" placeholder="socks5://user:password@127.0.0.1:1080 或 http://127.0.0.1:8080" autocomplete="off" spellcheck="false">
                     <div class="telegram-relay-settings-hint">支持 <code>socks5://</code>、<code>http://</code>、<code>https://</code>。HTTP/HTTPS 代理需要支持 CONNECT 到 Telegram TCP 端口。</div>
                 </div>
-                <div class="telegram-relay-settings-status" id="telegramRelaySettingsStatus"><i class="ph ph-info"></i> 输入后会自动保存。</div>
+                <div class="telegram-relay-settings-status" id="telegramRelaySettingsStatus" role="status" aria-live="polite"></div>
             </div>
             <div class="telegram-relay-settings-footer">
                 <button class="btn btn-primary btn-sm" type="button" id="telegramRelayTestProxyBtn" onclick="testTelegramRelayProxy()"><i class="ph ph-plugs-connected"></i> 检测可用性</button>
+                <button class="btn btn-primary btn-sm" type="button" id="telegramRelaySaveBtn" onclick="saveTelegramRelaySocksSettings()"><i class="ph ph-floppy-disk"></i> 保存</button>
             </div>
         </div>
     </div>
@@ -2182,7 +2202,7 @@
         </div>
     </div>
 
-    <script src="/static/app.js?v=20260905-update"></script>
+    <script src="/static/app.js?v=20260908-relay-directory"></script>
 
 
 

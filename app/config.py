@@ -18,6 +18,28 @@ EXAMPLE_PATH = PROJECT_ROOT / "config.example.toml"
 FIXED_DOWNLOAD_DIR = str((PROJECT_ROOT / "downloads").resolve())
 FIXED_ARIA2_HOME = str((PROJECT_ROOT / "aria2").resolve())
 
+
+def resolve_relay_download_dir(value, base_dir: Path | None = None) -> Path:
+    raw = str(value or "./telegram_relay").strip() or "./telegram_relay"
+    if "\x00" in raw or "://" in raw:
+        raise ValueError("回源文件目录必须是服务器上的本地路径")
+    path = Path(raw).expanduser()
+    if not path.is_absolute():
+        path = (base_dir if base_dir is not None else CONFIG_PATH.parent) / path
+    return path.resolve()
+
+
+def prepare_relay_download_dir(value, base_dir: Path | None = None) -> Path:
+    path = resolve_relay_download_dir(value, base_dir)
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryFile(dir=path) as probe:
+            probe.write(b"tdm")
+            probe.flush()
+    except OSError as exc:
+        raise ValueError(f"回源文件目录不可写：{path}（{exc.strerror or type(exc).__name__}）") from exc
+    return path
+
 # Python 3.11+ 内置 tomllib
 if sys.version_info >= (3, 11):
     import tomllib

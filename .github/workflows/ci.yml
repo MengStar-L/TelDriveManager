@@ -43,7 +43,7 @@ jobs:
       - name: Python tests
         run: python -B -m unittest discover -s tests -p 'test_*.py' -q
       - name: JavaScript tests
-        run: node --test tests/test_update_ui.js tests/test_telegram_log_escape.js tests/test_jellyfin_rename.js tests/test_pikpak_share_name_contract.js tests/test_unified_parse_input.js tests/test_unified_share_folder_rename.js
+        run: node --test tests/test_update_ui.js tests/test_telegram_log_escape.js tests/test_jellyfin_rename.js tests/test_pikpak_share_name_contract.js tests/test_unified_parse_input.js tests/test_unified_share_folder_rename.js tests/test_relay_settings_ui.js
       - name: JavaScript syntax
         run: node --check app/static/app.js
       - name: Real systemd upgrade and rollback

@@ -4,7 +4,6 @@ import asyncio
 import json
 import os
 import re
-import shutil
 import uuid
 from collections import deque
 from contextlib import suppress
@@ -550,14 +549,9 @@ class TelegramRelayManager:
             if job["job_id"] in self._tasks:
                 continue
             try:
-                expected = self._build_local_file_path(self.config, job["job_id"], job["file_name"])
-                if expected != expected.resolve() or self._download_root() not in expected.parents:
-                    continue
-                local = Path(job["local_path"])
+                local = self._job_local_file_path(job)
                 part = local.with_name(local.name + ".part")
-                if local.resolve() != expected.resolve() or part.is_symlink():
-                    continue
-                if part.resolve().parent != expected.resolve().parent:
+                if part.is_symlink():
                     continue
                 part.unlink(missing_ok=True)
             except Exception as exc:
@@ -683,11 +677,8 @@ class TelegramRelayManager:
             raise RuntimeError("Telegram relay client is unavailable")
         config = self.config
         job_id = job["job_id"]
-        local_path = str(job.get("local_path") or self._build_local_file_path(config, job_id, job["file_name"]))
-        path = Path(local_path)
-        expected = self._build_local_file_path(config, job_id, job["file_name"]).resolve()
-        if path.resolve() != expected:
-            raise RuntimeError("Relay local path no longer belongs to the configured job directory")
+        path = self._job_local_file_path(job)
+        local_path = str(path)
         path.parent.mkdir(parents=True, exist_ok=True)
         await db.update_telegram_relay_job(job_id, local_path=local_path)
 
@@ -1066,43 +1057,40 @@ class TelegramRelayManager:
         loop.create_task(self.broker._broadcast({"type": "relay_log", "payload": entry}))
 
     def _download_root(self, config: Any | None = None) -> Path:
+        from app.config import resolve_relay_download_dir
         cfg = config or self.config
-        raw = str(getattr(cfg, "relay_download_dir", "./telegram_relay") or "./telegram_relay")
-        root = Path(raw)
-        if not root.is_absolute():
-            from app.modules.tel2teldrive.service import CONFIG_PATH
-
-            root = CONFIG_PATH.parent / root
+        root = resolve_relay_download_dir(getattr(cfg, "relay_download_dir", "./telegram_relay"))
         root.mkdir(parents=True, exist_ok=True)
-        return root.resolve()
+        return root
 
     def _build_local_file_path(self, config: Any, job_id: str, file_name: str) -> Path:
         safe_name = sanitize_filename(file_name, f"{job_id}.bin")
         return self._download_root(config) / job_id / safe_name
+
+    def _job_local_file_path(self, job: dict) -> Path:
+        # Persisted job paths survive directory changes and process restarts.
+        job_id = str(job["job_id"])
+        path = Path(job["local_path"]) if job.get("local_path") else self._build_local_file_path(
+            self.config, job_id, job["file_name"])
+        safe_name = sanitize_filename(job["file_name"], f"{job_id}.bin")
+        if (not path.is_absolute() or path.parent.name != job_id or path.name != safe_name
+                or path != path.resolve() or path.is_dir()
+                or path.with_name(path.name + ".part").is_symlink()):
+            raise RuntimeError("Relay local path does not match its recorded job or contains a symbolic link")
+        return path
 
     async def _cleanup_local_path(self, local_path: str, *, job_id: str | None = None):
         if not local_path:
             return
         path = Path(local_path)
         try:
-            resolved = path.resolve()
-            root = self._download_root() if self.config is not None else None
-            cleanup_empty_parent = True
-            if root is not None:
-                if root not in resolved.parents or resolved.parent.name != str(job_id or ""):
-                    raise RuntimeError(f"Unowned relay cleanup path: {resolved}")
-            else:
-                expected = str(job_id or "").strip()
-                if not expected or (resolved.name != expected and resolved.parent.name != expected):
-                    raise RuntimeError(f"Unowned relay cleanup path: {resolved}")
-                cleanup_empty_parent = resolved.parent.name == expected
-            if resolved.is_dir():
-                shutil.rmtree(resolved)
-            elif resolved.exists():
-                resolved.unlink()
-            resolved.with_name(resolved.name + ".part").unlink(missing_ok=True)
-            parent = resolved.parent
-            if cleanup_empty_parent and parent.exists() and (root is None or parent != root) and not any(parent.iterdir()):
+            job = await db.get_telegram_relay_job(str(job_id or ""))
+            if not job or not job.get("local_path") or path != self._job_local_file_path(job):
+                raise RuntimeError(f"Unowned relay cleanup path: {path}")
+            path.unlink(missing_ok=True)
+            path.with_name(path.name + ".part").unlink(missing_ok=True)
+            parent = path.parent
+            if parent.exists() and not any(parent.iterdir()):
                 parent.rmdir()
         except Exception as exc:
             self._log("WARN", f"Relay local cleanup failed: {local_path}, {exc}")
