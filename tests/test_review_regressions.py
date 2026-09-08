@@ -166,7 +166,7 @@ class TransferDatabaseRegressions(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         await db.close_db()
         self.tmp = tempfile.TemporaryDirectory()
-        self.root = Path(self.tmp.name)
+        self.root = Path(self.tmp.name).resolve()
         self.path_patch = patch.object(db, "DB_PATH", self.root / "tasks.db")
         self.path_patch.start()
         await db.init_db()

@@ -67,7 +67,7 @@ def make_runtime(**overrides):
         relay_session_name="relay-test-session",
         relay_concurrency=1,
         relay_max_retries=1,
-        relay_download_dir=tempfile.mkdtemp(prefix="relay-test-"),
+        relay_download_dir=str(Path(tempfile.mkdtemp(prefix="relay-test-")).resolve()),
         telegram_channel_id=12345,
         telegram_api_id=1,
         telegram_api_hash="hash",
