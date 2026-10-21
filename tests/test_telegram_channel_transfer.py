@@ -5,6 +5,7 @@ module is replaced with a deletion spy so importing these tests does not create
 application configuration or start a Telegram client.
 """
 
+import asyncio
 import json
 import sys
 import tempfile
@@ -53,6 +54,14 @@ class TelegramChannelTransferTests(unittest.IsolatedAsyncioTestCase):
             telegram_channel_id=TELDRIVE_CHANNEL,
             teldrive_channel_id=TELDRIVE_CHANNEL,
             relay_target_path="/selected-videos",
+            teldrive_target_path="/default-videos",
+            teldrive_url="https://teldrive.invalid",
+            bearer_token="test-only-token",
+            teldrive_chunk_size="100M",
+            teldrive_upload_concurrency=1,
+            teldrive_random_chunk_name=False,
+            upload_max_retries=1,
+            upload_min_throughput_kbps=100,
         )
         self.file_info = {"name": "video.mp4", "size": len(self.payload), "mime_type": "video/mp4"}
         self.client = SimpleNamespace(
@@ -125,6 +134,187 @@ class TelegramChannelTransferTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(second["status"], "completed")
         self.assertEqual(len(await db.get_all_telegram_relay_jobs()), 1)
         self.manager._schedule.assert_not_awaited()
+
+    async def test_channel_destination_is_normalized_and_persisted_before_scheduling(self):
+        scheduled_targets = []
+
+        async def observe_schedule(job_id):
+            scheduled_targets.append((await db.get_telegram_relay_job(job_id))["target_path"])
+            return True
+
+        self.manager._schedule.side_effect = observe_schedule
+        job = await self._enqueue(target_path=" /课程//2026/ ")
+        await db.close_db()
+        await db.init_db()
+        persisted = await db.get_telegram_relay_job(job["job_id"])
+
+        self.assertEqual(persisted["target_path"], "/课程/2026")
+        self.assertEqual(scheduled_targets, ["/课程/2026"])
+
+    async def test_channel_default_destination_is_snapshotted_at_enqueue(self):
+        for message_id, explicit, relay_path, default_path, expected in (
+            (101, None, "/relay-first", "/default-first", "/relay-first"),
+            (102, "", "", "/default-first", "/default-first"),
+            (103, None, "", "", "/"),
+            (104, "/", "/relay-first", "/default-first", "/"),
+        ):
+            with self.subTest(message_id=message_id):
+                self.message.id = message_id
+                self.config.relay_target_path = relay_path
+                self.config.teldrive_target_path = default_path
+                job = await self._enqueue(target_path=explicit)
+                self.config.relay_target_path = "/changed-later"
+                self.config.teldrive_target_path = "/another-default"
+                stored = await db.get_telegram_relay_job(job["job_id"])
+                self.assertEqual(stored["target_path"], expected)
+
+    async def test_invalid_channel_destination_is_rejected_without_queueing(self):
+        for target in ("/videos/../other", "C:\\downloads", "https://teldrive.invalid/videos", "/bad\x00name"):
+            with self.subTest(target=target):
+                with self.assertRaises(ValueError):
+                    await self._enqueue(target_path=target)
+        self.assertEqual(await db.get_all_telegram_relay_jobs(), [])
+        self.manager._schedule.assert_not_awaited()
+
+    async def test_manual_and_automatic_selection_share_identity_without_retargeting(self):
+        # Both entry points use enqueue_channel_video; competing selections must
+        # keep the first committed source metadata and destination.
+        manual = await self._enqueue(target_path="/manual-destination")
+        await db.update_telegram_relay_job(manual["job_id"], status="failed", error="temporary upload failure")
+        original_file_name = self.file_info["name"]
+        self.file_info["name"] = "new-name.mp4"
+        self.message.document.id = 9999
+        automatic, duplicate = await asyncio.gather(
+            self._enqueue(target_path="/automatic-destination"),
+            self._enqueue(target_path="/changed-channel-destination"),
+        )
+        self.assertEqual({manual["job_id"], automatic["job_id"], duplicate["job_id"]}, {manual["job_id"]})
+        self.assertEqual(len(await db.get_all_telegram_relay_jobs()), 1)
+        stored = await db.get_telegram_relay_job(manual["job_id"])
+        self.assertEqual(stored["target_path"], "/manual-destination")
+        self.assertEqual(stored["source_document_id"], "9001")
+        self.assertEqual(stored["file_name"], original_file_name)
+        self.assertEqual(stored["status"], "failed")
+        self.assertEqual(stored["error"], "temporary upload failure")
+
+    async def test_channel_upload_retry_keeps_destination_and_confirmed_parts_after_restart(self):
+        job = await self._enqueue(target_path="/channel-original")
+        path = Path(job["local_path"])
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(self.payload)
+        calls = []
+        cleanup = AsyncMock()
+        confirmed_part = {"partNo": 1, "partId": 7001, "size": len(self.payload)}
+
+        class FakeTelDrive:
+            def __init__(self, **kwargs):
+                self.chunk_size = 100 * 1024 * 1024
+
+            cleanup_upload_session = cleanup
+
+            async def upload_file_chunked(self, file, target, progress, **kwargs):
+                calls.append({"target": target, "upload_id": kwargs["upload_id"],
+                              "confirmed": list(kwargs["confirmed_part_numbers"]),
+                              "parts": list(kwargs["remote_parts"])})
+                if len(calls) == 1:
+                    await kwargs["part_confirm_callback"](1, confirmed_part, [1], [confirmed_part], 1)
+                    raise RuntimeError("finalize response interrupted")
+                return {"success": True, "data": {"id": "td-resumed-video"}}
+
+        with patch.object(relay, "TelDriveClient", FakeTelDrive):
+            self.config.relay_target_path = "/changed-before-first-upload"
+            with self.assertRaisesRegex(RuntimeError, "finalize response interrupted"):
+                await relay.TelegramRelayManager._upload_local_file(self.manager, path, self.config, job)
+            first_checkpoint = await db.get_telegram_relay_job(job["job_id"])
+            await db.update_telegram_relay_job(job["job_id"], status="failed")
+            await db.close_db()
+            await db.init_db()
+            self.config.relay_target_path = "/changed-after-restart"
+            self.config.teldrive_target_path = "/new-global-default"
+            restarted = self._manager()
+            retried = await restarted.retry_job(job["job_id"])
+            self.assertTrue(retried["success"])
+            self.assertEqual(retried["data"]["target_path"], "/channel-original")
+            result = await relay.TelegramRelayManager._upload_local_file(
+                restarted, path, self.config, retried["data"])
+
+        self.assertTrue(result["success"])
+        self.assertEqual([item["target"] for item in calls], ["/channel-original", "/channel-original"])
+        self.assertEqual(calls[1]["upload_id"], first_checkpoint["upload_id"])
+        self.assertEqual(calls[1]["confirmed"], [1])
+        self.assertEqual(calls[1]["parts"], [confirmed_part])
+        cleanup.assert_not_awaited()
+        self.delete_source.assert_not_awaited()
+
+    async def test_ordinary_relay_still_resolves_default_when_upload_begins(self):
+        job = await self.manager.enqueue_message(self.client, self.config, self.message, self.file_info)
+        self.assertEqual(job["target_path"], "")
+        path = Path(job["local_path"])
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(self.payload)
+        self.config.relay_target_path = "/latest-relay-setting"
+        upload = AsyncMock(return_value={"success": True, "data": {"id": "td-ordinary"}})
+        fake_client = SimpleNamespace(chunk_size=100 * 1024 * 1024, upload_file_chunked=upload)
+        with patch.object(relay, "TelDriveClient", return_value=fake_client):
+            await relay.TelegramRelayManager._upload_local_file(self.manager, path, self.config, job)
+
+        self.assertEqual(upload.await_args.args[1], "/latest-relay-setting")
+        self.assertEqual((await db.get_telegram_relay_job(job["job_id"]))["target_path"], "/latest-relay-setting")
+
+    async def test_automatic_receipt_survives_post_insert_failure_and_job_deletion(self):
+        from datetime import datetime, timezone
+        from telethon.tl.types import Channel, ChatPhotoEmpty
+        from app.modules.tel2teldrive import catalog as catalog_module
+
+        now = datetime.now(timezone.utc)
+        entity = Channel(id=1111111111, title="课程频道", photo=ChatPhotoEmpty(), date=now,
+                         broadcast=True, access_hash=9, username="videos", noforwards=True)
+        self.message.date = now
+        self.message.document.size = len(self.payload)
+        self.message.document.mime_type = "video/mp4"
+        self.message.document.attributes = []
+        self.client.get_entity = AsyncMock(return_value=entity)
+        self.client.get_messages.return_value = [self.message]
+
+        def make_catalog():
+            return catalog_module.TelegramVideoCatalog(
+                lambda: self.client, lambda: self.config, self.manager, Mock(), None)
+
+        catalog = make_catalog()
+        try:
+            await catalog.add_channel("@videos")
+            await catalog._write([catalog._video_statement(
+                SOURCE_CHANNEL, entity, self.message, catalog_module.video_file_info(self.message))])
+            await catalog.update_channel(SOURCE_CHANNEL, auto_sync=True, target_path="/channel-original",
+                                         sync_since="2020-01-01T00:00:00Z")
+            # The production relay commits its INSERT before notifying browsers.
+            # Losing that notification must never undo the atomic dispatch receipt.
+            self.manager.broker._broadcast.side_effect = RuntimeError("broadcast failed after INSERT")
+            self.assertEqual(await catalog._dispatch_auto(SOURCE_CHANNEL), 1)
+            jobs = await db.get_all_telegram_relay_jobs()
+            self.assertEqual(len(jobs), 1)
+            receipt = (await catalog._rows("SELECT * FROM telegram_catalog_dispatches"))[0]
+            self.assertEqual(receipt["state"], "submitted")
+            self.assertEqual(receipt["job_id"], jobs[0]["job_id"])
+            self.assertEqual(receipt["target_path"], "/channel-original")
+            self.assertEqual(receipt["attempts"], 0)
+
+            await db.update_telegram_relay_job(jobs[0]["job_id"], status="completed")
+            await db.delete_telegram_relay_job(jobs[0]["job_id"])
+            await catalog.stop()
+            catalog = make_catalog()
+            await catalog.update_channel(SOURCE_CHANNEL, target_path="/changed-channel-directory")
+            self.client.get_messages.reset_mock()
+            self.assertEqual(await catalog._dispatch_auto(SOURCE_CHANNEL), 0)
+            self.assertEqual(await db.get_all_telegram_relay_jobs(), [])
+            persisted = (await catalog._rows("SELECT * FROM telegram_catalog_dispatches"))[0]
+            self.assertEqual(persisted["state"], "submitted")
+            self.assertEqual(persisted["job_status"], "completed")
+            self.assertEqual(persisted["target_path"], "/channel-original")
+            self.client.get_messages.assert_not_awaited()
+            self.delete_source.assert_not_awaited()
+        finally:
+            await catalog.stop()
 
     async def test_manual_selection_cannot_adopt_automatic_relay_job(self):
         job_id = relay.make_relay_job_id(SOURCE_CHANNEL, self.message.id)

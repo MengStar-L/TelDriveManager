@@ -31,7 +31,35 @@ class ChannelRouteTests(unittest.TestCase):
         self.assertEqual(response.json()["channel"]["channel_id"], -100123)
         self.catalog.add_channel.assert_awaited_once_with("@videos")
         self.client.patch("/api/t2td/channels/-100123", json={"enabled": False})
-        self.catalog.update_channel.assert_awaited_once_with(-100123, False)
+        self.catalog.update_channel.assert_awaited_once_with(-100123, enabled=False)
+
+    def test_channel_sync_settings_are_partial_and_normalized(self):
+        self.catalog.update_channel.return_value = {"channel_id": -100123, "auto_sync": True}
+        response = self.client.patch("/api/t2td/channels/-100123", json={
+            "target_path": " /课程//视频/ ", "auto_sync": True,
+            "sync_since": "2026-10-21T10:30:00+08:00",
+        })
+        self.assertEqual(response.status_code, 200)
+        self.catalog.update_channel.assert_awaited_once_with(
+            -100123, target_path="/课程/视频", auto_sync=True,
+            sync_since="2026-10-21T02:30:00+00:00")
+        self.catalog.update_channel.reset_mock()
+        self.assertEqual(self.client.patch("/api/t2td/channels/-100123", json={"auto_sync": False}).status_code, 200)
+        self.catalog.update_channel.assert_awaited_once_with(-100123, auto_sync=False)
+
+    def test_invalid_channel_sync_settings_do_not_reach_catalog(self):
+        for body in ({}, {"auto_sync": "true"}, {"auto_sync": 1}, {"enabled": None},
+                     {"auto_sync": None}, {"target_path": None}, {"sync_since": None},
+                     {"target_path": "C:\\videos"}, {"target_path": "https://example.com/videos"},
+                     {"target_path": "/videos/../secret"}, {"target_path": "/videos\n/clip"},
+                     {"target_path": "/" + "a" * 2048}, {"sync_since": "2026-10-21T10:30"},
+                     {"sync_since": "2026-13-21T10:30:00Z"}, {"sync_since": "not-a-date"},
+                     {"sync_since": "0001-01-01T00:00:00+08:00"},
+                     {"target_path": 123}, {"history_complete": True}):
+            with self.subTest(body=body):
+                response = self.client.patch("/api/t2td/channels/-100123", json=body)
+                self.assertEqual(response.status_code, 422)
+        self.catalog.update_channel.assert_not_awaited()
 
     def test_pagination_and_scan_keep_channel_identity(self):
         response = self.client.get("/api/t2td/channels/-100123/videos?before_id=150&limit=20")

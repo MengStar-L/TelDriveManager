@@ -436,8 +436,9 @@ class TelegramRelayManager:
                                           channel_id=int(getattr(config, "telegram_channel_id") or 0))
 
     async def enqueue_channel_video(self, config: Any, msg: Any, file_info: dict[str, Any], *,
-                                    source_channel_id: int, source_title: str = "") -> dict:
-        """用户选择的频道视频只复制媒体，永远不删除源频道消息。"""
+                                    source_channel_id: int, source_title: str = "",
+                                    target_path: str | None = None) -> dict:
+        """频道视频只复制媒体；入队时固定云端目录，永远不删除源消息。"""
         if not bool(getattr(config, "relay_enabled", False)):
             raise ValueError("请先在回源与频道设置中启用下载上传功能")
         if not source_channel_id or int(getattr(msg, "id", 0) or 0) <= 0:
@@ -449,13 +450,18 @@ class TelegramRelayManager:
             raise ValueError("不支持限时或阅后即焚媒体")
         if int(file_info.get("size") or 0) <= 0:
             raise ValueError("无法确认视频大小，未开始下载")
+        # Capture the destination before any await: subsequent channel/global
+        # settings changes must not redirect queued jobs or resumed uploads.
+        destination = normalize_teldrive_target_path(target_path) or normalize_teldrive_target_path(
+            getattr(config, "relay_target_path", "") or getattr(config, "teldrive_target_path", "")
+        ) or "/"
         return await self._enqueue_source(config, msg, file_info, channel_id=int(source_channel_id),
                                           source_kind="channel", source_title=source_title,
-                                          source_document_id=str(document.id))
+                                          source_document_id=str(document.id), target_path=destination)
 
     async def _enqueue_source(self, config: Any, msg: Any, file_info: dict[str, Any], *, channel_id: int,
                               source_kind: str = "relay", source_title: str = "",
-                              source_document_id: str = "") -> dict:
+                              source_document_id: str = "", target_path: str = "") -> dict:
         self.config = config
         self._concurrency = max(1, int(getattr(config, "relay_concurrency", 1) or 1))
         self._semaphore.resize(self._concurrency)
@@ -475,6 +481,7 @@ class TelegramRelayManager:
             source_kind=source_kind,
             source_title=source_title,
             source_document_id=source_document_id,
+            target_path=target_path,
         )
         if source_kind == "channel" and job.get("source_kind", "relay") != "channel":
             raise ValueError("该消息已有自动回源任务，请在回源任务列表中管理")

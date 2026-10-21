@@ -794,6 +794,7 @@ let lastPageSwitchAt = 0;
 let lastPageSwitchName = '';
 
 function runPageSideEffects(name) {
+    window.onTelegramChannelPageChange?.(name);
     if (name === 'aria2teldrive') {
         loadA2TDTasks();
         syncMonitorSerialToggle();
@@ -4250,7 +4251,9 @@ function closeTelDriveFolderPicker(event) {
     modal?.setAttribute('aria-hidden', 'true');
     teldriveFolderPicker.requestId += 1;
     teldriveFolderPicker.controller?.abort();
+    const inputId = teldriveFolderPicker.input?.id;
     teldriveFolderPicker.input = null;
+    window.onTelegramChannelFolderPickerClosed?.(inputId);
     teldriveFolderPicker.trigger?.focus();
 }
 
@@ -4299,6 +4302,10 @@ async function loadTelDrivePickerFolders(path) {
 function selectTelDrivePickerFolder() {
     const input = teldriveFolderPicker.input;
     if (!input || document.getElementById('teldriveFolderSelectBtn')?.disabled) return;
+    if (input.id === 'telegramChannelTargetPath' && window.canApplyTelegramChannelFolder?.() !== true) {
+        closeTelDriveFolderPicker();
+        return;
+    }
     input.value = teldriveFolderPicker.path;
     input.dispatchEvent(new Event('change', {bubbles: true}));
     closeTelDriveFolderPicker();

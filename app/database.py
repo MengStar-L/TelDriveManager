@@ -609,15 +609,16 @@ async def add_telegram_relay_job(
     source_kind: str = "relay",
     source_title: str = "",
     source_document_id: str = "",
+    target_path: str = "",
 ) -> dict:
     conn = await _get_conn()
     await conn.execute(
         """
         INSERT OR IGNORE INTO telegram_relay_jobs (
             job_id, source_channel_id, source_message_id, file_name,
-            file_size, mime_type, local_path, source_kind, source_title, source_document_id
+            file_size, mime_type, local_path, source_kind, source_title, source_document_id, target_path
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             job_id,
@@ -630,6 +631,7 @@ async def add_telegram_relay_job(
             source_kind,
             str(source_title or ""),
             str(source_document_id or ""),
+            str(target_path or ""),
         ),
     )
     await conn.commit()

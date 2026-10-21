@@ -1309,21 +1309,42 @@
 
 
         /* Telegram channel catalogue shares the relay account and transfer queue. */
-        .telegram-module-heading, .telegram-channel-video-heading { gap: 12px; flex-wrap: wrap; }
-        .telegram-module-body { padding: 16px 20px; }
-        .telegram-destination { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; font-size: 13px; color: var(--text-secondary); }
-        .telegram-destination > span { flex: 1; min-width: 0; overflow-wrap: anywhere; }
-        .telegram-destination strong { color: var(--text-primary); font-weight: 500; }
-        .telegram-module-tabs { margin-top: 16px; max-width: 460px; padding: 4px; border-radius: 8px; background: var(--bg-input); }
-        .telegram-module-tabs .segmented-btn { padding: 10px 12px; border-radius: 6px; font-size: 13px; }
+        .telegram-module-heading { display: grid; grid-template-columns: auto auto minmax(120px, 1fr) auto; gap: 16px; align-items: center; padding: 14px 18px; border-bottom: 0; }
+        .telegram-module-heading h3 { font-size: 14px; }
+        .telegram-module-heading > * { min-width: 0; }
+        .telegram-module-actions { justify-content: flex-end; }
+        .telegram-channel-video-heading { gap: 12px; flex-wrap: wrap; }
+        .telegram-destination { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text-secondary); min-width: 0; }
+        .telegram-destination > i, .telegram-destination > .btn { flex-shrink: 0; }
+        .telegram-destination > span { flex: 1; min-width: 0; }
+        .telegram-destination strong { display: block; color: var(--text-primary); font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        .telegram-module-tabs { margin: 0; padding: 3px; border-radius: 8px; background: var(--bg-input); }
+        .telegram-module-tabs .segmented-btn { padding: 8px 10px; border-radius: 6px; font-size: 12px; white-space: nowrap; }
         .telegram-module-tabs .segmented-btn.active { box-shadow: 0 1px 4px rgba(15,23,42,.1); }
-        .telegram-channel-layout { display: grid; grid-template-columns: minmax(230px, 290px) minmax(0, 1fr); gap: 20px; align-items: start; }
+        .telegram-channel-layout { display: grid; grid-template-columns: minmax(230px, 270px) minmax(0, 1fr); gap: 20px; align-items: start; }
         .telegram-channel-layout > .card { min-width: 0; margin-bottom: 0; }
+        .telegram-channel-main { display: grid; gap: 20px; min-width: 0; }
+        .telegram-channel-main > .card { min-width: 0; margin: 0; }
+        .telegram-channel-settings-header { align-items: flex-start; flex-wrap: wrap; gap: 10px; }
+        .telegram-channel-settings-header > div { min-width: 0; }
+        .telegram-channel-settings-header h3 { line-height: 1.5; overflow-wrap: anywhere; }
+        .telegram-channel-settings-form { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 16px; align-items: end; }
+        .telegram-channel-field { min-width: 0; display: grid; align-content: start; gap: 8px; }
+        .telegram-channel-field > label { font-size: 13px; font-weight: 600; }
+        .telegram-channel-settings-footer { grid-column: 1 / -1; }
+        .telegram-channel-target-field { display: flex; align-items: center; gap: 8px; min-width: 0; }
+        .telegram-channel-target-field .form-input { flex: 1; min-width: 0; }
+        .telegram-channel-target-field .btn { flex: 0 0 40px; height: 40px; width: 40px; padding: 0; }
+        .telegram-channel-settings-form .form-input { min-width: 0; max-width: 100%; font-size: 13px; padding: 10px 12px; }
+        .telegram-channel-settings-footer { display: flex; flex-wrap: wrap; justify-content: flex-end; align-items: center; gap: 12px; padding-top: 12px; border-top: 1px solid var(--border); }
+        .telegram-channel-settings-status { flex: 1; min-width: 0; font-size: 12px; line-height: 1.6; color: var(--text-secondary); overflow-wrap: anywhere; }
+        .telegram-channel-settings-status.error { color: #b91c1c; }
+        .telegram-channel-settings-status.success { color: #047857; }
+        .telegram-channel-path-summary { margin: 4px 0 8px; overflow-wrap: anywhere; font-size: 11px; line-height: 1.5; color: var(--text-secondary); }
         .telegram-channel-layout .card-header { padding: 16px 18px; }
         .telegram-channel-layout .card-body { padding: 18px; }
         .telegram-channel-hint { font-size: 12px; line-height: 1.65; color: var(--text-secondary); overflow-wrap: anywhere; }
         .telegram-channel-add-form { display: grid; gap: 10px; }
-        .telegram-channel-add-form > label { font-size: 13px; font-weight: 600; }
         .telegram-channel-add-form .form-input { min-width: 0; padding: 10px 12px; font-size: 12px; }
         .telegram-channel-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
         .telegram-channel-actions .btn { padding: 8px 10px; }
@@ -1342,14 +1363,12 @@
         .telegram-channel-badge.primary { background: #eff6ff; color: #1d4ed8; }
         .telegram-channel-badge.error { background: #fef2f2; color: #b91c1c; }
         .telegram-channel-item-error { color: #b91c1c; margin-bottom: 8px; }
-        .telegram-channel-video-heading > div:first-child { min-width: 0; }
+        .telegram-channel-video-heading > div:first-child { min-width: 0; display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
         .telegram-channel-video-heading h3 { overflow-wrap: anywhere; line-height: 1.5; }
         .telegram-channel-video-heading h3 i { flex-shrink: 0; }
-        .telegram-channel-video-heading .telegram-channel-hint { margin-top: 5px; }
-        .telegram-channel-explanation { padding: 12px 14px; background: var(--bg-input); border: 1px solid var(--border); border-radius: 8px; }
-        .telegram-channel-notice { margin-top: 12px; padding: 10px 12px; border-radius: 8px; background: #eff6ff; color: #1d4ed8; font-size: 12px; line-height: 1.6; overflow-wrap: anywhere; }
+        .telegram-channel-notice { margin-bottom: 12px; padding: 10px 12px; border-radius: 8px; background: #eff6ff; color: #1d4ed8; font-size: 12px; line-height: 1.6; overflow-wrap: anywhere; }
         .telegram-channel-notice.error { background: #fef2f2; color: #b91c1c; }
-        .telegram-channel-selection { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin: 16px 0; padding-bottom: 14px; border-bottom: 1px solid var(--border); }
+        .telegram-channel-selection { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin: 0 0 14px; padding-bottom: 14px; border-bottom: 1px solid var(--border); }
         .telegram-channel-select-label { display: inline-flex; align-items: center; gap: 8px; font-size: 12px; cursor: pointer; }
         .telegram-channel-select-label input, .telegram-video-check { width: 16px; height: 16px; accent-color: var(--accent); flex-shrink: 0; cursor: pointer; }
         #telegramVideosDownloadBtn { margin-left: auto; }
@@ -1369,25 +1388,55 @@
         .telegram-channel-empty i { display: block; font-size: 28px; margin-bottom: 10px; color: var(--text-dim); }
         .telegram-channel-load-more { display: flex; flex-wrap: wrap; justify-content: center; align-items: center; gap: 12px; margin-top: 16px; }
         #telegramChannelsPanel [hidden], #telegramTasksPanel[hidden], #telegramChannelsPanel[hidden] { display: none !important; }
+        @media (min-width: 1081px) {
+            .main-wrapper:has(#page-telegramrelay.active #telegramChannelsPanel:not([hidden])) { transform: none; }
+            #page-telegramrelay.active:has(#telegramChannelsPanel:not([hidden])) { display: flex; flex-direction: column; height: 100%; min-height: 0; padding-bottom: 0; overflow: hidden; }
+            #page-telegramrelay > .telegram-module-card { flex-shrink: 0; }
+            #telegramChannelsPanel { flex: 1; min-height: 0; }
+            .telegram-channel-layout { height: 100%; min-height: 0; grid-template-rows: minmax(0, 1fr); align-items: stretch; }
+            .telegram-channel-sidebar { display: flex; flex-direction: column; min-height: 0; }
+            .telegram-channel-sidebar > .card-header { flex-shrink: 0; }
+            .telegram-channel-sidebar > .card-body { display: flex; flex-direction: column; flex: 1; min-height: 0; overflow: hidden; }
+            .telegram-channel-add-form { flex-shrink: 0; }
+            .telegram-channels-list { flex: 1; min-height: 0; overflow-y: auto; align-content: start; overscroll-behavior-y: contain; }
+            .telegram-channel-main { display: flex; flex-direction: column; min-height: 0; overflow-y: auto; border-radius: var(--radius-lg); overscroll-behavior-y: contain; }
+            .telegram-channel-main > .card { flex-shrink: 0; }
+            .telegram-channel-main > .telegram-channel-videos { display: flex; flex-direction: column; flex: 1 0 180px; min-height: 180px; }
+            .telegram-channel-videos > .card-header { flex-shrink: 0; }
+            .telegram-channel-videos > .card-body { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior-y: contain; }
+        }
+        @media (max-width: 1280px) {
+            .telegram-module-heading { grid-template-columns: minmax(0, 1fr) auto auto; gap: 10px 14px; }
+            .telegram-destination { grid-column: 1 / -1; grid-row: 2; }
+        }
         @media (max-width: 1080px) {
             .telegram-channel-layout { grid-template-columns: minmax(0, 1fr); }
             .telegram-channels-list { grid-template-columns: repeat(auto-fit, minmax(min(100%, 230px), 1fr)); }
             .telegram-channel-add-form { grid-template-columns: minmax(0, 1fr) auto; align-items: center; }
-            .telegram-channel-add-form > label, .telegram-channel-add-form > p { grid-column: 1 / -1; }
         }
         @media (max-width: 620px) {
             #page-telegramrelay .card-header { padding: 14px; }
             #page-telegramrelay .card-body { padding: 14px !important; }
             .telegram-module-heading h3 { font-size: 14px; line-height: 1.5; }
-            .telegram-module-tabs { gap: 3px; }
+            .telegram-module-heading { grid-template-columns: minmax(0, 1fr) auto; }
+            .telegram-module-actions { grid-column: 2; grid-row: 1; flex-wrap: nowrap; }
+            .telegram-module-actions .btn { width: 30px; height: 30px; padding: 0; }
+            .telegram-module-actions .btn span { display: none; }
+            .telegram-module-tabs { grid-column: 1 / -1; grid-row: 2; gap: 3px; }
+            .telegram-destination { grid-row: 3; }
             .telegram-module-tabs .segmented-btn { padding: 9px 5px; gap: 5px; font-size: 12px; line-height: 1.45; }
-            .telegram-module-tabs .segmented-btn span { overflow-wrap: anywhere; }
+            .telegram-module-tabs .segmented-btn span { white-space: normal; overflow-wrap: anywhere; }
             .telegram-channel-add-form { grid-template-columns: minmax(0, 1fr); }
             .telegram-channel-selection { gap: 10px 8px; }
             .telegram-channel-selection > .btn { font-size: 12px; padding: 8px 10px; }
             #telegramVideosDownloadBtn { width: 100%; margin-left: 0; }
             .telegram-video-row { padding: 11px; gap: 8px; }
             .telegram-channel-layout { gap: 14px; }
+            .telegram-channel-main { gap: 14px; }
+            .telegram-channel-settings-form { grid-template-columns: minmax(0, 1fr); gap: 14px; }
+            .telegram-channel-settings-footer > .telegram-channel-actions { width: 100%; }
+            .telegram-channel-settings-footer .btn { flex: 1; padding: 9px 10px; }
+            .telegram-channel-settings-form input[type="datetime-local"] { width: 100%; appearance: none; }
             #page-telegramrelay .page-actions .btn { white-space: normal; line-height: 1.4; }
         }
     </style>
@@ -1757,14 +1806,17 @@
                     <div class="card telegram-module-card">
                         <div class="card-header telegram-module-heading">
                             <h3><i class="ph ph-telegram-logo"></i> Telegram 回源与频道</h3>
-                            <div class="telegram-channel-actions">
-                                <button class="btn btn-ghost btn-sm" type="button" onclick="openTelegramRelaySettingsModal()"><i class="ph ph-gear-six"></i> 设置</button>
-                                <button class="btn btn-ghost btn-sm" type="button" onclick="openTelegramRelayLogModal()"><i class="ph ph-terminal-window"></i> 日志</button>
+                            <div class="segmented-control telegram-module-tabs" role="tablist" aria-label="Telegram 功能">
+                                <button type="button" id="telegramTasksTab" class="segmented-btn active" role="tab" aria-selected="true" aria-controls="telegramTasksPanel" onclick="setTelegramModuleMode('tasks')"><i class="ph ph-cloud-arrow-down"></i><span>回源与下载任务</span></button>
+                                <button type="button" id="telegramChannelsTab" class="segmented-btn" role="tab" aria-selected="false" aria-controls="telegramChannelsPanel" tabindex="-1" onclick="setTelegramModuleMode('channels')"><i class="ph ph-video-camera"></i><span>频道视频</span></button>
+                            </div>
+                            <div class="telegram-destination"><i class="ph ph-folder-open" aria-hidden="true"></i><span><strong id="telegramChannelsDestination" aria-label="默认 TelDrive 目录">默认上传目录</strong></span><button type="button" class="btn btn-ghost btn-sm telegram-icon-button" title="修改默认 TelDrive 目录" aria-label="修改默认 TelDrive 目录" onclick="openTelegramRelaySettingsModal()"><i class="ph ph-pencil-simple"></i></button></div>
+                            <div class="telegram-channel-actions telegram-module-actions">
+                                <button class="btn btn-ghost btn-sm" type="button" title="设置" aria-label="设置" onclick="openTelegramRelaySettingsModal()"><i class="ph ph-gear-six"></i><span>设置</span></button>
+                                <button class="btn btn-ghost btn-sm" type="button" title="日志" aria-label="日志" onclick="openTelegramRelayLogModal()"><i class="ph ph-terminal-window"></i><span>日志</span></button>
                             </div>
                         </div>
-                        <div class="card-body telegram-module-body">
-                            <div class="telegram-destination"><i class="ph ph-folder-open"></i><span>上传到 TelDrive：<strong id="telegramChannelsDestination">默认上传目录</strong></span><button type="button" class="btn btn-ghost btn-sm" onclick="openTelegramRelaySettingsModal()">修改</button></div>
-                            <div id="telegramRelayLoginPanel" style="display:none; margin-top:16px; padding:16px; border:1px solid var(--border); border-radius:8px; background:var(--bg-input);">
+                            <div id="telegramRelayLoginPanel" style="display:none; margin:0 18px 16px; padding:16px; border:1px solid var(--border); border-radius:8px; background:var(--bg-input);">
                                 <div id="telegramRelayLoginText" style="font-weight:600; color:var(--text-primary); margin-bottom:12px;">Telegram 账号登录状态检查中...</div>
                                 <img id="telegramRelayQrImg" src="" onclick="refreshTelegramRelayQr(true)" title="点击二维码刷新" style="display:none; margin:0 auto; max-width:100%; height:auto; border-radius:12px; border:2px solid var(--border); cursor:pointer;" width="220">
                                 <div id="telegramRelayQrHint" style="display:none; margin-top:10px; font-size:13px; color:var(--text-secondary); text-align:center;"></div>
@@ -1773,11 +1825,6 @@
                                     <button type="submit" class="btn btn-primary btn-sm" style="margin-top:8px;"><i class="ph ph-key"></i> 提交</button>
                                 </form>
                             </div>
-                            <div class="segmented-control telegram-module-tabs" role="tablist" aria-label="Telegram 功能">
-                                <button type="button" id="telegramTasksTab" class="segmented-btn active" role="tab" aria-selected="true" aria-controls="telegramTasksPanel" onclick="setTelegramModuleMode('tasks')"><i class="ph ph-cloud-arrow-down"></i><span>回源与下载任务</span></button>
-                                <button type="button" id="telegramChannelsTab" class="segmented-btn" role="tab" aria-selected="false" aria-controls="telegramChannelsPanel" tabindex="-1" onclick="setTelegramModuleMode('channels')"><i class="ph ph-video-camera"></i><span>频道视频</span></button>
-                            </div>
-                        </div>
                     </div>
                     <div id="telegramTasksPanel" role="tabpanel" aria-labelledby="telegramTasksTab">
                     <div class="card">
@@ -1816,18 +1863,30 @@
                                 <div class="card-header"><h3 id="telegramChannelsHeading"><i class="ph ph-broadcast"></i> 监控频道</h3><button type="button" class="btn btn-ghost btn-sm telegram-icon-button" onclick="loadTelegramChannelsPage(true)" aria-label="刷新频道列表"><i class="ph ph-arrows-clockwise"></i></button></div>
                                 <div class="card-body">
                                     <form id="telegramChannelAddForm" class="telegram-channel-add-form">
-                                        <label for="telegramChannelReference">添加频道</label>
-                                        <input id="telegramChannelReference" class="form-input" placeholder="@频道名、t.me 链接或 -100…" autocomplete="off" required maxlength="512" aria-describedby="telegramChannelAddHint">
+                                        <input id="telegramChannelReference" class="form-input" placeholder="@公开用户名 / 消息链接" autocomplete="off" required maxlength="512" aria-label="频道用户名或消息链接">
                                         <button id="telegramChannelAddBtn" type="submit" class="btn btn-primary btn-sm"><i class="ph ph-plus"></i> 添加监控</button>
-                                        <p class="telegram-channel-hint" id="telegramChannelAddHint">使用上方已登录的 Telegram 账号。请先确保该账号可以访问频道。</p>
                                     </form>
                                     <div id="telegramChannelsList" class="telegram-channels-list" aria-label="已添加的频道"></div>
                                 </div>
                             </section>
+                            <div class="telegram-channel-main">
+                            <section class="card telegram-channel-settings" aria-labelledby="telegramChannelSettingsTitle">
+                                <div class="card-header telegram-channel-settings-header"><h3 id="telegramChannelSettingsTitle">频道同步设置</h3><span id="telegramChannelSyncBadge" class="telegram-channel-badge">未选择频道</span></div>
+                                <form id="telegramChannelSettingsForm" class="card-body telegram-channel-settings-form">
+                                    <div class="telegram-channel-field">
+                                        <label for="telegramChannelTargetPath">关联的 TelDrive 文件夹</label>
+                                        <div class="telegram-channel-target-field"><input type="text" id="telegramChannelTargetPath" class="form-input" placeholder="未设置时，手动下载沿用默认目录" autocomplete="off" spellcheck="false" disabled><button type="button" id="telegramChannelBrowseBtn" class="btn btn-ghost" onclick="openTelegramChannelFolderPicker(this)" aria-label="选择当前频道的 TelDrive 文件夹" title="选择 TelDrive 文件夹" disabled><i class="ph ph-folder-open"></i></button></div>
+                                    </div>
+                                    <div class="telegram-channel-field">
+                                        <label for="telegramChannelSyncSince">发布时间不早于</label>
+                                        <input id="telegramChannelSyncSince" type="datetime-local" step="1" class="form-input" disabled>
+                                    </div>
+                                    <div class="telegram-channel-settings-footer"><div id="telegramChannelSettingsStatus" class="telegram-channel-settings-status" role="status" aria-live="polite" hidden></div><div class="telegram-channel-actions"><button id="telegramChannelSettingsResetBtn" type="button" class="btn btn-ghost btn-sm" onclick="resetTelegramChannelSettings()" disabled>撤销修改</button><button id="telegramChannelSettingsSaveBtn" type="submit" class="btn btn-primary btn-sm" disabled><i class="ph ph-floppy-disk"></i> 保存设置</button></div></div>
+                                </form>
+                            </section>
                             <section class="card telegram-channel-videos" aria-labelledby="telegramChannelVideosTitle">
-                                <div class="card-header telegram-channel-video-heading"><div><h3 id="telegramChannelVideosTitle"><i class="ph ph-video-camera"></i> 频道视频</h3><p class="telegram-channel-hint" id="telegramChannelSummary">添加或选择一个频道</p></div><div class="telegram-channel-actions"><button id="telegramChannelScanBtn" class="btn btn-ghost btn-sm" type="button" onclick="scanTelegramChannel(false)" disabled><i class="ph ph-arrows-clockwise"></i> 刷新最新</button><button id="telegramChannelHistoryBtn" class="btn btn-ghost btn-sm" type="button" onclick="scanTelegramChannel(true)" disabled><i class="ph ph-clock-counter-clockwise"></i> 扫描更早</button></div></div>
+                                <div class="card-header telegram-channel-video-heading"><div><h3 id="telegramChannelVideosTitle"><i class="ph ph-video-camera"></i> 视频列表</h3><span class="telegram-channel-badge" id="telegramChannelSummary"></span></div><div class="telegram-channel-actions"><button id="telegramChannelScanBtn" class="btn btn-ghost btn-sm" type="button" onclick="scanTelegramChannel(false)" disabled><i class="ph ph-arrows-clockwise"></i> 刷新最新</button><button id="telegramChannelHistoryBtn" class="btn btn-ghost btn-sm" type="button" onclick="scanTelegramChannel(true)" disabled><i class="ph ph-clock-counter-clockwise"></i> 扫描更早</button></div></div>
                                 <div class="card-body">
-                                    <p class="telegram-channel-hint telegram-channel-explanation">监控只更新视频列表，勾选后才会下载并上传。上传完成后清理服务器临时文件，源频道消息保留。受保护的视频仅在 Telegram 接口允许时尝试直接下载；限制无法绕过时会显示具体错误。</p>
                                     <div id="telegramChannelsNotice" class="telegram-channel-notice" role="status" aria-live="polite" hidden></div>
                                     <div class="telegram-channel-selection">
                                         <label class="telegram-channel-select-label"><input type="checkbox" id="telegramVideosSelectAll" onchange="selectTelegramChannelVideos(this.checked)" disabled><span>全选已显示</span></label>
@@ -1839,6 +1898,7 @@
                                     <div class="telegram-channel-load-more"><button id="telegramVideosLoadMoreBtn" class="btn btn-ghost btn-sm" type="button" onclick="loadTelegramChannelVideos(true)" hidden>加载更多已收录视频</button><span id="telegramVideosCount" class="telegram-channel-hint"></span></div>
                                 </div>
                             </section>
+                            </div>
                         </div>
                     </div>
                 </div>
@@ -2253,7 +2313,7 @@
                                 </div>
                                 <div style="margin-top:20px; padding-top:20px; border-top:1px solid var(--border)">
                                     <label class="toggle-row" style="justify-content:space-between">
-                                        启用 Telegram 回源重传
+                                        启用 Telegram 下载上传（回源与频道）
                                         <div class="toggle-switch"><input type="checkbox" id="cfgTelegramRelayEnabled"><span class="toggle-slider"></span></div>
                                     </label>
                                     <label class="toggle-row" style="justify-content:space-between; margin-top:10px">
@@ -2348,7 +2408,7 @@
             </div>
             <div class="telegram-relay-settings-body">
                 <label class="toggle-row" style="justify-content:space-between">
-                    启用 Telegram 回源重传
+                    启用 Telegram 下载上传（回源与频道）
                     <div class="toggle-switch">
                         <input type="checkbox" id="telegramRelaySettingEnabled">
                         <span class="toggle-slider"></span>
@@ -2410,8 +2470,8 @@
         </div>
     </div>
 
-    <script src="/static/app.js?v=20261021-telegram-channels"></script>
-    <script src="/static/telegram-channels.js?v=20261021"></script>
+    <script src="/static/app.js?v=20261021-channel-sync"></script>
+    <script src="/static/telegram-channels.js?v=20261021-channel-controls"></script>
 
 
 

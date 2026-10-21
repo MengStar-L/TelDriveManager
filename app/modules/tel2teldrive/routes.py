@@ -2,12 +2,12 @@
 
 import asyncio
 import json
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Annotated, Any
 
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, ConfigDict, Field, StrictBool
+from pydantic import BaseModel, ConfigDict, Field, StrictBool, field_validator, model_validator
 
 router = APIRouter(prefix="/api/t2td")
 
@@ -330,7 +330,40 @@ class ChannelAddRequest(BaseModel):
 
 class ChannelUpdateRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    enabled: StrictBool
+    enabled: StrictBool | None = None
+    target_path: str | None = Field(default=None, max_length=2048, strict=True)
+    auto_sync: StrictBool | None = None
+    sync_since: str | None = Field(default=None, min_length=1, max_length=64, strict=True)
+
+    @field_validator("enabled", "target_path", "auto_sync", "sync_since", mode="before")
+    @classmethod
+    def reject_null(cls, value):
+        if value is None:
+            raise ValueError("设置项不能为 null，请省略不修改的字段")
+        return value
+
+    @field_validator("target_path")
+    @classmethod
+    def normalize_destination(cls, value):
+        from app.config import normalize_teldrive_target_path
+        return normalize_teldrive_target_path(value)
+
+    @field_validator("sync_since")
+    @classmethod
+    def normalize_start_time(cls, value):
+        try:
+            timestamp = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            if timestamp.utcoffset() is None:
+                raise ValueError("同步起始时间必须包含时区")
+            return timestamp.astimezone(timezone.utc).isoformat()
+        except (ValueError, OverflowError) as exc:
+            raise ValueError("同步起始时间必须是带时区的 ISO 日期时间") from exc
+
+    @model_validator(mode="after")
+    def require_change(self):
+        if not self.model_fields_set:
+            raise ValueError("请至少提供一项频道设置")
+        return self
 
 
 class ChannelScanRequest(BaseModel):
@@ -370,7 +403,7 @@ async def add_video_channel(payload: ChannelAddRequest):
 
 @router.patch("/channels/{channel_id}")
 async def update_video_channel(channel_id: int, payload: ChannelUpdateRequest):
-    return {"channel": await _catalog_call("update_channel", channel_id, payload.enabled)}
+    return {"channel": await _catalog_call("update_channel", channel_id, **payload.model_dump(exclude_unset=True))}
 
 
 @router.delete("/channels/{channel_id}")

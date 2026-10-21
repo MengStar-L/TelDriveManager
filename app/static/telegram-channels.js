@@ -1,9 +1,10 @@
-// Channel monitoring lists metadata only. Downloads always require explicit selection.
+// Downloads require manual selection or a saved, explicitly enabled channel sync rule.
 const telegramChannelsState = {
     mode: 'tasks', channels: [], channelId: '', videos: [], selected: new Set(),
     hasMore: false, nextBeforeId: null, loaded: false, loading: false,
     channelsRequest: 0, videosRequest: 0, selectionEpoch: 0, adding: false, submitting: false,
     scanning: new Set(), changing: new Set(), cooldownUntil: null, pollTimer: null,
+    drafts: new Map(), saving: new Set(), settingsVersions: new Map(), pickerContext: null,
 };
 const TELEGRAM_VIDEO_PAGE_SIZE = 50;
 const TELEGRAM_VIDEO_SELECTION_LIMIT = 100;
@@ -58,7 +59,207 @@ function selectedTelegramChannel() {
 }
 
 function telegramVideoSelectable(video) {
-    return !video.job_status && !video.job_id;
+    return !video.job_status && !video.job_id && !video.auto_job_id && video.auto_status !== 'submitted';
+}
+
+function telegramChannelLocalDate(value) {
+    if (!value) return '';
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return '';
+    const pad = part => String(part).padStart(2, '0');
+    return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
+}
+
+function telegramChannelUTCDate(value) {
+    if (!value) return '';
+    if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2})?$/.test(value)) throw new Error('请选择有效的发布时间起点');
+    const date = new Date(value);
+    const canonical = value.length === 16 ? value + ':00' : value;
+    if (Number.isNaN(date.getTime()) || telegramChannelLocalDate(date) !== canonical) throw new Error('请选择有效的本地日期和时间');
+    return date.toISOString();
+}
+
+function telegramChannelSettingsValues(channel) {
+    // datetime-local inputs omit the seconds segment when it is exactly zero.
+    const local = telegramChannelLocalDate(channel?.sync_since).replace(/:00$/, '');
+    return { targetPath: String(channel?.target_path || ''), syncSinceLocal: local };
+}
+
+function getTelegramChannelDraft(channel = selectedTelegramChannel()) {
+    if (!channel) return null;
+    const state = telegramChannelsState;
+    const id = String(channel.channel_id);
+    let draft = state.drafts.get(id);
+    if (!draft || (!draft.dirty && !state.saving.has(id))) {
+        const values = telegramChannelSettingsValues(channel);
+        draft = { ...values, baseline: { ...values }, dirty: false, revision: draft?.revision || 0, message: draft?.message || '', messageKind: draft?.messageKind || '' };
+        state.drafts.set(id, draft);
+    }
+    return draft;
+}
+
+function telegramChannelSyncStatus(channel) {
+    if (!channel) return ['未选择频道', ''];
+    const statuses = {
+        manual: ['未启动', ''], paused: ['监控已暂停', 'warning'],
+        relay_disabled: ['下载上传总开关已关闭', 'warning'], backfilling: ['补齐历史视频中', 'primary'],
+        queued: ['自动任务已入队', 'primary'], watching: ['自动同步已开启', 'success'],
+        backpressure: ['等待下载队列空位', 'warning'], error: ['同步异常', 'error'],
+    };
+    if (!channel.auto_sync) return statuses.manual;
+    if (!channel.enabled) return statuses.paused;
+    return statuses[channel.sync_status] || (channel.auto_sync ? statuses.watching : statuses.manual);
+}
+
+function renderTelegramChannelSettings() {
+    const state = telegramChannelsState;
+    const channel = selectedTelegramChannel();
+    const draft = getTelegramChannelDraft(channel);
+    const saving = state.saving.has(state.channelId);
+    const busy = saving || state.changing.has(state.channelId);
+    const title = document.getElementById('telegramChannelSettingsTitle');
+    if (title) title.textContent = channel ? channel.title || channel.username || state.channelId : '频道同步设置';
+    const [status, statusClass] = telegramChannelSyncStatus(channel);
+    const badge = document.getElementById('telegramChannelSyncBadge');
+    if (badge) { badge.textContent = status; badge.className = `telegram-channel-badge ${statusClass}`; }
+    for (const [id, key] of [['telegramChannelTargetPath', 'targetPath'], ['telegramChannelSyncSince', 'syncSinceLocal']]) {
+        const input = document.getElementById(id);
+        if (input) {
+            const value = draft?.[key] || '';
+            if (input.value !== value) input.value = value;
+            input.disabled = !channel || busy;
+        }
+    }
+    const browse = document.getElementById('telegramChannelBrowseBtn');
+    if (browse) browse.disabled = !channel || busy;
+    const save = document.getElementById('telegramChannelSettingsSaveBtn');
+    if (save) { save.disabled = !channel || !draft?.dirty || busy; save.textContent = saving ? '正在保存…' : '保存设置'; }
+    const reset = document.getElementById('telegramChannelSettingsResetBtn');
+    if (reset) reset.disabled = !draft?.dirty || busy;
+    const message = document.getElementById('telegramChannelSettingsStatus');
+    if (message) {
+        const error = channel?.last_sync_error || '';
+        const pending = Math.max(0, Number(channel?.auto_pending_count) || 0);
+        const failed = Math.max(0, Number(channel?.auto_failed_count) || 0);
+        const counts = [pending ? `待处理 ${pending}` : '', failed ? `失败 ${failed}` : ''].filter(Boolean).join(' · ');
+        message.textContent = (draft?.messageKind === 'error' ? draft.message : error) || draft?.message || counts;
+        message.hidden = !message.textContent;
+        message.classList.toggle('error', draft?.messageKind === 'error' || !!error);
+        message.classList.toggle('success', draft?.messageKind === 'success' && !error);
+    }
+    const timeInput = document.getElementById('telegramChannelSyncSince');
+    if (timeInput) {
+        const zone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+        timeInput.title = `包含所选时刻，按浏览器本地时区${zone ? '（' + zone + '）' : ''}填写。`;
+    }
+    refreshTelegramChannelDestination();
+}
+
+function editTelegramChannelSettings() {
+    const state = telegramChannelsState;
+    if (state.saving.has(state.channelId)) return;
+    const draft = getTelegramChannelDraft();
+    if (!draft) return;
+    draft.targetPath = document.getElementById('telegramChannelTargetPath')?.value || '';
+    draft.syncSinceLocal = document.getElementById('telegramChannelSyncSince')?.value || '';
+    draft.dirty = draft.targetPath !== draft.baseline.targetPath || draft.syncSinceLocal !== draft.baseline.syncSinceLocal;
+    draft.revision += 1;
+    draft.message = '';
+    draft.messageKind = '';
+    renderTelegramChannelSettings();
+}
+
+function resetTelegramChannelSettings() {
+    const state = telegramChannelsState;
+    if (state.saving.has(state.channelId)) return;
+    state.drafts.delete(state.channelId);
+    closeTelegramChannelFolderPicker();
+    renderTelegramChannelSettings();
+}
+
+function normalizeTelegramChannelPath(value) {
+    const path = String(value || '').trim();
+    if (!path) return '';
+    if (typeof normalizeRelayTargetPath === 'function') return normalizeRelayTargetPath(path);
+    if (/[\\\x00-\x1f]/.test(path) || path.split('/').some(part => part === '.' || part === '..')) throw new Error('TelDrive 文件夹路径无效');
+    return '/' + path.split('/').filter(Boolean).join('/');
+}
+
+async function saveTelegramChannelSettings(event) {
+    event?.preventDefault();
+    const state = telegramChannelsState;
+    const id = state.channelId;
+    const epoch = state.selectionEpoch;
+    const draft = getTelegramChannelDraft();
+    if (!id || !draft?.dirty || state.saving.has(id) || state.changing.has(id)) return;
+    let payload;
+    try {
+        payload = { target_path: normalizeTelegramChannelPath(draft.targetPath), sync_since: telegramChannelUTCDate(draft.syncSinceLocal) };
+        if (!payload.sync_since) delete payload.sync_since;
+    } catch (error) {
+        draft.message = error.message;
+        draft.messageKind = 'error';
+        renderTelegramChannelSettings();
+        return;
+    }
+    const revision = draft.revision;
+    state.saving.add(id);
+    draft.message = '';
+    closeTelegramChannelFolderPicker();
+    renderTelegramChannelSettings();
+    try {
+        const data = await telegramChannelsRequest(`/${id}`, telegramChannelJson('PATCH', payload));
+        const updated = data.channel;
+        if (!updated || String(updated.channel_id) !== id) throw new Error('保存响应无效，请刷新后确认设置');
+        state.settingsVersions.set(id, (state.settingsVersions.get(id) || 0) + 1);
+        state.channelsRequest += 1; // Invalidate older list snapshots taken before this save.
+        state.channels = state.channels.map(channel => String(channel.channel_id) === id ? { ...channel, ...updated } : channel);
+        if (state.drafts.get(id) === draft && draft.revision === revision) {
+            const values = telegramChannelSettingsValues(updated);
+            const message = updated.enabled === false ? '已保存，监控仍暂停' : '已保存';
+            Object.assign(draft, values, { baseline: { ...values }, dirty: false, message, messageKind: 'success' });
+        }
+        if (state.channelId === id && state.selectionEpoch === epoch) {
+            state.videosRequest += 1; // An older videos response also embeds the previous channel settings.
+            state.loading = false;
+        }
+    } catch (error) {
+        if (state.drafts.get(id) === draft && draft.revision === revision) {
+            draft.message = error.message;
+            draft.messageKind = 'error';
+        }
+    } finally {
+        state.saving.delete(id);
+        renderTelegramChannels();
+        if (state.channelId === id) renderTelegramChannelVideos();
+    }
+}
+
+function openTelegramChannelFolderPicker(trigger) {
+    const state = telegramChannelsState;
+    if (!selectedTelegramChannel() || state.saving.has(state.channelId)) return;
+    state.pickerContext = { channelId: state.channelId, epoch: state.selectionEpoch };
+    if (typeof openTelDriveFolderPicker === 'function') return openTelDriveFolderPicker('telegramChannelTargetPath', trigger);
+}
+
+function canApplyTelegramChannelFolder() {
+    const state = telegramChannelsState;
+    const context = state.pickerContext;
+    return !!context && context.channelId === state.channelId && context.epoch === state.selectionEpoch && state.mode === 'channels' && !state.saving.has(state.channelId);
+}
+
+function closeTelegramChannelFolderPicker() {
+    if (!telegramChannelsState.pickerContext) return;
+    if (typeof closeTelDriveFolderPicker === 'function') closeTelDriveFolderPicker();
+    telegramChannelsState.pickerContext = null;
+}
+
+function onTelegramChannelFolderPickerClosed(inputId) {
+    if (inputId === 'telegramChannelTargetPath') telegramChannelsState.pickerContext = null;
+}
+
+function onTelegramChannelPageChange(page) {
+    if (page !== 'telegramrelay') closeTelegramChannelFolderPicker();
 }
 
 function setTelegramChannelsNotice(message = '', kind = '') {
@@ -93,11 +294,16 @@ function telegramChannelJson(method, payload) {
 
 function refreshTelegramChannelDestination() {
     const node = document.getElementById('telegramChannelsDestination');
-    if (node) node.textContent = window.currentConfig?.telegram_relay?.target_path || window.currentConfig?.teldrive?.target_path || '默认上传目录';
+    const fallback = window.currentConfig?.telegram_relay?.target_path || window.currentConfig?.teldrive?.target_path || '默认上传目录';
+    if (node) { node.textContent = fallback; node.title = `默认 TelDrive 目录：${fallback}`; }
+    const download = document.getElementById('telegramVideosDownloadBtn');
+    const channel = selectedTelegramChannel();
+    if (download) download.title = `上传到 TelDrive：${channel?.target_path || `${fallback}（沿用默认目录）`}`;
 }
 
 function setTelegramModuleMode(mode) {
     telegramChannelsState.mode = mode === 'channels' ? 'channels' : 'tasks';
+    if (telegramChannelsState.mode !== 'channels') closeTelegramChannelFolderPicker();
     for (const [value, prefix] of [['tasks', 'telegramTasks'], ['channels', 'telegramChannels']]) {
         const active = telegramChannelsState.mode === value;
         const tab = document.getElementById(`${prefix}Tab`);
@@ -121,12 +327,16 @@ function renderTelegramChannels() {
         const id = telegramChannelId(channel.channel_id);
         if (!id) return '';
         const active = state.channelId === id;
-        const disabled = state.changing.has(id) ? ' disabled' : '';
+        const disabled = state.changing.has(id) || state.saving.has(id) ? ' disabled' : '';
+        const [syncLabel, syncClass] = telegramChannelSyncStatus(channel);
+        const running = !!channel.enabled && !!channel.auto_sync;
+        const toggleLabel = running ? '暂停监控' : channel.auto_sync ? '继续监控' : '启动监控';
         return `<article class="telegram-channel-item${active ? ' active' : ''}">
             <button type="button" id="telegram-channel-${id}" class="telegram-channel-open" data-channel-action="select" data-channel-id="${id}" aria-pressed="${active}"><strong>${telegramChannelEscape(channel.title || channel.username || id)}</strong><span class="telegram-channel-hint">${telegramChannelEscape(channel.username ? '@' + channel.username : id)}</span></button>
-            <div class="telegram-channel-item-meta"><span class="telegram-channel-badge ${channel.enabled ? 'success' : ''}">${channel.enabled ? '监控中' : '已暂停'}</span><span class="telegram-channel-hint">${Math.max(0, Number(channel.video_count) || 0)} 个视频</span>${channel.protected ? '<span class="telegram-channel-badge warning">受保护频道</span>' : ''}</div>
+            <div class="telegram-channel-item-meta"><span class="telegram-channel-badge ${syncClass}">${syncLabel}</span><span class="telegram-channel-hint">${Math.max(0, Number(channel.video_count) || 0)} 个视频</span>${channel.protected ? '<span class="telegram-channel-badge warning">受保护频道</span>' : ''}</div>
+            <p class="telegram-channel-path-summary"><i class="ph ph-folder-open"></i> ${telegramChannelEscape(channel.target_path || '沿用默认上传目录')}</p>
             ${channel.last_error ? `<p class="telegram-channel-hint telegram-channel-item-error">${telegramChannelEscape(channel.last_error)}</p>` : ''}
-            <div class="telegram-channel-actions"><button id="telegram-channel-toggle-${id}" type="button" class="btn btn-ghost btn-sm" data-channel-action="toggle" data-channel-id="${id}"${disabled}>${channel.enabled ? '暂停监控' : '继续监控'}</button><button id="telegram-channel-remove-${id}" type="button" class="btn btn-ghost btn-sm telegram-channel-remove" data-channel-action="remove" data-channel-id="${id}"${disabled}>移除</button></div>
+            <div class="telegram-channel-actions"><button id="telegram-channel-toggle-${id}" type="button" class="btn btn-ghost btn-sm" data-channel-action="toggle" data-channel-id="${id}"${disabled}>${toggleLabel}</button><button id="telegram-channel-remove-${id}" type="button" class="btn btn-ghost btn-sm telegram-channel-remove" data-channel-action="remove" data-channel-id="${id}"${disabled}>移除</button></div>
         </article>`;
     }).join('') || `<div class="telegram-channel-empty"><i class="ph ph-broadcast"></i>${state.loaded ? '尚未添加频道' : '正在读取频道…'}</div>`;
     if (node.innerHTML !== html) {
@@ -140,11 +350,13 @@ function renderTelegramChannelControls() {
     const state = telegramChannelsState;
     const channel = selectedTelegramChannel();
     const title = document.getElementById('telegramChannelVideosTitle');
-    if (title) title.textContent = channel ? (channel.title || channel.username || state.channelId) : '频道视频';
+    if (title) title.textContent = '视频列表';
     const summary = document.getElementById('telegramChannelSummary');
-    if (summary) summary.textContent = channel
-        ? `${channel.enabled ? '自动收录新视频' : '自动监控已暂停'} · 已收录 ${Number(channel.video_count) || 0} 项${channel.last_scan ? ' · 上次扫描 ' + telegramChannelDate(channel.last_scan) : ''}`
-        : '添加或选择一个频道';
+    if (summary) {
+        summary.textContent = `${Math.max(0, Number(channel?.video_count) || 0)} 个视频`;
+        summary.title = channel?.last_scan ? '上次扫描 ' + telegramChannelDate(channel.last_scan) : '';
+        summary.hidden = !channel;
+    }
     const scanning = state.scanning.has(state.channelId);
     const cooling = new Date(state.cooldownUntil || 0).getTime() > Date.now();
     const latest = document.getElementById('telegramChannelScanBtn');
@@ -160,6 +372,7 @@ function renderTelegramChannelControls() {
     const add = document.getElementById('telegramChannelAddBtn');
     if (add) { add.disabled = state.adding || cooling; add.textContent = state.adding ? '正在添加…' : '添加监控'; }
     refreshTelegramChannelDestination();
+    renderTelegramChannelSettings();
 }
 
 function renderTelegramVideoRow(video) {
@@ -168,7 +381,8 @@ function renderTelegramVideoRow(video) {
     const state = telegramChannelsState;
     const selected = state.selected.has(id);
     const selectable = telegramVideoSelectable(video);
-    const [status, statusClass] = TELEGRAM_VIDEO_STATUS[video.job_status] || [video.job_status ? '处理中' : '未下载', ''];
+    const archivedStatus = !video.job_status && video.auto_job_status ? TELEGRAM_VIDEO_STATUS[video.auto_job_status] : null;
+    const [status, statusClass] = TELEGRAM_VIDEO_STATUS[video.job_status] || (archivedStatus ? [archivedStatus[0] + ' · 任务记录已清理', archivedStatus[1]] : video.auto_status === 'submitted' ? ['已提交', 'primary'] : video.auto_status === 'pending' ? ['等待自动同步', 'primary'] : video.auto_status === 'failed' ? ['同步失败', 'error'] : [video.job_status ? '处理中' : '未下载', '']);
     const link = telegramChannelSourceLink(video.link);
     const rawProgress = video.job_status === 'uploading' ? video.upload_progress : video.download_progress;
     const progress = ['uploading', 'downloading'].includes(video.job_status) ? ` ${Math.min(100, Math.max(0, Number(rawProgress) || 0)).toFixed(1)}%` : '';
@@ -178,7 +392,7 @@ function renderTelegramVideoRow(video) {
             <div class="telegram-video-meta"><span>${telegramVideoSize(video.file_size)}</span><span>${telegramVideoDuration(video.duration)}</span><span>${telegramChannelEscape(telegramChannelDate(video.date))}</span><span>#${id}</span></div>
             ${video.caption ? `<p class="telegram-video-caption">${telegramChannelEscape(video.caption)}</p>` : ''}
             <div class="telegram-video-footer"><span class="telegram-channel-badge ${statusClass}">${status}${progress}</span>${video.protected ? '<span class="telegram-channel-badge warning"><i class="ph ph-lock-simple"></i> 内容受保护</span>' : ''}${link ? `<a href="${telegramChannelEscape(link)}" target="_blank" rel="noopener noreferrer">查看源消息 <i class="ph ph-arrow-up-right"></i></a>` : ''}${['failed', 'cancelled'].includes(video.job_status) ? '<button type="button" class="btn btn-ghost btn-sm" onclick="setTelegramModuleMode(\'tasks\')">在任务列表重试</button>' : ''}</div>
-            ${video.job_error ? `<p class="telegram-channel-hint telegram-video-error">${telegramChannelEscape(video.job_error)}</p>` : ''}
+            ${video.job_error || video.auto_error ? `<p class="telegram-channel-hint telegram-video-error">${telegramChannelEscape(video.job_error || video.auto_error)}</p>` : ''}
         </div></article>`;
 }
 
@@ -247,6 +461,9 @@ async function loadTelegramChannelsPage(force = false, quiet = false) {
     try {
         const data = await telegramChannelsRequest();
         if (request !== state.channelsRequest) return;
+        state.drafts.forEach(draft => {
+            if (draft.messageKind === 'success') { draft.message = ''; draft.messageKind = ''; }
+        });
         state.channels = (Array.isArray(data.channels) ? data.channels : []).filter(item => telegramChannelId(item.channel_id));
         state.cooldownUntil = data.cooldown_until || null;
         state.loaded = true;
@@ -261,6 +478,7 @@ async function selectTelegramChannel(id) {
     const state = telegramChannelsState;
     const nextId = telegramChannelId(id);
     if (nextId === state.channelId && state.videos.length) return;
+    closeTelegramChannelFolderPicker();
     state.channelId = nextId;
     state.selectionEpoch += 1;
     state.videosRequest += 1;
@@ -279,6 +497,7 @@ async function loadTelegramChannelVideos(append = false, preserve = false) {
     const state = telegramChannelsState;
     const channelId = state.channelId;
     if (!channelId || state.loading || (append && !state.nextBeforeId)) return;
+    const settingsVersion = state.settingsVersions.get(channelId) || 0;
     const request = ++state.videosRequest;
     state.loading = true;
     if (!preserve) renderTelegramChannelVideos();
@@ -298,7 +517,7 @@ async function loadTelegramChannelVideos(append = false, preserve = false) {
             state.hasMore = !!data.has_more;
             state.nextBeforeId = Number(data.next_before_id) || null;
         }
-        if (data.channel) state.channels = state.channels.map(channel => String(channel.channel_id) === channelId ? data.channel : channel);
+        if (data.channel && (state.settingsVersions.get(channelId) || 0) === settingsVersion) state.channels = state.channels.map(channel => String(channel.channel_id) === channelId ? data.channel : channel);
         renderTelegramChannels();
     } catch (error) {
         if (request === state.videosRequest && channelId === state.channelId) setTelegramChannelsNotice(error.message, 'error');
@@ -336,14 +555,50 @@ async function changeTelegramChannel(id, action) {
     const state = telegramChannelsState;
     id = telegramChannelId(id);
     const channel = state.channels.find(item => String(item.channel_id) === id);
-    if (!channel || state.changing.has(id)) return;
+    if (!channel || state.changing.has(id) || state.saving.has(id)) return;
+    const running = !!channel.enabled && !!channel.auto_sync;
+    if (action !== 'remove' && !running) {
+        const draft = getTelegramChannelDraft(channel);
+        let validPath = false;
+        try { validPath = !!normalizeTelegramChannelPath(channel.target_path); } catch (_) { /* Focus the saved path below. */ }
+        const validSince = !!channel.sync_since && !Number.isNaN(new Date(channel.sync_since).getTime());
+        if (draft?.dirty || !validPath || !validSince) {
+            const selecting = state.channelId !== id ? selectTelegramChannel(id) : null;
+            const currentDraft = getTelegramChannelDraft(channel);
+            currentDraft.message = '请先保存目标文件夹和同步时间，再启动监控';
+            currentDraft.messageKind = 'error';
+            renderTelegramChannelSettings();
+            const focusId = !validPath || currentDraft.targetPath !== currentDraft.baseline.targetPath ? 'telegramChannelTargetPath' : 'telegramChannelSyncSince';
+            document.getElementById(focusId)?.focus();
+            if (selecting) await selecting;
+            return;
+        }
+    }
     if (action === 'remove' && !confirm(`移除频道“${channel.title || id}”的监控和视频列表？已经提交的下载任务会保留，源频道消息不会删除。`)) return;
     state.changing.add(id);
     renderTelegramChannels();
     try {
-        await telegramChannelsRequest(`/${id}`, action === 'remove' ? { method: 'DELETE' } : telegramChannelJson('PATCH', { enabled: !channel.enabled }));
-        await loadTelegramChannelsPage(true);
-    } catch (error) { setTelegramChannelsNotice(error.message, 'error'); }
+        const data = await telegramChannelsRequest(`/${id}`, action === 'remove' ? { method: 'DELETE' } : telegramChannelJson('PATCH', { enabled: !running, auto_sync: !running }));
+        state.channelsRequest += 1;
+        state.settingsVersions.set(id, (state.settingsVersions.get(id) || 0) + 1);
+        if (action === 'remove') {
+            state.drafts.delete(id);
+            state.channels = state.channels.filter(item => String(item.channel_id) !== id);
+            if (state.channelId === id) await selectTelegramChannel(state.channels[0]?.channel_id || '');
+        } else {
+            if (!data.channel || String(data.channel.channel_id) !== id) throw new Error('操作响应无效，请刷新后确认监控状态');
+            state.channels = state.channels.map(item => String(item.channel_id) === id ? { ...item, ...data.channel } : item);
+            const draft = getTelegramChannelDraft(data.channel);
+            if (draft) {
+                draft.message = data.channel.enabled && data.channel.auto_sync ? '监控已启动' : '监控已暂停';
+                draft.messageKind = 'success';
+            }
+        }
+    } catch (error) {
+        const draft = getTelegramChannelDraft(channel);
+        if (draft) { draft.message = error.message; draft.messageKind = 'error'; }
+        if (state.channelId !== id) setTelegramChannelsNotice(`${channel.title || id}：${error.message}`, 'error');
+    }
     finally { state.changing.delete(id); renderTelegramChannels(); }
 }
 
@@ -351,6 +606,7 @@ async function scanTelegramChannel(older = false) {
     const state = telegramChannelsState;
     const id = state.channelId;
     const epoch = state.selectionEpoch;
+    const settingsVersion = state.settingsVersions.get(id) || 0;
     if (!id || state.scanning.has(id)) return;
     state.scanning.add(id);
     renderTelegramChannelControls();
@@ -358,7 +614,7 @@ async function scanTelegramChannel(older = false) {
     try {
         const data = await telegramChannelsRequest(`/${id}/scan`, telegramChannelJson('POST', { older }));
         if (state.channelId !== id || state.selectionEpoch !== epoch) return;
-        if (data.channel) state.channels = state.channels.map(channel => String(channel.channel_id) === id ? data.channel : channel);
+        if (data.channel && (state.settingsVersions.get(id) || 0) === settingsVersion) state.channels = state.channels.map(channel => String(channel.channel_id) === id ? data.channel : channel);
         if (older && state.videos.length) {
             state.nextBeforeId = Math.min(...state.videos.map(video => Number(video.message_id)));
             await loadTelegramChannelVideos(true);
@@ -406,6 +662,12 @@ function updateTelegramChannelJob(job) {
 
 function initTelegramChannels() {
     document.getElementById('telegramChannelAddForm')?.addEventListener('submit', addTelegramChannel);
+    document.getElementById('telegramChannelSettingsForm')?.addEventListener('submit', saveTelegramChannelSettings);
+    for (const id of ['telegramChannelTargetPath', 'telegramChannelSyncSince']) {
+        const input = document.getElementById(id);
+        input?.addEventListener('input', editTelegramChannelSettings);
+        input?.addEventListener('change', editTelegramChannelSettings);
+    }
     document.getElementById('telegramChannelsList')?.addEventListener('click', event => {
         const button = event.target.closest('[data-channel-action]');
         if (!button || button.disabled) return;
