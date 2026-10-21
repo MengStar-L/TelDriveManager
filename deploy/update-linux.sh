@@ -3,7 +3,7 @@ set -euo pipefail
 
 project=${1:-/opt/TelDriveManager}
 service=${2:-teldrive-manager.service}
-version=${3:-v1.1.0}
+version=${3:-v1.2.0}
 
 if [[ $EUID -ne 0 ]]; then
     echo 'Run this script with sudo.' >&2

@@ -1,0 +1,90 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Validate tag and version
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          [[ "$(tr -d '\r\n' < VERSION)" == "${RELEASE_TAG#v}" ]]
+          git merge-base --is-ancestor HEAD origin/main
+          test -s "deploy/release-notes/$RELEASE_TAG.md"
+          grep -Fq "version=\${3:-$RELEASE_TAG}" deploy/update-linux.sh
+
+  tests:
+    needs: validate
+    uses: ./.github/workflows/ci.yml
+
+  publish:
+    needs: tests
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      RELEASE_TAG: ${{ github.ref_name }}
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build source packages and checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir dist
+          git archive --format=zip --prefix=TelDriveManager/ HEAD -o "dist/TelDriveManager-$RELEASE_TAG.zip"
+          git archive --format=tar.gz --prefix=TelDriveManager/ HEAD -o "dist/TelDriveManager-$RELEASE_TAG.tar.gz"
+          cp deploy/update-linux.sh dist/update-linux.sh
+          python - <<'PY'
+          import os
+          import zipfile
+          from pathlib import PurePosixPath
+
+          tag = os.environ['RELEASE_TAG']
+          with zipfile.ZipFile(f'dist/TelDriveManager-{tag}.zip') as archive:
+              assert archive.testzip() is None, 'Invalid release archive'
+              names = set(archive.namelist())
+              for required in ('main.py', 'update_worker.py', 'requirements.txt', 'VERSION',
+                               'app/main.py', 'deploy/update-linux.py', 'deploy/update-linux.sh'):
+                  assert f'TelDriveManager/{required}' in names, f'Missing {required}'
+              assert archive.read('TelDriveManager/VERSION').decode().strip() == tag[1:]
+              forbidden = {'config.toml', 'config.bak.toml', '.env', 'pikpak_token.json',
+                           'venv', '.venv', 'downloads', 'telegram_relay', '__pycache__', '.git'}
+              for name in names:
+                  parts = PurePosixPath(name).parts
+                  assert parts[0] == 'TelDriveManager' and '..' not in parts, name
+                  assert not forbidden.intersection(parts[1:]), f'Private/runtime file: {name}'
+                  assert not name.endswith(('.db', '.db-wal', '.db-shm', '.session', '.log', '.pyc')), name
+          PY
+          (cd dist && sha256sum "TelDriveManager-$RELEASE_TAG.zip" "TelDriveManager-$RELEASE_TAG.tar.gz" update-linux.sh > SHA256SUMS)
+          (cd dist && sha256sum --check SHA256SUMS)
+      - name: Publish complete release
+        shell: bash
+        run: |
+          set -euo pipefail
+          if gh release view "$RELEASE_TAG" --json isDraft --jq '.isDraft' > /tmp/tdm-release-draft; then
+            [[ "$(cat /tmp/tdm-release-draft)" == true ]] || { echo 'Release already published; refusing to replace its assets.' >&2; exit 1; }
+          else
+            gh release create "$RELEASE_TAG" --verify-tag --draft \
+              --title "TelDriveManager $RELEASE_TAG" --notes-file "deploy/release-notes/$RELEASE_TAG.md"
+          fi
+          gh release upload "$RELEASE_TAG" dist/* --clobber
+          gh release edit "$RELEASE_TAG" --draft=false --latest

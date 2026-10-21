@@ -119,8 +119,8 @@ Linux/systemd 自动更新使用独立的临时 systemd 服务执行安装，由
 首次从没有自更新功能的版本升级时，可使用 Release 附带的脚本。它适用于以 root、systemd 和项目内 `venv` 或 `.venv` 部署的服务；准备失败不停止原服务，新版启动失败恢复旧版。配置、任务数据库、下载缓存、Telegram 会话均保留。
 
 ```bash
-curl -fL --retry 3 https://github.com/MengStar-L/TelDriveManager/releases/download/v1.1.3/update-linux.sh -o /tmp/tdm-update-v1.1.3.sh
-sudo bash /tmp/tdm-update-v1.1.3.sh /opt/TelDriveManager teldrive-manager.service v1.1.3
+curl -fL --retry 3 https://github.com/MengStar-L/TelDriveManager/releases/download/v1.2.0/update-linux.sh -o /tmp/tdm-update-v1.2.0.sh
+sudo bash /tmp/tdm-update-v1.2.0.sh /opt/TelDriveManager teldrive-manager.service v1.2.0
 ```
 
 按实际部署修改第二行的目录和服务名。脚本校验发布包 SHA-256，需要至少 6 GiB 空闲空间供初始解压；后续安装还会按配置检查磁盘保留值、依赖和备份容量。失败原因可从脚本输出的 `journalctl` 命令查看，恢复记录和备份不要手动删除。脚本按发布包更新源码，不修改 `.git` 元数据；后续推荐使用设置页继续更新。
