@@ -3,10 +3,11 @@
 import asyncio
 import json
 from datetime import datetime
-from typing import Any
+from typing import Annotated, Any
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
+from pydantic import BaseModel, ConfigDict, Field, StrictBool
 
 router = APIRouter(prefix="/api/t2td")
 
@@ -320,6 +321,77 @@ async def get_relay_jobs(limit: int = 200):
     normalized_limit = max(1, min(int(limit or 200), 500))
     jobs = await db.get_all_telegram_relay_jobs(limit=normalized_limit)
     return {"items": jobs, "count": len(jobs)}
+
+
+class ChannelAddRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    reference: str = Field(min_length=1, max_length=512, strict=True)
+
+
+class ChannelUpdateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    enabled: StrictBool
+
+
+class ChannelScanRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    older: StrictBool = False
+
+
+class ChannelDownloadRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    message_ids: list[Annotated[int, Field(strict=True, gt=0, le=2147483647)]] = Field(min_length=1, max_length=100)
+
+
+async def _catalog_call(method: str, *args, **kwargs):
+    from app.modules.tel2teldrive.catalog import CatalogError
+
+    service, _, _, log = _get_deps()
+    try:
+        return await getattr(service.video_catalog, method)(*args, **kwargs)
+    except CatalogError as exc:
+        retry_after = getattr(exc, "retry_after", None)
+        headers = {"Retry-After": str(retry_after)} if retry_after else None
+        raise HTTPException(status_code=exc.status_code, detail=exc.message, headers=headers) from exc
+    except Exception as exc:
+        log.error(f"频道视频操作失败 [{method}]: {type(exc).__name__}")
+        raise HTTPException(status_code=500, detail="频道视频操作失败，请稍后重试或查看服务日志") from exc
+
+
+@router.get("/channels")
+async def list_video_channels():
+    return await _catalog_call("list_channels")
+
+
+@router.post("/channels")
+async def add_video_channel(payload: ChannelAddRequest):
+    return {"channel": await _catalog_call("add_channel", payload.reference)}
+
+
+@router.patch("/channels/{channel_id}")
+async def update_video_channel(channel_id: int, payload: ChannelUpdateRequest):
+    return {"channel": await _catalog_call("update_channel", channel_id, payload.enabled)}
+
+
+@router.delete("/channels/{channel_id}")
+async def remove_video_channel(channel_id: int):
+    return await _catalog_call("remove_channel", channel_id)
+
+
+@router.get("/channels/{channel_id}/videos")
+async def list_channel_videos(channel_id: int, before_id: int = Query(0, ge=0, le=2147483647),
+                              limit: int = Query(50, ge=1, le=100)):
+    return await _catalog_call("list_videos", channel_id, before_id=before_id, limit=limit)
+
+
+@router.post("/channels/{channel_id}/scan")
+async def scan_channel_videos(channel_id: int, payload: ChannelScanRequest):
+    return await _catalog_call("scan_channel", channel_id, older=payload.older)
+
+
+@router.post("/channels/{channel_id}/download")
+async def download_channel_videos(channel_id: int, payload: ChannelDownloadRequest):
+    return await _catalog_call("enqueue_videos", channel_id, payload.message_ids)
 
 
 @router.post("/relay-jobs/{job_id}/retry")

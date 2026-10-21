@@ -54,6 +54,7 @@ from telethon.tl.types import (
 )
 
 from app.modules.tel2teldrive.relay import TelegramRelayManager
+from app.modules.tel2teldrive.catalog import TelegramVideoCatalog
 from app.config import normalize_telegram_channel_id, normalize_teldrive_target_path, telegram_channel_ids_equivalent
 
 BASE_DIR = Path(__file__).parent
@@ -2452,6 +2453,8 @@ class Tel2TelDriveService:
         # 回源复用主监听客户端：注入“取当前主客户端”的回调（主客户端每次重连会重建，
         # 用 getter 而非一次性引用，保证重载后的任务重试也能拿到活的客户端）。
         self.relay_manager.bind_client_getter(lambda: self.client)
+        self.video_catalog = TelegramVideoCatalog(
+            lambda: self.client, lambda: config_store.runtime(), self.relay_manager, logger, broker)
         self._running = False
 
     def _start_sync_deletions(self, client: TelegramClient, config: RuntimeConfig):
@@ -2593,6 +2596,7 @@ class Tel2TelDriveService:
                 logger.info("实时监听已启动，初始文件映射将在后台构建")
                 self.initial_mapping_task = asyncio.create_task(self._run_initial_mapping(self.client, config))
                 await self.relay_manager.start(self.client, config)
+                await self.video_catalog.start()
 
                 if config.sync_enabled:
 
@@ -2786,6 +2790,7 @@ class Tel2TelDriveService:
                 await self.sync_restart_task
             self.sync_restart_task = None
 
+        await self.video_catalog.stop()
         await self.relay_manager.stop()
 
         if self.client:

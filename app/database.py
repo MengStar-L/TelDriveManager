@@ -168,6 +168,9 @@ async def init_db():
     await _ensure_column(conn, "telegram_relay_jobs", "upload_committed", "INTEGER DEFAULT 0")
     await _ensure_column(conn, "telegram_relay_jobs", "upload_result_json", "TEXT DEFAULT '{}'")
     await _ensure_column(conn, "telegram_relay_jobs", "source_deleted", "INTEGER DEFAULT 0")
+    await _ensure_column(conn, "telegram_relay_jobs", "source_kind", "TEXT NOT NULL DEFAULT 'relay'")
+    await _ensure_column(conn, "telegram_relay_jobs", "source_title", "TEXT NOT NULL DEFAULT ''")
+    await _ensure_column(conn, "telegram_relay_jobs", "source_document_id", "TEXT NOT NULL DEFAULT ''")
     await conn.execute("""UPDATE telegram_relay_jobs
         SET upload_committed = 1, upload_result_json = json_object('success', json('true'),
             'data', json_object('id', teldrive_file_id))
@@ -603,15 +606,18 @@ async def add_telegram_relay_job(
     file_size: int = 0,
     mime_type: str = "",
     local_path: str = "",
+    source_kind: str = "relay",
+    source_title: str = "",
+    source_document_id: str = "",
 ) -> dict:
     conn = await _get_conn()
     await conn.execute(
         """
         INSERT OR IGNORE INTO telegram_relay_jobs (
             job_id, source_channel_id, source_message_id, file_name,
-            file_size, mime_type, local_path
+            file_size, mime_type, local_path, source_kind, source_title, source_document_id
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             job_id,
@@ -621,6 +627,9 @@ async def add_telegram_relay_job(
             max(0, int(file_size or 0)),
             str(mime_type or ""),
             str(local_path or ""),
+            source_kind,
+            str(source_title or ""),
+            str(source_document_id or ""),
         ),
     )
     await conn.commit()

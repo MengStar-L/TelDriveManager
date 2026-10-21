@@ -432,13 +432,36 @@ class TelegramRelayManager:
         )
 
     async def enqueue_message(self, _main_client: Any, config: Any, msg: Any, file_info: dict[str, Any]) -> dict:
+        return await self._enqueue_source(config, msg, file_info,
+                                          channel_id=int(getattr(config, "telegram_channel_id") or 0))
+
+    async def enqueue_channel_video(self, config: Any, msg: Any, file_info: dict[str, Any], *,
+                                    source_channel_id: int, source_title: str = "") -> dict:
+        """用户选择的频道视频只复制媒体，永远不删除源频道消息。"""
+        if not bool(getattr(config, "relay_enabled", False)):
+            raise ValueError("请先在回源与频道设置中启用下载上传功能")
+        if not source_channel_id or int(getattr(msg, "id", 0) or 0) <= 0:
+            raise ValueError("频道或消息 ID 无效")
+        document = getattr(msg, "document", None)
+        if document is None or not getattr(document, "id", None):
+            raise ValueError("源消息没有可下载的视频文件")
+        if getattr(msg, "ttl_period", None) or getattr(getattr(msg, "media", None), "ttl_seconds", None):
+            raise ValueError("不支持限时或阅后即焚媒体")
+        if int(file_info.get("size") or 0) <= 0:
+            raise ValueError("无法确认视频大小，未开始下载")
+        return await self._enqueue_source(config, msg, file_info, channel_id=int(source_channel_id),
+                                          source_kind="channel", source_title=source_title,
+                                          source_document_id=str(document.id))
+
+    async def _enqueue_source(self, config: Any, msg: Any, file_info: dict[str, Any], *, channel_id: int,
+                              source_kind: str = "relay", source_title: str = "",
+                              source_document_id: str = "") -> dict:
         self.config = config
         self._concurrency = max(1, int(getattr(config, "relay_concurrency", 1) or 1))
         self._semaphore.resize(self._concurrency)
         self._stopped = False
 
         message_id = int(getattr(msg, "id"))
-        channel_id = int(getattr(config, "telegram_channel_id") or 0)
         job_id = make_relay_job_id(channel_id, message_id)
         local_path = str(self._build_local_file_path(config, job_id, file_info["name"]))
         job = await db.add_telegram_relay_job(
@@ -449,7 +472,12 @@ class TelegramRelayManager:
             file_size=int(file_info.get("size") or 0),
             mime_type=file_info.get("mime_type", ""),
             local_path=local_path,
+            source_kind=source_kind,
+            source_title=source_title,
+            source_document_id=source_document_id,
         )
+        if source_kind == "channel" and job.get("source_kind", "relay") != "channel":
+            raise ValueError("该消息已有自动回源任务，请在回源任务列表中管理")
         await self._broadcast_job(job)
         if str(job.get("status") or "pending") in ACTIVE_STATUSES:
             await self._schedule(job_id)
@@ -691,6 +719,14 @@ class TelegramRelayManager:
                 message = await client.get_messages(int(job["source_channel_id"]), ids=int(job["source_message_id"]))
                 if message is None:
                     raise RuntimeError("Source Telegram message is missing")
+                if job.get("source_kind") == "channel":
+                    document = getattr(message, "document", None)
+                    if document is None:
+                        raise RuntimeError("源频道消息已删除或视频不再可访问")
+                    if str(getattr(document, "id", "")) != str(job.get("source_document_id") or ""):
+                        raise RuntimeError("源视频已被替换，请重新获取列表并选择")
+                    if getattr(message, "ttl_period", None) or getattr(getattr(message, "media", None), "ttl_seconds", None):
+                        raise RuntimeError("源消息已变为限时媒体，下载已停止")
                 actual_size = int(getattr(getattr(message, "file", None), "size", 0) or expected_size)
                 if actual_size <= 0:
                     raise RuntimeError("Cannot verify Telegram file size; download has not started")
@@ -739,7 +775,8 @@ class TelegramRelayManager:
             job_id, status="cleaning", teldrive_file_id=file_id or "", upload_id=upload_id)
         # Local space can be reclaimed even if the source deletion API is unavailable.
         await self._cleanup_local_path(str(path), job_id=job_id)
-        if not job.get("source_deleted"):
+        # 此标记落库，保证重启/失败恢复后仍只清理本地缓存。
+        if job.get("source_kind", "relay") == "relay" and not job.get("source_deleted"):
             from app.modules.tel2teldrive.service import delete_telegram_messages_with_audit
             source_deleted = await delete_telegram_messages_with_audit(
                 client, config, [int(job["source_message_id"])], reason="relay_source_after_upload",
@@ -784,7 +821,7 @@ class TelegramRelayManager:
         # 优先走 bot 池并行下载（大文件）；不可用/失败则回退主客户端单连接下载
         used_pool = False
         pool = self._bot_pool
-        if pool is not None and pool.usable() and file_size >= MULTIBOT_MIN_SIZE:
+        if job.get("source_kind", "relay") == "relay" and pool is not None and pool.usable() and file_size >= MULTIBOT_MIN_SIZE:
             want = max(1, int(getattr(self.config, "relay_download_connections", 6) or 6))
 
             def report_bots(n: int):
@@ -978,7 +1015,7 @@ class TelegramRelayManager:
             action="auto_add",
             file_id=file_id,
             file_name=str(job.get("file_name") or file_id),
-            reason="telegram_relay_reupload",
+            reason="telegram_channel_download" if job.get("source_kind") == "channel" else "telegram_relay_reupload",
             message_ids=message_ids,
             file_size=int(job.get("file_size") or 0),
         )

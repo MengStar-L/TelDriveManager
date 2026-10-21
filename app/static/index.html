@@ -730,36 +730,39 @@
         .app-toast.warning { background: rgba(146, 64, 14, 0.96); }
         .app-toast i { font-size: 18px; }
 
-        .pikpak-account-layout { display: grid; grid-template-columns: 1fr; gap: 18px; align-items: start; }
-        .pikpak-account-add-panel { overflow: hidden; border-color: rgba(37, 99, 235, 0.16); background: linear-gradient(180deg, #ffffff 0%, #f8fbff 100%); }
-        .pikpak-account-add-panel .card-header { background: linear-gradient(90deg, rgba(37, 99, 235, 0.09), rgba(20, 184, 166, 0.07)); }
-        .pikpak-account-add-panel .card-body { display: grid; grid-template-columns: minmax(260px, 0.55fr) minmax(520px, 1fr) auto; gap: 14px; align-items: center; }
-        .pikpak-account-add-panel .form-group { display: flex; flex-direction: row; align-items: center; gap: 10px; min-width: 0; }
-        .pikpak-account-add-panel .form-group label { flex: 0 0 auto; min-width: 74px; white-space: nowrap; }
-        .pikpak-account-add-panel .form-group .form-input,
-        .pikpak-account-add-panel .form-group .segmented-control { flex: 1 1 auto; min-width: 0; }
-        .pikpak-account-add-panel .field-grid { margin-top: 0 !important; }
-        .pikpak-account-add-panel .field-grid.cols-1 { grid-template-columns: repeat(2, minmax(180px, 1fr)); }
-        .pikpak-account-add-panel #pikpakAccountPasswordFields { grid-column: 1 / span 2; grid-template-columns: repeat(2, minmax(240px, 1fr)); }
-        .pikpak-account-add-panel #pikpakAccountTokenFields { grid-column: 1 / span 2; grid-template-columns: 1fr; }
-        .pikpak-account-add-panel #pikpakAddAccountBtn { min-width: 132px; height: 44px; align-self: end; }
-        .pikpak-account-pool-panel { display: grid; gap: 14px; padding: 6px 2px 0; }
-        .pikpak-account-pool-body { display: grid; gap: 14px; }
-        .pikpak-account-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(680px, 860px)); justify-content: start; gap: 14px; align-items: stretch; }
-        .pikpak-account-list .log-empty { grid-column: 1 / -1; }
-        .pikpak-account-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 0; padding: 0 2px; }
-        .pikpak-account-card { position: relative; display: flex; flex-direction: column; min-height: 116px; border: 1px solid rgba(148, 163, 184, 0.28); border-radius: 10px; background: linear-gradient(180deg, #ffffff 0%, #f9fbff 100%); padding: 16px; overflow: visible; transition: border-color 0.2s ease, box-shadow 0.2s ease, transform 0.2s ease; }
-        .pikpak-account-card::before { content: ""; position: absolute; inset: 0 0 auto; height: 4px; border-radius: 10px 10px 0 0; background: linear-gradient(90deg, #2563eb, #14b8a6); }
-        .pikpak-account-card.is-disabled { background: #f8fafc; opacity: 0.86; }
-        .pikpak-account-card.is-disabled::before { background: linear-gradient(90deg, #94a3b8, #cbd5e1); }
-        .pikpak-account-card.health-failed::before { background: linear-gradient(90deg, #ef4444, #f97316); }
-        .pikpak-account-card.has-errors::before { background: linear-gradient(90deg, #ef4444, #f59e0b); }
-        .pikpak-account-card:hover { border-color: rgba(37, 99, 235, 0.34); box-shadow: 0 14px 32px rgba(15, 23, 42, 0.08); transform: translateY(-1px); }
-        .pikpak-account-head { position: relative; z-index: 1; display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; margin-bottom: 8px; padding-top: 2px; }
-        .pikpak-account-title { font-weight: 700; color: var(--text-primary); display: flex; align-items: center; gap: 10px; min-width: 0; flex-wrap: wrap; }
-        .pikpak-account-title > i { display: inline-flex; align-items: center; justify-content: center; width: 34px; height: 34px; border-radius: 10px; background: rgba(37, 99, 235, 0.1); color: #2563eb; font-size: 20px; flex: 0 0 auto; }
-        .pikpak-account-card.is-disabled .pikpak-account-title > i { background: rgba(148, 163, 184, 0.14); color: #64748b; }
-        .pikpak-account-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        #page-pikpakAccounts { height: auto; min-height: 100%; padding-bottom: 20px; }
+        .pikpak-account-layout { display: grid; grid-template-columns: 340px minmax(0, 1fr); gap: 20px; align-items: start; }
+        .pikpak-account-layout > .card { min-width: 0; margin: 0; }
+        .pikpak-account-layout .card-header { gap: 12px; padding: 18px 20px; }
+        .pikpak-account-add-panel .card-body { display: grid; gap: 20px; padding: 20px; }
+        .pikpak-account-add-panel .form-group { min-width: 0; margin: 0; }
+        .pikpak-account-add-panel .field-grid { grid-template-columns: minmax(0, 1fr); gap: 18px; margin: 0; }
+        .pikpak-account-add-panel .segmented-control { padding: 4px; gap: 4px; background: var(--bg-input); border-radius: var(--radius-md); box-shadow: none; }
+        .pikpak-account-add-panel .segmented-btn { padding: 10px 8px; font-size: 13px; gap: 6px; border-radius: var(--radius-sm); }
+        .pikpak-account-add-panel .segmented-btn.active { box-shadow: 0 2px 6px rgba(15, 23, 42, 0.06); }
+        .pikpak-form-actions { padding-top: 18px; border-top: 1px solid var(--border); }
+        .pikpak-form-actions .btn { width: 100%; min-height: 42px; }
+        .pikpak-field-optional { color: var(--text-dim); font-weight: 400; margin-left: 4px; }
+        .pikpak-account-pool-body { display: grid; gap: 20px; padding: 20px; }
+        .pikpak-account-heading { min-width: 0; }
+        .pikpak-account-heading p { margin-top: 6px; font-size: 12px; line-height: 1.5; color: var(--text-secondary); }
+        .pikpak-account-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; padding-bottom: 18px; border-bottom: 1px solid var(--border); }
+        .pikpak-scheduler-control { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+        .pikpak-scheduler-control label { font-size: 13px; font-weight: 500; color: var(--text-secondary); }
+        .pikpak-scheduler-control .form-input { width: 70px; padding: 8px 10px; }
+        .pikpak-account-count { font-size: 12px; color: var(--text-secondary); }
+        .pikpak-account-list { display: grid; grid-template-columns: minmax(0, 1fr); gap: 14px; }
+        .pikpak-account-card { display: flex; flex-direction: column; min-width: 0; border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--bg-card); padding: 18px; gap: 16px; }
+        .pikpak-account-card.is-disabled { background: var(--bg-input); }
+        .pikpak-account-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; min-width: 0; }
+        .pikpak-account-title { font-weight: 600; color: var(--text-primary); display: flex; align-items: center; gap: 12px; min-width: 0; }
+        .pikpak-account-title > i { display: inline-flex; align-items: center; justify-content: center; width: 38px; height: 38px; border-radius: var(--radius-md); background: var(--accent-light); color: var(--accent); font-size: 20px; flex: 0 0 auto; }
+        .pikpak-account-card.is-disabled .pikpak-account-title > i { background: var(--border); color: var(--text-secondary); }
+        .pikpak-account-identity { min-width: 0; }
+        .pikpak-account-name { font-size: 14px; line-height: 1.5; overflow-wrap: anywhere; }
+        .pikpak-account-login-label { margin-top: 3px; font-size: 12px; font-weight: 400; color: var(--text-secondary); }
+        .pikpak-account-head > .wizard-status-badge { flex-shrink: 0; padding: 5px 9px; }
+        .pikpak-account-meta { display: flex; gap: 8px; flex-wrap: wrap; min-width: 0; }
         .pikpak-vip-pill { display: inline-flex; align-items: center; gap: 5px; padding: 5px 10px; border-radius: 999px; background: rgba(240, 253, 250, 0.9); border: 1px solid rgba(20, 184, 166, 0.22); color: #0f766e; font-size: 12px; font-weight: 700; line-height: 1; white-space: nowrap; }
         .pikpak-vip-pill i { font-size: 13px; }
         .pikpak-vip-pill.is-vip { background: #fff7ed; border-color: rgba(245, 158, 11, 0.28); color: #92400e; }
@@ -769,20 +772,40 @@
         .pikpak-health-pill.is-available { background: rgba(240, 253, 244, 0.9); border-color: rgba(34, 197, 94, 0.24); color: #15803d; }
         .pikpak-health-pill.is-error { background: rgba(254, 242, 242, 0.92); border-color: rgba(239, 68, 68, 0.26); color: #b91c1c; }
         .pikpak-health-pill.is-pending { background: rgba(248, 250, 252, 0.94); border-color: rgba(148, 163, 184, 0.28); color: #475569; }
-        .pikpak-account-actions { position: relative; z-index: 2; display: flex; gap: 8px; flex-wrap: nowrap; margin-top: 0; overflow: visible; scrollbar-width: none; }
-        .pikpak-account-actions::-webkit-scrollbar { display: none; }
-        .pikpak-account-actions .btn { cursor: pointer; z-index: 1; }
-        .pikpak-account-actions .btn:hover { z-index: 3; }
-        .pikpak-account-actions .btn::after { background: linear-gradient(110deg, transparent 0%, rgba(37, 99, 235, 0.12) 45%, transparent 100%); }
+        .pikpak-account-meta > span { max-width: 100%; white-space: normal; line-height: 1.4; overflow-wrap: anywhere; }
+        .pikpak-account-meta i { flex-shrink: 0; }
+        .pikpak-health-detail { margin-top: -6px; color: #b91c1c; font-size: 12px; line-height: 1.6; overflow-wrap: anywhere; }
+        .pikpak-account-actions { display: flex; justify-content: space-between; align-items: center; gap: 8px 16px; flex-wrap: wrap; padding-top: 14px; border-top: 1px solid var(--border); }
+        .pikpak-account-action-group { display: flex; gap: 6px; flex-wrap: wrap; }
+        .pikpak-account-actions .btn { padding: 7px 10px; font-size: 12px; }
         .pikpak-error-chip { color: #b91c1c; background: rgba(239, 68, 68, 0.1); border: 1px solid rgba(239, 68, 68, 0.22); }
-        .pikpak-errors-modal { position: fixed; inset: 0; z-index: 1250; display: none; align-items: center; justify-content: center; background: rgba(15, 23, 42, 0.28); backdrop-filter: blur(8px); padding: 24px; }
+        .pikpak-errors-modal { position: fixed; inset: 0; z-index: 1250; display: none; align-items: center; justify-content: center; background: rgba(15, 23, 42, 0.28); backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px); padding: 24px; }
         .pikpak-errors-modal.show { display: flex; }
-        .pikpak-errors-dialog { width: min(760px, 100%); max-height: min(720px, 90vh); display: flex; flex-direction: column; background: var(--card); border: 1px solid var(--border); border-radius: 8px; box-shadow: 0 24px 70px rgba(15, 23, 42, 0.2); overflow: hidden; }
-        .pikpak-errors-header { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 16px 18px; border-bottom: 1px solid var(--border); }
-        .pikpak-errors-list { overflow: auto; padding: 12px 18px 18px; display: grid; gap: 10px; }
-        .pikpak-error-row { border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; background: #fff; }
-        .pikpak-error-row strong { display: block; color: var(--text-primary); margin-bottom: 4px; }
-        .pikpak-error-row p { margin: 4px 0 0; color: var(--text-secondary); font-size: 12px; word-break: break-all; }
+        .pikpak-errors-dialog { width: min(720px, 100%); max-height: min(720px, calc(100dvh - 48px)); display: flex; flex-direction: column; min-width: 0; background: var(--bg-card); border: 1px solid var(--border); border-radius: var(--radius-lg); box-shadow: 0 24px 70px rgba(15, 23, 42, 0.2); overflow: hidden; }
+        .pikpak-errors-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; padding: 20px 24px; border-bottom: 1px solid var(--border); flex-shrink: 0; }
+        .pikpak-errors-heading { display: flex; align-items: flex-start; gap: 12px; min-width: 0; }
+        .pikpak-errors-heading > i { display: grid; place-items: center; width: 40px; height: 40px; flex-shrink: 0; border-radius: var(--radius-md); background: #fef2f2; color: #dc2626; font-size: 22px; }
+        .pikpak-errors-heading > div { min-width: 0; }
+        .pikpak-errors-heading h3 { font-size: 15px; font-weight: 600; line-height: 1.5; }
+        .pikpak-errors-account { margin-top: 4px; font-size: 12px; color: var(--text-secondary); line-height: 1.5; overflow-wrap: anywhere; max-height: 72px; overflow-y: auto; }
+        .pikpak-errors-close { width: 36px; height: 36px; flex: 0 0 36px; padding: 0; }
+        .pikpak-errors-list { min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 20px 24px; display: grid; gap: 12px; }
+        .pikpak-error-row { min-width: 0; border: 1px solid var(--border); border-radius: var(--radius-md); padding: 16px; background: var(--bg-card); }
+        .pikpak-error-row-header { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px; }
+        .pikpak-error-stage { display: inline-flex; align-items: center; gap: 6px; color: #b91c1c; font-size: 13px; font-weight: 600; overflow-wrap: anywhere; min-width: 0; }
+        .pikpak-error-stage i { flex-shrink: 0; }
+        .pikpak-error-time { color: var(--text-secondary); font-size: 12px; overflow-wrap: anywhere; }
+        .pikpak-error-message { margin-top: 12px; color: var(--text-primary); font-size: 13px; line-height: 1.7; white-space: pre-wrap; overflow-wrap: anywhere; }
+        .pikpak-error-source { margin-top: 12px; padding: 10px 12px; background: var(--bg-input); border-radius: var(--radius-sm); }
+        .pikpak-error-source dt { color: var(--text-secondary); font-size: 11px; margin-bottom: 6px; }
+        .pikpak-error-source dd { color: var(--text-secondary); font-family: ui-monospace, monospace; font-size: 12px; line-height: 1.6; overflow-wrap: anywhere; user-select: text; }
+        .pikpak-errors-footer { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px; padding: 16px 24px; border-top: 1px solid var(--border); flex-shrink: 0; }
+        .pikpak-errors-summary { font-size: 12px; color: var(--text-secondary); }
+        .pikpak-errors-dialog .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+        .pikpak-errors-dialog :focus-visible, #page-pikpakAccounts button:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+        .pikpak-empty-state { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px; padding: 36px 16px; text-align: center; color: var(--text-secondary); font-size: 13px; line-height: 1.6; overflow-wrap: anywhere; min-width: 0; }
+        .pikpak-empty-state > i { font-size: 28px; color: var(--text-dim); }
+        .pikpak-empty-state strong { color: var(--text-primary); font-weight: 500; }
         .legacy-pikpak-settings-card { display: none !important; }
         .update-card { grid-column: span 2/span 2; }
         .update-status-row { display:flex; align-items:center; justify-content:space-between; gap:16px; flex-wrap:wrap; }
@@ -795,22 +818,26 @@
         .update-release-notes { margin-top:12px; max-height:140px; overflow:auto; white-space:pre-wrap; word-break:break-word; color:var(--text-dim); font-size:12px; line-height:1.55; }
         .update-actions { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
         @media (max-width: 1180px) {
-            .pikpak-account-add-panel .card-body { grid-template-columns: 1fr; }
-            .pikpak-account-add-panel #pikpakAccountPasswordFields,
-            .pikpak-account-add-panel #pikpakAccountTokenFields { grid-column: auto; }
-            .pikpak-account-add-panel #pikpakAddAccountBtn { width: 100%; }
-            .pikpak-account-list { grid-template-columns: minmax(0, 1fr); }
-            .pikpak-account-actions { flex-wrap: wrap; overflow-x: visible; }
+            .pikpak-account-layout { grid-template-columns: minmax(0, 1fr); }
+            .pikpak-account-add-panel .field-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+            .pikpak-account-add-panel #pikpakAccountTokenFields { grid-template-columns: minmax(0, 1fr); }
+            .pikpak-form-actions { display: flex; justify-content: flex-end; }
+            .pikpak-form-actions .btn { width: auto; }
         }
         @media (max-width: 720px) {
             .settings-row { grid-template-columns: 1fr; }
             .settings-row > .card { grid-column: auto !important; }
-            .pikpak-account-add-panel .field-grid.cols-1,
-            .pikpak-account-add-panel #pikpakAccountPasswordFields { grid-template-columns: 1fr; }
-            .pikpak-account-list { grid-template-columns: 1fr; }
-            .pikpak-account-toolbar { align-items: flex-start; flex-direction: column; }
-            .pikpak-account-add-panel .form-group { align-items: flex-start; flex-direction: column; }
-            .pikpak-account-add-panel .form-group label { min-width: 0; }
+            .pikpak-account-add-panel .field-grid { grid-template-columns: minmax(0, 1fr); }
+            .pikpak-account-layout .card-header { padding: 16px; }
+            .pikpak-account-add-panel .card-body, .pikpak-account-pool-body { padding: 16px; }
+            .pikpak-account-card { padding: 14px; }
+            .pikpak-form-actions .btn { width: 100%; }
+            .pikpak-account-head { flex-wrap: wrap; }
+            .pikpak-account-actions { align-items: flex-start; }
+            .pikpak-account-title > i { width: 32px; height: 32px; }
+            .pikpak-errors-modal { padding: 12px; }
+            .pikpak-errors-dialog { max-height: calc(100dvh - 24px); }
+            .pikpak-errors-header, .pikpak-errors-list, .pikpak-errors-footer { padding: 16px; }
         }
 
         .progress-card {
@@ -1281,6 +1308,88 @@
 
 
 
+        /* Telegram channel catalogue shares the relay account and transfer queue. */
+        .telegram-module-heading, .telegram-channel-video-heading { gap: 12px; flex-wrap: wrap; }
+        .telegram-module-body { padding: 16px 20px; }
+        .telegram-destination { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; font-size: 13px; color: var(--text-secondary); }
+        .telegram-destination > span { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+        .telegram-destination strong { color: var(--text-primary); font-weight: 500; }
+        .telegram-module-tabs { margin-top: 16px; max-width: 460px; padding: 4px; border-radius: 8px; background: var(--bg-input); }
+        .telegram-module-tabs .segmented-btn { padding: 10px 12px; border-radius: 6px; font-size: 13px; }
+        .telegram-module-tabs .segmented-btn.active { box-shadow: 0 1px 4px rgba(15,23,42,.1); }
+        .telegram-channel-layout { display: grid; grid-template-columns: minmax(230px, 290px) minmax(0, 1fr); gap: 20px; align-items: start; }
+        .telegram-channel-layout > .card { min-width: 0; margin-bottom: 0; }
+        .telegram-channel-layout .card-header { padding: 16px 18px; }
+        .telegram-channel-layout .card-body { padding: 18px; }
+        .telegram-channel-hint { font-size: 12px; line-height: 1.65; color: var(--text-secondary); overflow-wrap: anywhere; }
+        .telegram-channel-add-form { display: grid; gap: 10px; }
+        .telegram-channel-add-form > label { font-size: 13px; font-weight: 600; }
+        .telegram-channel-add-form .form-input { min-width: 0; padding: 10px 12px; font-size: 12px; }
+        .telegram-channel-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+        .telegram-channel-actions .btn { padding: 8px 10px; }
+        .telegram-channel-actions .telegram-channel-remove { color: #b91c1c; }
+        .telegram-icon-button { width: 32px; height: 32px; padding: 0; }
+        .telegram-channels-list { display: grid; gap: 10px; margin-top: 20px; }
+        .telegram-channel-item { border: 1px solid var(--border); border-radius: 10px; padding: 12px; min-width: 0; }
+        .telegram-channel-item.active { border-color: #93c5fd; background: var(--accent-light); }
+        .telegram-channel-open { display: block; width: 100%; text-align: left; border: 0; background: transparent; color: var(--text-primary); font: inherit; cursor: pointer; }
+        .telegram-channel-open strong { display: block; font-size: 13px; line-height: 1.55; overflow-wrap: anywhere; }
+        .telegram-channel-open:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; border-radius: 3px; }
+        .telegram-channel-item-meta { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin: 8px 0; }
+        .telegram-channel-badge { display: inline-flex; align-items: center; gap: 4px; padding: 3px 7px; border-radius: 5px; background: #f1f5f9; color: #475569; font-size: 11px; line-height: 1.4; }
+        .telegram-channel-badge.success { background: #ecfdf5; color: #047857; }
+        .telegram-channel-badge.warning { background: #fffbeb; color: #92400e; }
+        .telegram-channel-badge.primary { background: #eff6ff; color: #1d4ed8; }
+        .telegram-channel-badge.error { background: #fef2f2; color: #b91c1c; }
+        .telegram-channel-item-error { color: #b91c1c; margin-bottom: 8px; }
+        .telegram-channel-video-heading > div:first-child { min-width: 0; }
+        .telegram-channel-video-heading h3 { overflow-wrap: anywhere; line-height: 1.5; }
+        .telegram-channel-video-heading h3 i { flex-shrink: 0; }
+        .telegram-channel-video-heading .telegram-channel-hint { margin-top: 5px; }
+        .telegram-channel-explanation { padding: 12px 14px; background: var(--bg-input); border: 1px solid var(--border); border-radius: 8px; }
+        .telegram-channel-notice { margin-top: 12px; padding: 10px 12px; border-radius: 8px; background: #eff6ff; color: #1d4ed8; font-size: 12px; line-height: 1.6; overflow-wrap: anywhere; }
+        .telegram-channel-notice.error { background: #fef2f2; color: #b91c1c; }
+        .telegram-channel-selection { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin: 16px 0; padding-bottom: 14px; border-bottom: 1px solid var(--border); }
+        .telegram-channel-select-label { display: inline-flex; align-items: center; gap: 8px; font-size: 12px; cursor: pointer; }
+        .telegram-channel-select-label input, .telegram-video-check { width: 16px; height: 16px; accent-color: var(--accent); flex-shrink: 0; cursor: pointer; }
+        #telegramVideosDownloadBtn { margin-left: auto; }
+        .telegram-video-list { display: grid; gap: 12px; }
+        .telegram-video-row { display: grid; grid-template-columns: 18px minmax(0, 1fr); gap: 12px; padding: 14px; border: 1px solid var(--border); border-radius: 10px; }
+        .telegram-video-row.selected { border-color: #93c5fd; background: #f8fbff; }
+        .telegram-video-check { margin-top: 3px; }
+        .telegram-video-content { min-width: 0; }
+        .telegram-video-title { display: block; font-size: 13px; font-weight: 600; line-height: 1.6; overflow-wrap: anywhere; cursor: pointer; }
+        .telegram-video-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; margin-top: 7px; font-size: 11px; color: var(--text-secondary); }
+        .telegram-video-caption { margin-top: 8px; font-size: 12px; line-height: 1.65; color: var(--text-secondary); white-space: pre-wrap; overflow-wrap: anywhere; max-height: 7em; overflow-y: auto; }
+        .telegram-video-footer { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 10px; }
+        .telegram-video-footer a { color: var(--accent); font-size: 12px; text-decoration: none; }
+        .telegram-video-footer a:hover { text-decoration: underline; }
+        .telegram-video-error { color: #b91c1c; margin-top: 8px; }
+        .telegram-channel-empty { padding: 30px 12px; text-align: center; color: var(--text-secondary); font-size: 13px; line-height: 1.7; overflow-wrap: anywhere; }
+        .telegram-channel-empty i { display: block; font-size: 28px; margin-bottom: 10px; color: var(--text-dim); }
+        .telegram-channel-load-more { display: flex; flex-wrap: wrap; justify-content: center; align-items: center; gap: 12px; margin-top: 16px; }
+        #telegramChannelsPanel [hidden], #telegramTasksPanel[hidden], #telegramChannelsPanel[hidden] { display: none !important; }
+        @media (max-width: 1080px) {
+            .telegram-channel-layout { grid-template-columns: minmax(0, 1fr); }
+            .telegram-channels-list { grid-template-columns: repeat(auto-fit, minmax(min(100%, 230px), 1fr)); }
+            .telegram-channel-add-form { grid-template-columns: minmax(0, 1fr) auto; align-items: center; }
+            .telegram-channel-add-form > label, .telegram-channel-add-form > p { grid-column: 1 / -1; }
+        }
+        @media (max-width: 620px) {
+            #page-telegramrelay .card-header { padding: 14px; }
+            #page-telegramrelay .card-body { padding: 14px !important; }
+            .telegram-module-heading h3 { font-size: 14px; line-height: 1.5; }
+            .telegram-module-tabs { gap: 3px; }
+            .telegram-module-tabs .segmented-btn { padding: 9px 5px; gap: 5px; font-size: 12px; line-height: 1.45; }
+            .telegram-module-tabs .segmented-btn span { overflow-wrap: anywhere; }
+            .telegram-channel-add-form { grid-template-columns: minmax(0, 1fr); }
+            .telegram-channel-selection { gap: 10px 8px; }
+            .telegram-channel-selection > .btn { font-size: 12px; padding: 8px 10px; }
+            #telegramVideosDownloadBtn { width: 100%; margin-left: 0; }
+            .telegram-video-row { padding: 11px; gap: 8px; }
+            .telegram-channel-layout { gap: 14px; }
+            #page-telegramrelay .page-actions .btn { white-space: normal; line-height: 1.4; }
+        }
     </style>
 
 
@@ -1326,7 +1435,7 @@
                 <i class="ph ph-hard-drives"></i>
             </div>
 
-            <div class="nav-item" data-page="telegramrelay" data-tooltip="Telegram 回源监控" onclick="switchPage('telegramrelay', { animated: true, source: 'user' })">
+            <div class="nav-item" data-page="telegramrelay" data-tooltip="Telegram 回源与频道" onclick="switchPage('telegramrelay', { animated: true, source: 'user' })">
                 <i class="ph ph-cloud-arrow-down"></i>
             </div>
 
@@ -1645,10 +1754,36 @@
 
                 <!-- Telegram Relay Monitor -->
                 <div class="page" id="page-telegramrelay">
+                    <div class="card telegram-module-card">
+                        <div class="card-header telegram-module-heading">
+                            <h3><i class="ph ph-telegram-logo"></i> Telegram 回源与频道</h3>
+                            <div class="telegram-channel-actions">
+                                <button class="btn btn-ghost btn-sm" type="button" onclick="openTelegramRelaySettingsModal()"><i class="ph ph-gear-six"></i> 设置</button>
+                                <button class="btn btn-ghost btn-sm" type="button" onclick="openTelegramRelayLogModal()"><i class="ph ph-terminal-window"></i> 日志</button>
+                            </div>
+                        </div>
+                        <div class="card-body telegram-module-body">
+                            <div class="telegram-destination"><i class="ph ph-folder-open"></i><span>上传到 TelDrive：<strong id="telegramChannelsDestination">默认上传目录</strong></span><button type="button" class="btn btn-ghost btn-sm" onclick="openTelegramRelaySettingsModal()">修改</button></div>
+                            <div id="telegramRelayLoginPanel" style="display:none; margin-top:16px; padding:16px; border:1px solid var(--border); border-radius:8px; background:var(--bg-input);">
+                                <div id="telegramRelayLoginText" style="font-weight:600; color:var(--text-primary); margin-bottom:12px;">Telegram 账号登录状态检查中...</div>
+                                <img id="telegramRelayQrImg" src="" onclick="refreshTelegramRelayQr(true)" title="点击二维码刷新" style="display:none; margin:0 auto; max-width:100%; height:auto; border-radius:12px; border:2px solid var(--border); cursor:pointer;" width="220">
+                                <div id="telegramRelayQrHint" style="display:none; margin-top:10px; font-size:13px; color:var(--text-secondary); text-align:center;"></div>
+                                <form id="telegramRelay2faForm" style="display:none; max-width:320px; margin-top:12px;">
+                                    <div class="form-group"><label for="telegramRelayPassword">Telegram 账号两步验证密码</label><input type="password" id="telegramRelayPassword" class="form-input" placeholder="输入云密码"></div>
+                                    <button type="submit" class="btn btn-primary btn-sm" style="margin-top:8px;"><i class="ph ph-key"></i> 提交</button>
+                                </form>
+                            </div>
+                            <div class="segmented-control telegram-module-tabs" role="tablist" aria-label="Telegram 功能">
+                                <button type="button" id="telegramTasksTab" class="segmented-btn active" role="tab" aria-selected="true" aria-controls="telegramTasksPanel" onclick="setTelegramModuleMode('tasks')"><i class="ph ph-cloud-arrow-down"></i><span>回源与下载任务</span></button>
+                                <button type="button" id="telegramChannelsTab" class="segmented-btn" role="tab" aria-selected="false" aria-controls="telegramChannelsPanel" tabindex="-1" onclick="setTelegramModuleMode('channels')"><i class="ph ph-video-camera"></i><span>频道视频</span></button>
+                            </div>
+                        </div>
+                    </div>
+                    <div id="telegramTasksPanel" role="tabpanel" aria-labelledby="telegramTasksTab">
                     <div class="card">
                         <div class="card-header" style="flex-wrap: wrap; gap: 12px; align-items: center;">
                             <div class="a2td-header-main">
-                                <h3><i class="ph ph-cloud-arrow-down"></i> Telegram 回源重传队列</h3>
+                                <h3><i class="ph ph-cloud-arrow-down"></i> 回源与频道下载队列</h3>
 
                                 <div class="a2td-filter-group" id="t2tdRelayTaskFilters">
                                     <button class="a2td-filter-btn active" data-relay-filter="all" onclick="setT2TDRelayFilter('all')">全部</button>
@@ -1662,30 +1797,48 @@
                                 </div>
                             </div>
                             <div class="page-actions" style="display:flex; flex-wrap: wrap; gap:8px;">
-                                <button class="btn btn-ghost btn-sm btn-action btn-action-neutral" onclick="openTelegramRelaySettingsModal()"><i class="ph ph-gear-six"></i> 设置</button>
-                                <button class="btn btn-ghost btn-sm btn-action btn-action-neutral" onclick="openTelegramRelayLogModal()"><i class="ph ph-terminal-window"></i> 日志</button>
                                 <button class="btn btn-ghost btn-sm btn-action btn-action-danger" data-relay-bulk-action="clear-failed" onclick="t2tdRelayBulkAction('clear-failed')"><i class="ph ph-warning-circle"></i> 清理失败</button>
                                 <button class="btn btn-ghost btn-sm btn-action btn-action-neutral" data-relay-bulk-action="clear-terminal" onclick="t2tdRelayBulkAction('clear-terminal')"><i class="ph ph-check-circle"></i> 清理已完成/已取消</button>
                                 <button class="btn btn-ghost btn-sm btn-action btn-action-neutral" onclick="loadT2TDRelayJobs(true)"><i class="ph ph-arrows-clockwise"></i> 刷新</button>
                             </div>
                         </div>
                         <div class="card-body" style="padding:16px">
-                            <div id="telegramRelayLoginPanel" style="display:none; margin-bottom:16px; padding:16px; border:1px solid var(--border); border-radius:8px; background:var(--surface-muted);">
-                                <div id="telegramRelayLoginText" style="font-weight:600; color:var(--text-primary); margin-bottom:12px;">回源账号登录状态检查中...</div>
-                                <img id="telegramRelayQrImg" src="" onclick="refreshTelegramRelayQr(true)" title="点击二维码刷新" style="display:none; margin:0 auto; border-radius:12px; border:2px solid var(--border); cursor:pointer;" width="220">
-                                <div id="telegramRelayQrHint" style="display:none; margin-top:10px; font-size:13px; color:var(--text-secondary); text-align:center;"></div>
-                                <form id="telegramRelay2faForm" style="display:none; max-width:320px; margin-top:12px;">
-                                    <div class="form-group">
-                                        <label>回源账号两步验证密码</label>
-                                        <input type="password" id="telegramRelayPassword" class="form-input" placeholder="输入云密码">
-                                    </div>
-                                    <button type="submit" class="btn btn-primary btn-sm" style="margin-top:8px;"><i class="ph ph-key"></i> 提交</button>
-                                </form>
-                            </div>
                             <div id="telegramRelayBarsContainer" style="display:none;">
                                 <div id="telegramRelayBars"></div>
                             </div>
                             <div id="telegramRelayEmptyPlaceholder" class="log-empty" style="padding:40px;"><i class="ph ph-tray"></i> 队列空闲中</div>
+                        </div>
+                    </div>
+                    </div>
+                    <div id="telegramChannelsPanel" role="tabpanel" aria-labelledby="telegramChannelsTab" hidden>
+                        <div class="telegram-channel-layout">
+                            <section class="card telegram-channel-sidebar" aria-labelledby="telegramChannelsHeading">
+                                <div class="card-header"><h3 id="telegramChannelsHeading"><i class="ph ph-broadcast"></i> 监控频道</h3><button type="button" class="btn btn-ghost btn-sm telegram-icon-button" onclick="loadTelegramChannelsPage(true)" aria-label="刷新频道列表"><i class="ph ph-arrows-clockwise"></i></button></div>
+                                <div class="card-body">
+                                    <form id="telegramChannelAddForm" class="telegram-channel-add-form">
+                                        <label for="telegramChannelReference">添加频道</label>
+                                        <input id="telegramChannelReference" class="form-input" placeholder="@频道名、t.me 链接或 -100…" autocomplete="off" required maxlength="512" aria-describedby="telegramChannelAddHint">
+                                        <button id="telegramChannelAddBtn" type="submit" class="btn btn-primary btn-sm"><i class="ph ph-plus"></i> 添加监控</button>
+                                        <p class="telegram-channel-hint" id="telegramChannelAddHint">使用上方已登录的 Telegram 账号。请先确保该账号可以访问频道。</p>
+                                    </form>
+                                    <div id="telegramChannelsList" class="telegram-channels-list" aria-label="已添加的频道"></div>
+                                </div>
+                            </section>
+                            <section class="card telegram-channel-videos" aria-labelledby="telegramChannelVideosTitle">
+                                <div class="card-header telegram-channel-video-heading"><div><h3 id="telegramChannelVideosTitle"><i class="ph ph-video-camera"></i> 频道视频</h3><p class="telegram-channel-hint" id="telegramChannelSummary">添加或选择一个频道</p></div><div class="telegram-channel-actions"><button id="telegramChannelScanBtn" class="btn btn-ghost btn-sm" type="button" onclick="scanTelegramChannel(false)" disabled><i class="ph ph-arrows-clockwise"></i> 刷新最新</button><button id="telegramChannelHistoryBtn" class="btn btn-ghost btn-sm" type="button" onclick="scanTelegramChannel(true)" disabled><i class="ph ph-clock-counter-clockwise"></i> 扫描更早</button></div></div>
+                                <div class="card-body">
+                                    <p class="telegram-channel-hint telegram-channel-explanation">监控只更新视频列表，勾选后才会下载并上传。上传完成后清理服务器临时文件，源频道消息保留。受保护的视频仅在 Telegram 接口允许时尝试直接下载；限制无法绕过时会显示具体错误。</p>
+                                    <div id="telegramChannelsNotice" class="telegram-channel-notice" role="status" aria-live="polite" hidden></div>
+                                    <div class="telegram-channel-selection">
+                                        <label class="telegram-channel-select-label"><input type="checkbox" id="telegramVideosSelectAll" onchange="selectTelegramChannelVideos(this.checked)" disabled><span>全选已显示</span></label>
+                                        <span id="telegramVideosSelectionSummary" class="telegram-channel-hint">已选 0 项</span>
+                                        <button id="telegramVideosClearSelection" class="btn btn-ghost btn-sm" type="button" onclick="clearTelegramVideoSelection()" disabled>取消选择</button>
+                                        <button id="telegramVideosDownloadBtn" class="btn btn-primary btn-sm" type="button" onclick="downloadTelegramChannelVideos()" disabled><i class="ph ph-cloud-arrow-up"></i> 下载并上传</button>
+                                    </div>
+                                    <div id="telegramChannelVideos" class="telegram-video-list" aria-live="polite"></div>
+                                    <div class="telegram-channel-load-more"><button id="telegramVideosLoadMoreBtn" class="btn btn-ghost btn-sm" type="button" onclick="loadTelegramChannelVideos(true)" hidden>加载更多已收录视频</button><span id="telegramVideosCount" class="telegram-channel-hint"></span></div>
+                                </div>
+                            </section>
                         </div>
                     </div>
                 </div>
@@ -1826,50 +1979,53 @@
                 <div class="page page-fill" id="page-pikpakAccounts">
                     <div class="pikpak-account-layout">
                         <div class="card pikpak-account-add-panel">
-                            <div class="card-header"><h3><i class="ph-fill ph-cloud-plus"></i> 添加 PikPak 账号</h3></div>
+                            <div class="card-header"><h3><i class="ph ph-user-plus" aria-hidden="true"></i> 添加账号</h3></div>
                             <div class="card-body">
-                                <div class="form-group">
-                                    <label>任务并发数</label>
-                                    <div style="display:flex; gap:10px; align-items:center;">
-                                        <input class="form-input" type="number" id="pikpakParseConcurrency" min="1" max="16" value="1">
-                                        <button class="btn btn-ghost btn-sm" onclick="savePikpakSchedulerConfig()"><i class="ph ph-floppy-disk"></i> 保存</button>
-                                    </div>
-                                </div>
-                                <div class="field-grid cols-1" style="margin-top:18px;">
+                                <div class="field-grid">
                                     <div class="form-group">
-                                        <label>登录方式</label>
+                                        <label id="pikpakAccountLoginModeLabel">登录方式</label>
                                         <input type="hidden" id="pikpakAccountLoginMode" value="password">
-                                        <div class="segmented-control" id="pikpakAccountLoginModeSwitch">
-                                            <button type="button" class="segmented-btn active" data-mode="password" onclick="updatePikpakLoginMode('pikpakAccountLoginMode', 'pikpakAccountLoginModeSwitch', 'password', true)">
-                                                <i class="ph ph-user"></i><span>账号密码登录</span>
+                                        <div class="segmented-control" id="pikpakAccountLoginModeSwitch" role="group" aria-labelledby="pikpakAccountLoginModeLabel">
+                                            <button type="button" class="segmented-btn active" data-mode="password" aria-pressed="true" onclick="updatePikpakLoginMode('pikpakAccountLoginMode', 'pikpakAccountLoginModeSwitch', 'password', true)">
+                                                <i class="ph ph-user" aria-hidden="true"></i><span>账号密码</span>
                                             </button>
-                                            <button type="button" class="segmented-btn" data-mode="token" onclick="updatePikpakLoginMode('pikpakAccountLoginMode', 'pikpakAccountLoginModeSwitch', 'token', true)">
-                                                <i class="ph ph-key"></i><span>Encoded Token 登录</span>
+                                            <button type="button" class="segmented-btn" data-mode="token" aria-pressed="false" onclick="updatePikpakLoginMode('pikpakAccountLoginMode', 'pikpakAccountLoginModeSwitch', 'token', true)">
+                                                <i class="ph ph-key" aria-hidden="true"></i><span>Token</span>
                                             </button>
                                         </div>
                                     </div>
-                                    <div class="form-group"><label>账号名称</label><input class="form-input" type="text" id="pikpakAccountName" placeholder="例如：主账号"></div>
+                                    <div class="form-group"><label for="pikpakAccountName">账号名称<span class="pikpak-field-optional">选填</span></label><input class="form-input" type="text" id="pikpakAccountName" placeholder="例如：主账号"></div>
                                 </div>
-                                <div class="field-grid cols-1" id="pikpakAccountPasswordFields">
-                                    <div class="form-group"><label>Email / 账号</label><input class="form-input" type="text" id="pikpakAccountUsername" placeholder="email@example.com"></div>
-                                    <div class="form-group"><label>密码</label><input class="form-input" type="password" id="pikpakAccountPassword" placeholder="******"></div>
+                                <div class="field-grid" id="pikpakAccountPasswordFields">
+                                    <div class="form-group"><label for="pikpakAccountUsername">邮箱 / 账号</label><input class="form-input" type="text" id="pikpakAccountUsername" placeholder="email@example.com" autocomplete="username" spellcheck="false"></div>
+                                    <div class="form-group"><label for="pikpakAccountPassword">密码</label><input class="form-input" type="password" id="pikpakAccountPassword" placeholder="输入账号密码" autocomplete="current-password"></div>
                                 </div>
-                                <div class="field-grid cols-1" id="pikpakAccountTokenFields" style="display:none;">
-                                    <div class="form-group"><label>Encoded Token</label><input class="form-input" type="password" id="pikpakAccountToken" placeholder="请直接粘贴 encoded_token" autocomplete="off"></div>
+                                <div class="field-grid" id="pikpakAccountTokenFields" style="display:none;">
+                                    <div class="form-group"><label for="pikpakAccountToken">Encoded Token</label><input class="form-input" type="password" id="pikpakAccountToken" placeholder="粘贴 encoded_token" autocomplete="off" spellcheck="false"></div>
                                 </div>
-                                <button class="btn btn-primary" id="pikpakAddAccountBtn" onclick="addPikpakAccount()"><i class="ph ph-plus"></i> 添加账号</button>
+                                <div class="pikpak-form-actions">
+                                    <button class="btn btn-primary" type="button" id="pikpakAddAccountBtn" onclick="addPikpakAccount()"><i class="ph ph-plus" aria-hidden="true"></i> 添加账号</button>
+                                </div>
                             </div>
                         </div>
-                        <div class="pikpak-account-pool-panel">
+                        <div class="card pikpak-account-pool-panel">
+                            <div class="card-header">
+                                <div class="pikpak-account-heading">
+                                    <h3><i class="ph ph-cloud" aria-hidden="true"></i> PikPak 账号</h3>
+                                    <p>解析任务按启用账号轮询分配</p>
+                                </div>
+                                <button class="btn btn-ghost btn-sm" type="button" id="pikpakAccountsRefreshBtn" onclick="loadPikpakAccountsPage(true)"><i class="ph ph-arrows-clockwise" aria-hidden="true"></i> 刷新</button>
+                            </div>
                             <div class="pikpak-account-pool-body">
                                 <div class="pikpak-account-toolbar">
-                                    <div>
-                                        <h3 class="picker-panel-title"><i class="ph ph-identification-card"></i> 已添加账号</h3>
-                                        <p class="picker-panel-subtitle">解析任务会按启用账号轮询分配</p>
+                                    <div class="pikpak-scheduler-control">
+                                        <label for="pikpakParseConcurrency">任务并发数</label>
+                                        <input class="form-input" type="number" id="pikpakParseConcurrency" min="1" max="16" value="1">
+                                        <button class="btn btn-ghost btn-sm" type="button" onclick="savePikpakSchedulerConfig()"><i class="ph ph-check" aria-hidden="true"></i> 保存</button>
                                     </div>
-                                    <button class="btn btn-ghost btn-sm" onclick="loadPikpakAccountsPage(true)"><i class="ph ph-arrows-clockwise"></i> 刷新</button>
+                                    <span class="pikpak-account-count" id="pikpakAccountCount" role="status" aria-live="polite"></span>
                                 </div>
-                                <div class="pikpak-account-list" id="pikpakAccountList"></div>
+                                <div class="pikpak-account-list" id="pikpakAccountList" aria-live="polite"></div>
                             </div>
                         </div>
                     </div>
@@ -2164,23 +2320,30 @@
     </div>
 
     <div id="a2tdToastContainer" class="app-toast-container"></div>
-    <div id="pikpakErrorsModal" class="pikpak-errors-modal" onclick="closePikpakAccountErrorsModal(event)">
-        <div class="pikpak-errors-dialog" onclick="event.stopPropagation()">
+    <div id="pikpakErrorsModal" class="pikpak-errors-modal" aria-hidden="true" onclick="closePikpakAccountErrorsModal(event)" onkeydown="handlePikpakErrorsKeydown(event)">
+        <div class="pikpak-errors-dialog" role="dialog" aria-modal="true" aria-labelledby="pikpakErrorsTitle" aria-describedby="pikpakErrorsAccount" onclick="event.stopPropagation()">
             <div class="pikpak-errors-header">
-                <h3 class="picker-panel-title" id="pikpakErrorsTitle"><i class="ph ph-warning-circle"></i> 账号错误</h3>
-                <div style="display:flex; gap:8px; align-items:center;">
-                    <button class="btn btn-ghost btn-sm" id="pikpakClearErrorsBtn" onclick="clearPikpakAccountErrors()"><i class="ph ph-trash"></i> 清空</button>
-                    <button class="btn btn-ghost btn-sm" onclick="closePikpakAccountErrorsModal()"><i class="ph ph-x"></i></button>
+                <div class="pikpak-errors-heading">
+                    <i class="ph ph-warning-circle" aria-hidden="true"></i>
+                    <div>
+                        <h3 id="pikpakErrorsTitle">账号错误</h3>
+                        <p class="pikpak-errors-account" id="pikpakErrorsAccount"></p>
+                    </div>
                 </div>
+                <button class="btn btn-ghost pikpak-errors-close" type="button" id="pikpakErrorsCloseBtn" aria-label="关闭错误详情" onclick="closePikpakAccountErrorsModal()"><i class="ph ph-x" aria-hidden="true"></i></button>
             </div>
-            <div class="pikpak-errors-list" id="pikpakErrorsList"></div>
+            <div class="pikpak-errors-list" id="pikpakErrorsList" tabindex="0" aria-label="错误记录" aria-live="polite"></div>
+            <div class="pikpak-errors-footer">
+                <span class="pikpak-errors-summary" id="pikpakErrorsSummary" role="status"></span>
+                <button class="btn btn-ghost btn-sm btn-action-danger" type="button" id="pikpakClearErrorsBtn" onclick="clearPikpakAccountErrors()" disabled><i class="ph ph-trash" aria-hidden="true"></i> 清空记录</button>
+            </div>
         </div>
     </div>
 
     <div id="telegramRelaySettingsModal" class="telegram-relay-settings-modal" aria-hidden="true" onclick="closeTelegramRelaySettingsModal(event)">
         <div class="telegram-relay-settings-dialog" role="dialog" aria-modal="true" aria-labelledby="telegramRelaySettingsTitle" onclick="event.stopPropagation()">
             <div class="telegram-relay-settings-header">
-                <h3 class="picker-panel-title" id="telegramRelaySettingsTitle"><i class="ph ph-cloud-arrow-down"></i> Telegram 回源设置</h3>
+                <h3 class="picker-panel-title" id="telegramRelaySettingsTitle"><i class="ph ph-cloud-arrow-down"></i> Telegram 回源与频道设置</h3>
                 <button class="btn btn-ghost btn-sm" type="button" aria-label="关闭" onclick="closeTelegramRelaySettingsModal()"><i class="ph ph-x"></i></button>
             </div>
             <div class="telegram-relay-settings-body">
@@ -2192,7 +2355,7 @@
                     </div>
                 </label>
                 <div class="form-group">
-                    <label for="telegramRelayTargetPath">回源上传目录（TelDrive）</label>
+                    <label for="telegramRelayTargetPath">回源与频道上传目录（TelDrive）</label>
                     <div class="teldrive-path-field">
                         <input class="form-input" type="text" id="telegramRelayTargetPath" placeholder="默认上传目录" autocomplete="off" spellcheck="false">
                         <button class="btn btn-ghost" type="button" id="telegramRelayBrowseBtn" title="选择 TelDrive 文件夹" aria-label="选择 TelDrive 文件夹" onclick="openTelDriveFolderPicker('telegramRelayTargetPath', this)"><i class="ph ph-folder-open"></i></button>
@@ -2247,7 +2410,8 @@
         </div>
     </div>
 
-    <script src="/static/app.js?v=20260908-relay-teldrive-target"></script>
+    <script src="/static/app.js?v=20261021-telegram-channels"></script>
+    <script src="/static/telegram-channels.js?v=20261021"></script>
 
 
 

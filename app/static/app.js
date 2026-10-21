@@ -801,6 +801,7 @@ function runPageSideEffects(name) {
     if (name === 'telegramrelay') {
         loadT2TDRelayJobs(true);
         loadT2TDState();
+        window.loadTelegramChannelsPage?.();
     }
     if (name === 'magnet' || name === 'share' || name === 'rss') syncRemotePushToggles();
     if (name === 'tel2teldrive') loadT2TDState();
@@ -2956,6 +2957,10 @@ let pikpakAccountsState = {
     accounts: [],
     parseConcurrency: 1,
     activeErrorAccountId: '',
+    errorRequestId: 0,
+    errorCount: 0,
+    errorClearing: false,
+    errorReturnFocus: null,
 };
 
 function togglePikpakAccountLoginMode() {
@@ -3065,13 +3070,15 @@ function getPikpakAccountHealthView(account) {
 function renderPikpakAccountCards(errorMessage = '') {
     const list = document.getElementById('pikpakAccountList');
     if (!list) return;
+    const accounts = pikpakAccountsState.accounts || [];
+    const count = document.getElementById('pikpakAccountCount');
+    if (count) count.textContent = errorMessage ? '读取失败' : `${accounts.length} 个账号 · ${accounts.filter(account => account.enabled !== false).length} 个启用`;
     if (errorMessage) {
-        list.innerHTML = `<div class="log-empty"><i class="ph ph-warning-circle"></i> ${escapeA2TDHtml(errorMessage)}</div>`;
+        list.innerHTML = `<div class="pikpak-empty-state" role="alert"><i class="ph ph-warning-circle" aria-hidden="true"></i><strong>无法读取账号</strong><span>${escapeA2TDHtml(errorMessage)}</span></div>`;
         return;
     }
-    const accounts = pikpakAccountsState.accounts || [];
     if (!accounts.length) {
-        list.innerHTML = '<div class="log-empty"><i class="ph ph-cloud-slash"></i> 暂无 PikPak 账号</div>';
+        list.innerHTML = '<div class="pikpak-empty-state"><i class="ph ph-users" aria-hidden="true"></i><strong>还没有添加账号</strong><span>添加 PikPak 账号后，可在这里查看状态和管理账号。</span></div>';
         return;
     }
     list.innerHTML = accounts.map(account => {
@@ -3080,26 +3087,36 @@ function renderPikpakAccountCards(errorMessage = '') {
         const vipView = getPikpakAccountVipView(account);
         const healthView = getPikpakAccountHealthView(account);
         const errorButton = errorCount > 0
-            ? `<button class="btn btn-ghost btn-sm pikpak-error-chip" onclick="openPikpakAccountErrorsModal(${escapeA2TDJsArg(account.id)})"><i class="ph ph-warning-circle"></i> 出现 ${errorCount} 个错误</button>`
+            ? `<button class="btn btn-ghost btn-sm pikpak-error-chip" onclick="openPikpakAccountErrorsModal(${escapeA2TDJsArg(account.id)})"><i class="ph ph-warning-circle" aria-hidden="true"></i> 错误记录 ${errorCount}</button>`
             : '';
         return `
             <div class="pikpak-account-card ${enabled ? 'is-enabled' : 'is-disabled'} ${healthView.className === 'is-error' ? 'health-failed' : ''} ${errorCount > 0 ? 'has-errors' : ''}">
                 <div class="pikpak-account-head">
                     <div class="pikpak-account-title">
-                        <i class="ph ${enabled ? 'ph-cloud-check' : 'ph-cloud-slash'}"></i>
-                        <span class="pikpak-account-name">${escapeA2TDHtml(account.name || 'PikPak 账号')}</span>
-                        <span class="pikpak-vip-pill ${escapeA2TDHtml(vipView.className)}"><i class="ph ${escapeA2TDHtml(vipView.icon)}"></i> ${escapeA2TDHtml(vipView.title)}</span>
-                        <span class="pikpak-health-pill ${escapeA2TDHtml(healthView.className)}" title="${escapeA2TDHtml(healthView.detail || '')}"><i class="ph ${escapeA2TDHtml(healthView.icon)}"></i> ${escapeA2TDHtml(healthView.title)}</span>
+                        <i class="ph ${enabled ? 'ph-cloud-check' : 'ph-cloud-slash'}" aria-hidden="true"></i>
+                        <div class="pikpak-account-identity">
+                            <div class="pikpak-account-name">${escapeA2TDHtml(account.name || 'PikPak 账号')}</div>
+                            <div class="pikpak-account-login-label">${normalizePikpakLoginMode(account.login_mode) === 'token' ? 'Token 登录' : '账号密码登录'}</div>
+                        </div>
                     </div>
-                    <span class="wizard-status-badge ${enabled ? 'success' : 'info'}">${enabled ? '启用' : '停用'}</span>
+                    <span class="wizard-status-badge ${enabled ? 'success' : 'info'}">${enabled ? '已启用' : '已停用'}</span>
                 </div>
+                <div class="pikpak-account-meta">
+                    <span class="pikpak-vip-pill ${escapeA2TDHtml(vipView.className)}"><i class="ph ${escapeA2TDHtml(vipView.icon)}" aria-hidden="true"></i> 会员：${escapeA2TDHtml(vipView.title)}</span>
+                    <span class="pikpak-health-pill ${escapeA2TDHtml(healthView.className)}"><i class="ph ${escapeA2TDHtml(healthView.icon)}" aria-hidden="true"></i> ${escapeA2TDHtml(healthView.title)}</span>
+                </div>
+                ${healthView.className === 'is-error' && healthView.detail ? `<p class="pikpak-health-detail">${escapeA2TDHtml(healthView.detail)}</p>` : ''}
                 <div class="pikpak-account-actions">
-                    <button class="btn btn-ghost btn-sm" onclick="testPikpakAccount(${escapeA2TDJsArg(account.id)})"><i class="ph ph-plugs-connected"></i> 测试</button>
-                    <button class="btn btn-ghost btn-sm" onclick="refreshPikpakAccountLogin(${escapeA2TDJsArg(account.id)}, this)"><i class="ph ph-arrows-clockwise"></i> 重新获取登录信息</button>
+                    <div class="pikpak-account-action-group">
+                    <button class="btn btn-ghost btn-sm" onclick="testPikpakAccount(${escapeA2TDJsArg(account.id)})"><i class="ph ph-plugs-connected" aria-hidden="true"></i> 测试连接</button>
+                    <button class="btn btn-ghost btn-sm" title="重新获取登录信息" onclick="refreshPikpakAccountLogin(${escapeA2TDJsArg(account.id)}, this)"><i class="ph ph-arrows-clockwise" aria-hidden="true"></i> 刷新登录</button>
+                    ${errorButton}
+                    </div>
+                    <div class="pikpak-account-action-group">
                     <button class="btn btn-ghost btn-sm" onclick="togglePikpakAccountEnabled(${escapeA2TDJsArg(account.id)}, ${enabled ? 'false' : 'true'})"><i class="ph ${enabled ? 'ph-pause-circle' : 'ph-play-circle'}"></i> ${enabled ? '停用' : '启用'}</button>
                     <button class="btn btn-ghost btn-sm" onclick="renamePikpakAccount(${escapeA2TDJsArg(account.id)})"><i class="ph ph-pencil-simple"></i> 重命名</button>
-                    ${errorButton}
                     <button class="btn btn-ghost btn-sm btn-action-danger" onclick="deletePikpakAccount(${escapeA2TDJsArg(account.id)})"><i class="ph ph-trash"></i> 删除</button>
+                    </div>
                 </div>
             </div>`;
     }).join('');
@@ -3246,53 +3263,128 @@ async function deletePikpakAccount(accountId) {
 }
 
 async function openPikpakAccountErrorsModal(accountId, accountName = '') {
+    const requestId = ++pikpakAccountsState.errorRequestId;
     pikpakAccountsState.activeErrorAccountId = accountId;
+    pikpakAccountsState.errorCount = 0;
+    pikpakAccountsState.errorClearing = false;
     const account = getPikpakAccountById(accountId);
     accountName = accountName || account?.name || '';
     const modal = document.getElementById('pikpakErrorsModal');
-    const title = document.getElementById('pikpakErrorsTitle');
+    const subtitle = document.getElementById('pikpakErrorsAccount');
     const list = document.getElementById('pikpakErrorsList');
-    if (title) title.innerHTML = `<i class="ph ph-warning-circle"></i> ${escapeA2TDHtml(accountName || 'PikPak 账号')} 错误`;
-    if (list) list.innerHTML = '<div class="log-empty"><span class="spinner"></span> 加载中...</div>';
+    const summary = document.getElementById('pikpakErrorsSummary');
+    const clear = document.getElementById('pikpakClearErrorsBtn');
+    if (!modal?.classList.contains('show')) pikpakAccountsState.errorReturnFocus = document.activeElement;
+    if (subtitle) subtitle.textContent = accountName || 'PikPak 账号';
+    if (list) {
+        list.innerHTML = '<div class="pikpak-empty-state"><span class="spinner"></span><span>正在读取错误记录…</span></div>';
+        list.setAttribute('aria-busy', 'true');
+        list.scrollTop = 0;
+    }
+    if (summary) summary.textContent = '正在加载';
+    if (clear) {
+        clear.disabled = true;
+        clear.innerHTML = '<i class="ph ph-trash" aria-hidden="true"></i> 清空记录';
+    }
     modal?.classList.add('show');
+    modal?.setAttribute('aria-hidden', 'false');
+    const layout = document.querySelector?.('.layout');
+    if (layout) layout.inert = true;
+    document.getElementById('pikpakErrorsCloseBtn')?.focus();
     try {
         const resp = await fetch(`/api/pikpak/accounts/${encodeURIComponent(accountId)}/errors`, { cache: 'no-store' });
         const data = await readJsonSafe(resp);
-        if (!resp.ok || data.success === false) throw new Error(data.message || '读取错误失败');
+        if (requestId !== pikpakAccountsState.errorRequestId) return;
+        if (!resp.ok || data.success === false) throw new Error(data.detail || data.message || '读取错误失败');
         const errors = Array.isArray(data.errors) ? data.errors : [];
+        pikpakAccountsState.errorCount = errors.length;
+        if (clear) clear.disabled = !errors.length;
+        if (summary) summary.textContent = errors.length ? `显示最近 ${errors.length} 条记录` : '暂无错误记录';
         if (!list) return;
         if (!errors.length) {
-            list.innerHTML = '<div class="log-empty"><i class="ph ph-check-circle"></i> 暂无错误</div>';
+            list.innerHTML = '<div class="pikpak-empty-state"><i class="ph ph-check-circle" aria-hidden="true"></i><strong>暂无错误记录</strong></div>';
             return;
         }
+        const stageLabels = {magnet_parse: '磁链解析', share_parse: '分享解析', direct_add: '添加下载', share_download: '分享下载', account_health: '账号检测'};
         list.innerHTML = errors.map(item => `
-            <div class="pikpak-error-row">
-                <strong>${escapeA2TDHtml(item.stage || 'parse')} · ${escapeA2TDHtml(formatProgressLogTime(item.created_at))}</strong>
-                <p>${escapeA2TDHtml(item.message || '')}</p>
-                ${item.link ? `<p>${escapeA2TDHtml(item.link)}</p>` : ''}
-            </div>
+            <article class="pikpak-error-row">
+                <div class="pikpak-error-row-header">
+                    <span class="pikpak-error-stage"><i class="ph ph-warning-circle" aria-hidden="true"></i>${escapeA2TDHtml(Object.hasOwn(stageLabels, item.stage) ? stageLabels[item.stage] : (item.stage || '任务处理'))}</span>
+                    <span class="pikpak-error-time">${escapeA2TDHtml(formatPikpakAccountDate(item.created_at, true) || '时间未知')}</span>
+                </div>
+                <p class="pikpak-error-message">${escapeA2TDHtml(item.message || '未提供错误详情')}</p>
+                ${item.link ? `<dl class="pikpak-error-source"><dt>相关链接</dt><dd>${escapeA2TDHtml(item.link)}</dd></dl>` : ''}
+            </article>
         `).join('');
     } catch (e) {
-        if (list) list.innerHTML = `<div class="log-empty"><i class="ph ph-warning-circle"></i> ${escapeA2TDHtml(e.message || '读取错误失败')}</div>`;
+        if (requestId !== pikpakAccountsState.errorRequestId) return;
+        if (summary) summary.textContent = '读取失败';
+        if (list) list.innerHTML = `<div class="pikpak-empty-state" role="alert"><i class="ph ph-warning-circle" aria-hidden="true"></i><strong>无法读取错误记录</strong><span>${escapeA2TDHtml(e.message || '读取错误失败')}</span><button class="btn btn-ghost btn-sm" type="button" onclick="openPikpakAccountErrorsModal(${escapeA2TDJsArg(accountId)})">重新加载</button></div>`;
+    } finally {
+        if (requestId === pikpakAccountsState.errorRequestId) list?.setAttribute('aria-busy', 'false');
     }
 }
 
 function closePikpakAccountErrorsModal(event) {
     if (event && event.target && event.currentTarget && event.target !== event.currentTarget) return;
+    pikpakAccountsState.errorRequestId += 1;
+    pikpakAccountsState.activeErrorAccountId = '';
+    pikpakAccountsState.errorCount = 0;
     document.getElementById('pikpakErrorsModal')?.classList.remove('show');
+    document.getElementById('pikpakErrorsModal')?.setAttribute('aria-hidden', 'true');
+    const layout = document.querySelector?.('.layout');
+    if (layout) layout.inert = false;
+    const trigger = pikpakAccountsState.errorReturnFocus;
+    if (trigger?.isConnected) trigger.focus();
+    else document.getElementById('pikpakAccountsRefreshBtn')?.focus();
+    pikpakAccountsState.errorReturnFocus = null;
+}
+
+function handlePikpakErrorsKeydown(event) {
+    if (event.key === 'Escape') {
+        event.preventDefault();
+        event.stopPropagation();
+        closePikpakAccountErrorsModal();
+    } else if (event.key === 'Tab') {
+        const controls = [...document.getElementById('pikpakErrorsModal').querySelectorAll('button:not(:disabled), [tabindex="0"]')];
+        const first = controls[0];
+        const last = controls[controls.length - 1];
+        if (event.shiftKey && document.activeElement === first) {
+            event.preventDefault();
+            last?.focus();
+        } else if (!event.shiftKey && document.activeElement === last) {
+            event.preventDefault();
+            first?.focus();
+        }
+    }
 }
 
 async function clearPikpakAccountErrors() {
     const accountId = pikpakAccountsState.activeErrorAccountId;
-    if (!accountId) return;
+    if (!accountId || !pikpakAccountsState.errorCount || pikpakAccountsState.errorClearing) return;
+    const requestId = pikpakAccountsState.errorRequestId;
+    const clear = document.getElementById('pikpakClearErrorsBtn');
+    pikpakAccountsState.errorClearing = true;
+    if (clear) {
+        clear.disabled = true;
+        clear.innerHTML = '<span class="spinner"></span> 正在清空';
+    }
     try {
         const resp = await fetch(`/api/pikpak/accounts/${encodeURIComponent(accountId)}/errors`, { method: 'DELETE' });
         const data = await readJsonSafe(resp);
-        if (!resp.ok || data.success === false) throw new Error(data.message || '清空错误失败');
-        await openPikpakAccountErrorsModal(accountId, document.getElementById('pikpakErrorsTitle')?.textContent?.replace('错误', '').trim() || '');
+        if (!resp.ok || data.success === false) throw new Error(data.detail || data.message || '清空错误失败');
+        if (requestId === pikpakAccountsState.errorRequestId) await openPikpakAccountErrorsModal(accountId);
         await loadPikpakAccountsPage();
     } catch (e) {
         if (typeof showA2TDToast === 'function') showA2TDToast(e.message || '清空错误失败', 'error');
+    } finally {
+        if (requestId === pikpakAccountsState.errorRequestId) {
+            pikpakAccountsState.errorClearing = false;
+            if (clear) {
+                clear.disabled = !pikpakAccountsState.errorCount;
+                clear.innerHTML = '<i class="ph ph-trash" aria-hidden="true"></i> 清空记录';
+            }
+        }
     }
 }
 
@@ -3763,6 +3855,7 @@ window.onload = async () => {
             } else if (data.type === 'telegram_delete_audit') {
                 upsertT2TDTelegramDeleteLog(data.payload || data);
             } else if(data.type === "relay_job_update") {
+                window.updateTelegramChannelJob?.(data.payload || data);
                 upsertT2TDRelayJob(data.payload || data);
             } else if(data.type === "relay_job_deleted") {
                 removeT2TDRelayJob((data.payload || data).job_id);
@@ -4391,6 +4484,7 @@ async function saveTelegramRelaySocksSettings(triggerInput = null, options = {})
                 },
             };
             applyTelegramRelayConfigToSettingsInputs(window.currentConfig.telegram_relay || {});
+            window.refreshTelegramChannelDestination?.();
             if (triggerInput) showFieldCheck(triggerInput);
             if (!options.quiet) setTelegramRelaySettingsStatus('已保存', 'success');
             return window.currentConfig.telegram_relay;
@@ -4513,6 +4607,8 @@ function normalizeT2TDRelayJob(item = {}) {
         job_id: String(item.job_id || '').trim(),
         source_channel_id: Number(item.source_channel_id || 0) || 0,
         source_message_id: Number(item.source_message_id || 0) || 0,
+        source_kind: String(item.source_kind || 'relay'),
+        source_title: String(item.source_title || ''),
         file_name: String(item.file_name || '未命名文件').trim() || '未命名文件',
         file_size: Number(item.file_size || 0) || 0,
         mime_type: String(item.mime_type || '').trim(),
@@ -4744,6 +4840,7 @@ function buildT2TDRelayJobCardContent(rawJob) {
     };
 
     pushMetaItem(view.label, job.status === 'failed' ? 'warning' : job.status === 'uploading' ? 'primary upload' : 'primary');
+    pushMetaItem(job.source_kind === 'channel' ? `频道视频${job.source_title ? ' · ' + escapeA2TDHtml(job.source_title) : ''}` : '消息回源', 'secondary');
     if (job.file_size > 0) pushMetaItem(`大小 ${escapeA2TDHtml(formatBytes(job.file_size, 0))}`);
     pushMetaItem(getT2TDRelayProgressText(job), mode === 'upload' ? 'primary upload' : 'secondary');
     if (job.status === 'downloading' && job.download_speed > 0) {

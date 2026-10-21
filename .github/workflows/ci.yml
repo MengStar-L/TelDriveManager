@@ -43,9 +43,11 @@ jobs:
       - name: Python tests
         run: python -B -m unittest discover -s tests -p 'test_*.py' -q
       - name: JavaScript tests
-        run: node --test tests/test_update_ui.js tests/test_telegram_log_escape.js tests/test_jellyfin_rename.js tests/test_pikpak_share_name_contract.js tests/test_unified_parse_input.js tests/test_unified_share_folder_rename.js tests/test_relay_settings_ui.js
+        run: node --test tests/test_update_ui.js tests/test_telegram_log_escape.js tests/test_jellyfin_rename.js tests/test_pikpak_share_name_contract.js tests/test_unified_parse_input.js tests/test_unified_share_folder_rename.js tests/test_relay_settings_ui.js tests/test_pikpak_accounts_ui.js tests/test_telegram_channels_ui.js
       - name: JavaScript syntax
         run: node --check app/static/app.js
+      - name: Telegram channel JavaScript syntax
+        run: node --check app/static/telegram-channels.js
       - name: Real systemd upgrade and rollback
         if: runner.os == 'Linux'
         run: sudo env TDM_SYSTEMD_TEST=1 PYTHONIOENCODING=utf-8 "$(command -v python)" -B -m unittest tests.test_update_process.SystemdUpdateTests -v
